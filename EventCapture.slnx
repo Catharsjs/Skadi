@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="EventCapture.App/EventCapture.App.csproj" />
+  <Project Path="EventCapture.Core/EventCapture.Core.csproj" />
+  <Project Path="EventCapture.Hardware/EventCapture.Hardware.csproj" />
+</Solution>
