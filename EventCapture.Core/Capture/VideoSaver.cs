@@ -15,7 +15,7 @@ public class VideoSaver
         Directory.CreateDirectory(outputFolder);
     }
 
-    public async Task<string> SaveVideoAsync(RingBuffer<FrameEntry> buffer, int fps = 10)
+    public async Task<string> SaveVideoAsync(RingBuffer<FrameEntry> buffer, int fps = 15)
     {
         var frames = buffer.ReadAll();
         if (frames.Length == 0)
