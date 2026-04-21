@@ -22,7 +22,7 @@ public partial class SettingsForm : Form
     private void BuildUI()
     {
         var screen = Screen.PrimaryScreen!.WorkingArea;
-        int panelWidth = (int)(screen.Width * 0.15);
+        int panelWidth = (int)(screen.Width * 0.18);
 
         Text = "EventCapture";
         FormBorderStyle = FormBorderStyle.None;
@@ -31,48 +31,41 @@ public partial class SettingsForm : Form
         StartPosition = FormStartPosition.Manual;
         Size = new Size(panelWidth, screen.Height);
         Location = new Point(screen.Right - panelWidth, 0);
-
         BackColor = Color.FromArgb(28, 28, 30);
         ForeColor = Color.FromArgb(240, 240, 240);
         Font = new Font("Segoe UI", 9);
 
-        int pad = 16;
-        int y = 20;
+        int pad = 20;
+        int y = 24;
         int w = panelWidth - pad * 2;
 
         // Header
-        var lblTitle = MakeLabel("EventCapture", pad, y, bold: true, size: 12);
+        var lblTitle = MakeLabel("EventCapture", pad, y, bold: true, size: 13);
         lblTitle.ForeColor = Color.FromArgb(0, 196, 160);
-        y += 30;
+        y += 28;
 
-        var lblStatus = MakeLabel("Buffer Active", pad, y);
-        lblStatus.ForeColor = Color.FromArgb(96, 96, 96);
-        y += 30;
+        var lblStatus = MakeLabel("● Buffer Active", pad, y, size: 9);
+        lblStatus.ForeColor = Color.FromArgb(0, 196, 160);
+        y += 32;
 
-        // Separator
-        y += 10;
-        var sep1 = new Panel { Location = new Point(pad, y), Size = new Size(w, 1), BackColor = Color.FromArgb(42, 42, 46) };
-        y += 16;
+        AddSeparator(pad, y, w); y += 20;
 
-        // Screenshot button
-        var btnScreenshot = MakeButton("Screenshot  Alt+F1", pad, y, w);
-        btnScreenshot.BackColor = Color.FromArgb(0, 196, 160);
-        btnScreenshot.ForeColor = Color.FromArgb(10, 46, 40);
-        btnScreenshot.Click += (s, e) => TakeScreenshot();
-        y += 42;
+        // Buttons
+        var btnScreenshot = MakeButton("Screenshot", pad, y, w, primary: true);
+        var lblHk1 = MakeLabel("Alt + F1", pad, y + 36, size: 8);
+        lblHk1.ForeColor = Color.FromArgb(80, 80, 80);
+        y += 60;
 
-        // Save Video button
-        var btnSaveVideo = MakeButton("Save Video  Alt+F2", pad, y, w);
-        btnSaveVideo.Click += (s, e) => SaveVideo();
-        y += 42;
+        var btnSaveVideo = MakeButton("Save Video", pad, y, w);
+        var lblHk2 = MakeLabel("Alt + F2", pad, y + 36, size: 8);
+        lblHk2.ForeColor = Color.FromArgb(80, 80, 80);
+        y += 60;
 
-        y += 10;
-        var sep2 = new Panel { Location = new Point(pad, y), Size = new Size(w, 1), BackColor = Color.FromArgb(42, 42, 46) };
-        y += 16;
+        AddSeparator(pad, y, w); y += 20;
 
         // FPS
-        var lblFps = MakeLabel("Frame Rate", pad, y);
-        _fpsValue = MakeLabel($"{FrameRate} fps", pad + w - 50, y);
+        var lblFps = MakeLabel("Frame Rate", pad, y, size: 9);
+        _fpsValue = MakeLabel($"{FrameRate} fps", pad + w - 45, y, size: 9);
         _fpsValue.ForeColor = Color.FromArgb(0, 196, 160);
         y += 22;
         _fpsSlider = new TrackBar
@@ -81,20 +74,23 @@ public partial class SettingsForm : Form
             Maximum = 60,
             Value = FrameRate,
             TickFrequency = 5,
-            Location = new Point(pad, y),
-            Width = w,
-            BackColor = Color.FromArgb(28, 28, 30)
+            Location = new Point(pad - 4, y),
+            Width = w + 8,
+            BackColor = Color.FromArgb(28, 28, 30),
+            Height = 32
         };
         _fpsSlider.ValueChanged += (s, e) =>
         {
             FrameRate = _fpsSlider.Value;
             _fpsValue.Text = $"{FrameRate} fps";
         };
-        y += 45;
+        y += 38;
+
+        AddSeparator(pad, y, w); y += 20;
 
         // Duration
-        var lblDuration = MakeLabel("Buffer Duration", pad, y);
-        _durationValue = MakeLabel($"{BufferDurationSeconds} sec", pad + w - 50, y);
+        var lblDuration = MakeLabel("Buffer Duration", pad, y, size: 9);
+        _durationValue = MakeLabel($"{BufferDurationSeconds} sec", pad + w - 45, y, size: 9);
         _durationValue.ForeColor = Color.FromArgb(0, 196, 160);
         y += 22;
         _durationSlider = new TrackBar
@@ -103,29 +99,34 @@ public partial class SettingsForm : Form
             Maximum = 300,
             Value = BufferDurationSeconds,
             TickFrequency = 30,
-            Location = new Point(pad, y),
-            Width = w,
-            BackColor = Color.FromArgb(28, 28, 30)
+            Location = new Point(pad - 4, y),
+            Width = w + 8,
+            BackColor = Color.FromArgb(28, 28, 30),
+            Height = 32
         };
         _durationSlider.ValueChanged += (s, e) =>
         {
             BufferDurationSeconds = _durationSlider.Value;
             _durationValue.Text = $"{BufferDurationSeconds} sec";
         };
-        y += 45;
+        y += 38;
 
-        y += 10;
-        var sep3 = new Panel { Location = new Point(pad, y), Size = new Size(w, 1), BackColor = Color.FromArgb(42, 42, 46) };
-        y += 16;
+        AddSeparator(pad, y, w); y += 20;
 
         // Save folder
-        var lblFolder = MakeLabel("Save Folder", pad, y);
+        var lblFolder = MakeLabel("Save Folder", pad, y, size: 9);
         y += 22;
-        _folderValue = MakeLabel(SaveFolder, pad, y);
-        _folderValue.ForeColor = Color.FromArgb(96, 96, 96);
-        _folderValue.Width = w;
-        _folderValue.AutoEllipsis = true;
-        y += 22;
+        _folderValue = new Label
+        {
+            Text = SaveFolder,
+            Location = new Point(pad, y),
+            Size = new Size(w, 32),
+            ForeColor = Color.FromArgb(80, 80, 80),
+            BackColor = Color.Transparent,
+            AutoEllipsis = true,
+            Font = new Font("Segoe UI", 8)
+        };
+        y += 36;
         var btnBrowse = MakeButton("Browse...", pad, y, w);
         btnBrowse.Click += (s, e) =>
         {
@@ -136,32 +137,41 @@ public partial class SettingsForm : Form
                 _folderValue.Text = SaveFolder;
             }
         };
-        y += 42;
+        y += 48;
 
-        y += 10;
-        var sep4 = new Panel { Location = new Point(pad, y), Size = new Size(w, 1), BackColor = Color.FromArgb(42, 42, 46) };
-        y += 16;
+        AddSeparator(pad, y, w); y += 20;
 
         // Exit
         var btnExit = MakeButton("Exit", pad, y, w);
         btnExit.ForeColor = Color.FromArgb(220, 80, 80);
-        btnExit.Click += (s, e) =>
-        {
-            Application.Exit();
-        };
+        btnExit.Click += (s, e) => Application.Exit();
+
+        // Wire up main buttons
+        btnScreenshot.Click += (s, e) => TakeScreenshot();
+        btnSaveVideo.Click += (s, e) => SaveVideo();
 
         Controls.AddRange(new Control[]
         {
-            lblTitle, lblStatus, sep1,
-            btnScreenshot, btnSaveVideo, sep2,
-            lblFps, _fpsValue, _fpsSlider,
-            lblDuration, _durationValue, _durationSlider, sep3,
-            lblFolder, _folderValue, btnBrowse, sep4,
-            btnExit
+        lblTitle, lblStatus,
+        btnScreenshot, lblHk1,
+        btnSaveVideo, lblHk2,
+        lblFps, _fpsValue, _fpsSlider,
+        lblDuration, _durationValue, _durationSlider,
+        lblFolder, _folderValue, btnBrowse,
+        btnExit
         });
 
-        // Close on click outside
         Deactivate += (s, e) => Hide();
+    }
+
+    private void AddSeparator(int x, int y, int w)
+    {
+        Controls.Add(new Panel
+        {
+            Location = new Point(x, y),
+            Size = new Size(w, 1),
+            BackColor = Color.FromArgb(42, 42, 46)
+        });
     }
 
     private void TakeScreenshot() { }
@@ -176,17 +186,20 @@ public partial class SettingsForm : Form
         Font = new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular)
     };
 
-    private Button MakeButton(string text, int x, int y, int w) => new Button
+    private Button MakeButton(string text, int x, int y, int w, bool primary = false) => new Button
     {
         Text = text,
         Location = new Point(x, y),
-        Size = new Size(w, 32),
-        BackColor = Color.FromArgb(42, 42, 46),
-        ForeColor = Color.FromArgb(240, 240, 240),
+        Size = new Size(w, 34),
+        BackColor = primary ? Color.FromArgb(0, 196, 160) : Color.FromArgb(42, 42, 46),
+        ForeColor = primary ? Color.FromArgb(10, 46, 40) : Color.FromArgb(240, 240, 240),
         FlatStyle = FlatStyle.Flat,
         Font = new Font("Segoe UI", 9),
-        TextAlign = ContentAlignment.MiddleLeft,
-        Padding = new Padding(4, 0, 0, 0),
         Cursor = Cursors.Hand
     };
+
+    private void SettingsForm_Load(object sender, EventArgs e)
+    {
+
+    }
 }
