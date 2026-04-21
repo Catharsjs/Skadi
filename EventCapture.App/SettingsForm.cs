@@ -2,10 +2,11 @@
 
 public partial class SettingsForm : Form
 {
-    public int BufferDurationSeconds { get; private set; } = 60;
-    public int FrameRate { get; private set; } = 15;
-    public string SaveFolder { get; private set; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
+    public event Action<int, int, string>? OnSettingsChanged;
+    private readonly MainForm _mainForm;
+    public int BufferDurationSeconds { get; private set; }
+    public int FrameRate { get; private set; }
+    public string SaveFolder { get; private set; }
 
     private TrackBar _fpsSlider;
     private TrackBar _durationSlider;
@@ -13,8 +14,12 @@ public partial class SettingsForm : Form
     private Label _durationValue;
     private Label _folderValue;
 
-    public SettingsForm()
+    public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds)
     {
+        _mainForm = mainForm;
+        BufferDurationSeconds = bufferSeconds;
+        FrameRate = fps;
+        SaveFolder = saveFolder;
         InitializeComponent();
         BuildUI();
     }
@@ -141,6 +146,15 @@ public partial class SettingsForm : Form
 
         AddSeparator(pad, y, w); y += 20;
 
+        // Save Settings
+        var btnSave = MakeButton("Save Settings", pad, y, w, primary: true);
+        btnSave.Click += (s, e) =>
+        {
+            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
+            Hide();
+        };
+        y += 48;
+
         // Exit
         var btnExit = MakeButton("Exit", pad, y, w);
         btnExit.ForeColor = Color.FromArgb(220, 80, 80);
@@ -151,15 +165,15 @@ public partial class SettingsForm : Form
         btnSaveVideo.Click += (s, e) => SaveVideo();
 
         Controls.AddRange(new Control[]
-        {
-        lblTitle, lblStatus,
-        btnScreenshot, lblHk1,
-        btnSaveVideo, lblHk2,
-        lblFps, _fpsValue, _fpsSlider,
-        lblDuration, _durationValue, _durationSlider,
-        lblFolder, _folderValue, btnBrowse,
-        btnExit
-        });
+{
+    lblTitle, lblStatus,
+    btnScreenshot, lblHk1,
+    btnSaveVideo, lblHk2,
+    lblFps, _fpsValue, _fpsSlider,
+    lblDuration, _durationValue, _durationSlider,
+    lblFolder, _folderValue, btnBrowse,
+    btnSave, btnExit
+});
 
         Deactivate += (s, e) => Hide();
     }
@@ -174,8 +188,8 @@ public partial class SettingsForm : Form
         });
     }
 
-    private void TakeScreenshot() { }
-    private void SaveVideo() { }
+    private void TakeScreenshot() => _mainForm.TakeScreenshot();
+    private void SaveVideo() => _mainForm.SaveVideo();
 
     private Label MakeLabel(string text, int x, int y, bool bold = false, float size = 9) => new Label
     {

@@ -1,17 +1,38 @@
+using EventCapture.Core.Buffer;
+using EventCapture.Core.Capture;
+
 namespace EventCapture.App;
 
 public partial class MainForm : Form
 {
     private NotifyIcon _trayIcon;
     private ContextMenuStrip _trayMenu;
+    private RingBuffer<FrameEntry> _buffer;
+    private ScreenCapturer _capturer;
+    private ScreenshotSaver _screenshotSaver;
+    private VideoSaver _videoSaver;
+    private string _saveFolder;
 
     public MainForm()
     {
         InitializeComponent();
         ShowInTaskbar = false;
         WindowState = FormWindowState.Minimized;
+        _saveFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
+        InitializeCapture(fps: 15, bufferSeconds: 60);
         InitializeTray();
         Hide();
+    }
+
+    private void InitializeCapture(int fps, int bufferSeconds)
+    {
+        _capturer?.Stop();
+        _buffer = new RingBuffer<FrameEntry>(fps * bufferSeconds);
+        _screenshotSaver = new ScreenshotSaver(_saveFolder);
+        _videoSaver = new VideoSaver(_saveFolder);
+        _capturer = new ScreenCapturer(_buffer, fps);
+        _capturer.Start();
     }
 
     private void InitializeTray()
@@ -24,7 +45,6 @@ public partial class MainForm : Form
         var itemOpen = new ToolStripMenuItem("Open Settings");
         var itemScreenshot = new ToolStripMenuItem("Screenshot\tAlt+F1");
         var itemSaveVideo = new ToolStripMenuItem("Save Video\tAlt+F2");
-        var itemSeparator = new ToolStripSeparator();
         var itemExit = new ToolStripMenuItem("Exit");
 
         itemOpen.Click += (s, e) => ShowSettings();
@@ -34,7 +54,8 @@ public partial class MainForm : Form
 
         _trayMenu.Items.AddRange(new ToolStripItem[]
         {
-            itemOpen, itemSeparator, itemScreenshot, itemSaveVideo,
+            itemOpen, new ToolStripSeparator(),
+            itemScreenshot, itemSaveVideo,
             new ToolStripSeparator(), itemExit
         });
 
@@ -51,15 +72,48 @@ public partial class MainForm : Form
 
     private void ShowSettings()
     {
-        using var settings = new SettingsForm();
-        settings.ShowDialog();
+        var settings = new SettingsForm(this, _saveFolder, 15, 60);
+        settings.OnSettingsChanged += (fps, seconds, folder) =>
+        {
+            _saveFolder = folder;
+            InitializeCapture(fps, seconds);
+        };
+        settings.Show();
     }
 
-    private void TakeScreenshot() { }
-    private void SaveVideo() { }
+    public void TakeScreenshot()
+    {
+        try
+        {
+            var path = _screenshotSaver.SaveScreenshot(_buffer);
+            _trayIcon.ShowBalloonTip(2000, "EventCapture",
+                $"Screenshot saved", ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            _trayIcon.ShowBalloonTip(2000, "EventCapture",
+                $"Error: {ex.Message}", ToolTipIcon.Error);
+        }
+    }
+
+    public async void SaveVideo()
+    {
+        try
+        {
+            var path = await _videoSaver.SaveVideoAsync(_buffer);
+            _trayIcon.ShowBalloonTip(2000, "EventCapture",
+                $"Video saved", ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            _trayIcon.ShowBalloonTip(2000, "EventCapture",
+                $"Error: {ex.Message}", ToolTipIcon.Error);
+        }
+    }
 
     private void ExitApp()
     {
+        _capturer?.Stop();
         _trayIcon.Visible = false;
         Application.Exit();
     }
@@ -77,8 +131,5 @@ public partial class MainForm : Form
         }
     }
 
-    private void MainForm_Load(object sender, EventArgs e)
-    {
-
-    }
+    private void MainForm_Load(object sender, EventArgs e) { }
 }
