@@ -11,6 +11,8 @@ public partial class MainForm : Form
     private ScreenCapturer _capturer;
     private ScreenshotSaver _screenshotSaver;
     private VideoSaver _videoSaver;
+    private HotkeyManager _hotkeyManager;
+    private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
 
     public MainForm()
@@ -22,6 +24,7 @@ public partial class MainForm : Form
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
         InitializeCapture(fps: 15, bufferSeconds: 60);
         InitializeTray();
+        _hotkeyManager = new HotkeyManager(Handle);
         Hide();
     }
 
@@ -113,9 +116,30 @@ public partial class MainForm : Form
 
     private void ExitApp()
     {
+        _hotkeyManager?.Dispose();
         _capturer?.Stop();
         _trayIcon.Visible = false;
         Application.Exit();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_HOTKEY)
+        {
+            switch (m.WParam.ToInt32())
+            {
+                case HotkeyManager.HOTKEY_SCREENSHOT:
+                    TakeScreenshot();
+                    break;
+                case HotkeyManager.HOTKEY_SAVE_VIDEO:
+                    SaveVideo();
+                    break;
+                case HotkeyManager.HOTKEY_TOGGLE_OVERLAY:
+                    ShowSettings();
+                    break;
+            }
+        }
+        base.WndProc(ref m);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
