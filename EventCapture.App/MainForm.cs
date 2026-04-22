@@ -12,6 +12,8 @@ public partial class MainForm : Form
     private ScreenshotSaver _screenshotSaver;
     private VideoSaver _videoSaver;
     private HotkeyManager _hotkeyManager;
+    private OverlayForm _overlay;
+    private SettingsForm? _settingsForm;
     private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
 
@@ -25,6 +27,7 @@ public partial class MainForm : Form
         InitializeCapture(fps: 15, bufferSeconds: 60);
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
+        _overlay = new OverlayForm();
         Hide();
     }
 
@@ -75,13 +78,24 @@ public partial class MainForm : Form
 
     private void ShowSettings()
     {
-        var settings = new SettingsForm(this, _saveFolder, 15, 60);
-        settings.OnSettingsChanged += (fps, seconds, folder) =>
+        if (_settingsForm != null && _settingsForm.Visible)
+        {
+            _settingsForm.Hide();
+            return;
+        }
+
+        _settingsForm = new SettingsForm(this, _saveFolder, 15, 60);
+        _settingsForm.OnSettingsChanged += (fps, seconds, folder) =>
         {
             _saveFolder = folder;
             InitializeCapture(fps, seconds);
         };
-        settings.Show();
+        _settingsForm.OnOverlayToggled += (visible) =>
+        {
+            _overlay.SetSystemInfoVisible(visible);
+            if (visible) _overlay.Show();
+        };
+        _settingsForm.Show();
     }
 
     public void TakeScreenshot()
@@ -114,6 +128,13 @@ public partial class MainForm : Form
         }
     }
 
+    private void ToggleOverlay()
+    {
+        if (_overlay.Visible)
+            _overlay.Hide();
+        else
+            _overlay.Show();
+    }
     private void ExitApp()
     {
         _hotkeyManager?.Dispose();
@@ -156,4 +177,9 @@ public partial class MainForm : Form
     }
 
     private void MainForm_Load(object sender, EventArgs e) { }
+
+    private void MainForm_Load_1(object sender, EventArgs e)
+    {
+
+    }
 }

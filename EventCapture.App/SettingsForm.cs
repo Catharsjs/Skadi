@@ -3,6 +3,7 @@
 public partial class SettingsForm : Form
 {
     public event Action<int, int, string>? OnSettingsChanged;
+    public event Action<bool>? OnOverlayToggled;
     private readonly MainForm _mainForm;
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
@@ -146,6 +147,15 @@ public partial class SettingsForm : Form
 
         AddSeparator(pad, y, w); y += 20;
 
+        var lblOverlay = MakeLabel("Show System Info", pad, y);
+        var toggleOverlay = new ToggleSwitch
+        {
+            Location = new Point(panelWidth - pad - 44, y - 2),
+            Checked = false
+        };
+        toggleOverlay.CheckedChanged += (s, e) => OnOverlayToggled?.Invoke(toggleOverlay.Checked);
+        y += 32;
+
         // Save Settings
         var btnSave = MakeButton("Save Settings", pad, y, w, primary: true);
         btnSave.Click += (s, e) =>
@@ -158,7 +168,7 @@ public partial class SettingsForm : Form
         // Exit
         var btnExit = MakeButton("Exit", pad, y, w);
         btnExit.ForeColor = Color.FromArgb(220, 80, 80);
-        btnExit.Click += (s, e) => Application.Exit();
+        btnExit.Click += (s, e) => Hide();
 
         // Wire up main buttons
         btnScreenshot.Click += (s, e) => TakeScreenshot();
@@ -172,6 +182,7 @@ public partial class SettingsForm : Form
     lblFps, _fpsValue, _fpsSlider,
     lblDuration, _durationValue, _durationSlider,
     lblFolder, _folderValue, btnBrowse,
+    lblOverlay, toggleOverlay,
     btnSave, btnExit
 });
 
