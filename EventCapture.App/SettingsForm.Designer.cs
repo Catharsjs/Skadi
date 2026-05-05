@@ -37,7 +37,6 @@
             ClientSize = new Size(800, 450);
             Name = "SettingsForm";
             Text = "SettingsForm";
-            Load += SettingsForm_Load;
             ResumeLayout(false);
         }
 

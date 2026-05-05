@@ -20,6 +20,7 @@ public class ToggleSwitch : Control
         Size = new Size(44, 24);
         Cursor = Cursors.Hand;
         DoubleBuffered = true;
+        BackColor = Color.FromArgb(28, 28, 30);
     }
 
     protected override void OnClick(EventArgs e)

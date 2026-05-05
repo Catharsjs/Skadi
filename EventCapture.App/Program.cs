@@ -1,17 +1,16 @@
-namespace EventCapture.App
+namespace EventCapture.App;
+
+static class Program
 {
-    internal static class Program
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
+
+    [STAThread]
+    static void Main()
     {
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
-        [STAThread]
-        static void Main()
-        {
-            // To customize application configuration such as set high DPI settings or default font,
-            // see https://aka.ms/applicationconfiguration.
-            ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm());
-        }
+        SetProcessDPIAware();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        ApplicationConfiguration.Initialize();
+        Application.Run(new MainForm());
     }
 }

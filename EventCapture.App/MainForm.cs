@@ -14,8 +14,11 @@ public partial class MainForm : Form
     private HotkeyManager _hotkeyManager;
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;
+    private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
     private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
+    private int _currentFps = 15;
+    private int _currentBufferSeconds = 60;
 
     public MainForm()
     {
@@ -28,11 +31,15 @@ public partial class MainForm : Form
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
+        _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
+        StartHardwareMonitor();
         Hide();
     }
 
     private void InitializeCapture(int fps, int bufferSeconds)
     {
+        _currentFps = fps;
+        _currentBufferSeconds = bufferSeconds;
         _capturer?.Stop();
         _buffer = new RingBuffer<FrameEntry>(fps * bufferSeconds);
         _screenshotSaver = new ScreenshotSaver(_saveFolder);
@@ -84,7 +91,7 @@ public partial class MainForm : Form
             return;
         }
 
-        _settingsForm = new SettingsForm(this, _saveFolder, 15, 60);
+        _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds);
         _settingsForm.OnSettingsChanged += (fps, seconds, folder) =>
         {
             _saveFolder = folder;
@@ -94,7 +101,8 @@ public partial class MainForm : Form
         {
             _overlay.SetSystemInfoVisible(visible);
             if (visible) _overlay.Show();
-        };
+            else _overlay.Hide();
+        };  
         _settingsForm.Show();
     }
 
@@ -135,9 +143,31 @@ public partial class MainForm : Form
         else
             _overlay.Show();
     }
+
+    private void StartHardwareMonitor()
+    {
+        var timer = new System.Threading.Timer(_ =>
+        {
+            _hardwareMonitor.Update();
+            if (_overlay.Visible)
+            {
+                _overlay.UpdateBuffer(_buffer.Count);
+                _overlay.UpdateFps(_capturer.IsRunning ? _currentFps : 0);
+                _overlay.UpdateSystemInfo(
+                    _hardwareMonitor.CpuLoad,
+                    _hardwareMonitor.CpuFrequency,
+                    _hardwareMonitor.GpuLoad,
+                    _hardwareMonitor.GpuFrequency,
+                    _hardwareMonitor.GpuVram,
+                    _hardwareMonitor.RamUsed);
+            }
+        }, null, 0, 1000);
+    }
+
     private void ExitApp()
     {
         _hotkeyManager?.Dispose();
+        _hardwareMonitor?.Dispose();
         _capturer?.Stop();
         _trayIcon.Visible = false;
         Application.Exit();

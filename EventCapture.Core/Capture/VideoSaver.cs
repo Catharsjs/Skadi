@@ -1,8 +1,9 @@
 ﻿using EventCapture.Core.Buffer;
 using FFMpegCore;
+using FFMpegCore.Enums;
+using FFMpegCore.Extensions.System.Drawing.Common;
 using FFMpegCore.Pipes;
 using System.Drawing;
-using FFMpegCore.Extensions.System.Drawing.Common;
 namespace EventCapture.Core.Capture;
 
 public class VideoSaver
@@ -30,9 +31,8 @@ public class VideoSaver
         await FFMpegArguments
             .FromPipeInput(source)
             .OutputToFile(filePath, overwrite: true, options => options
-                .WithVideoCodec("libx264")
-                .WithConstantRateFactor(23)
-                .WithFastStart())
+                .WithVideoCodec("h264_mf")
+                .WithVideoBitrate(8000))
             .ProcessAsynchronously();
 
         foreach (var frame in videoFrames)
@@ -43,7 +43,7 @@ public class VideoSaver
 
     private static Bitmap BytesToBitmap(byte[] data)
     {
-        using var ms = new MemoryStream(data);
+        var ms = new MemoryStream(data);
         return new Bitmap(ms);
     }
 }

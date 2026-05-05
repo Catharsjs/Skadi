@@ -37,6 +37,7 @@
             ClientSize = new Size(800, 450);
             Name = "OverlayForm";
             Text = "OverlayForm";
+            Load += OverlayForm_Load;
             ResumeLayout(false);
         }
 
