@@ -56,7 +56,7 @@ public partial class MainForm : Form
         _trayMenu.RenderMode = ToolStripRenderMode.System;
 
         var itemOpen = new ToolStripMenuItem("Open Settings");
-        var itemScreenshot = new ToolStripMenuItem("Screenshot\tAlt+F1");
+        var itemScreenshot = new ToolStripMenuItem("Save Screenshot\tAlt+F1");
         var itemSaveVideo = new ToolStripMenuItem("Save Video\tAlt+F2");
         var itemExit = new ToolStripMenuItem("Exit");
 
@@ -102,7 +102,7 @@ public partial class MainForm : Form
             _overlay.SetSystemInfoVisible(visible);
             if (visible) _overlay.Show();
             else _overlay.Hide();
-        };  
+        };
         _settingsForm.Show();
     }
 
@@ -112,7 +112,7 @@ public partial class MainForm : Form
         {
             var path = _screenshotSaver.SaveScreenshot(_buffer);
             _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                $"Screenshot saved", ToolTipIcon.Info);
+                "Screenshot saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
@@ -125,23 +125,15 @@ public partial class MainForm : Form
     {
         try
         {
-            var path = await _videoSaver.SaveVideoAsync(_buffer);
+            var path = await _videoSaver.SaveVideoAsync(_buffer, _currentFps);
             _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                $"Video saved", ToolTipIcon.Info);
+                "Video saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
             _trayIcon.ShowBalloonTip(2000, "EventCapture",
                 $"Error: {ex.Message}", ToolTipIcon.Error);
         }
-    }
-
-    private void ToggleOverlay()
-    {
-        if (_overlay.Visible)
-            _overlay.Hide();
-        else
-            _overlay.Show();
     }
 
     private void StartHardwareMonitor()
@@ -207,9 +199,4 @@ public partial class MainForm : Form
     }
 
     private void MainForm_Load(object sender, EventArgs e) { }
-
-    private void MainForm_Load_1(object sender, EventArgs e)
-    {
-
-    }
 }

@@ -2,6 +2,7 @@
 
 public class RingBuffer<T>
 {
+
     private readonly T[] _buffer;
     private int _head;
     private int _count;
