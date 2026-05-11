@@ -109,7 +109,6 @@ public partial class MainForm : Form
                 _appSettings.BufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
                 _appSettings.Save();
-                await InitializeCapture(fps, seconds);
             };
             _settingsForm.OnOverlayToggled += (visible) =>
             {
@@ -120,9 +119,37 @@ public partial class MainForm : Form
         }
 
         if (_settingsForm.Visible)
-            _settingsForm.Hide();
+            _ = SlideOut(_settingsForm);
         else
-            _settingsForm.Show();
+            _ = SlideIn(_settingsForm);
+    }
+
+    private async Task SlideIn(Form form)
+    {
+        var screen = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
+        form.Location = new Point(screen.Right - form.Width, 0);
+        form.Opacity = 0;
+        form.Show();
+
+        int steps = 15;
+        for (int i = 1; i <= steps; i++)
+        {
+            form.Opacity = i / (double)steps;
+            await Task.Delay(10);
+        }
+        form.Opacity = 1;
+    }
+
+    private async Task SlideOut(Form form)
+    {
+        int steps = 15;
+        for (int i = steps - 1; i >= 0; i--)
+        {
+            form.Opacity = i / (double)steps;
+            await Task.Delay(10);
+        }
+        form.Hide();
+        form.Opacity = 1;
     }
 
     public void TakeScreenshot()

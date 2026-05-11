@@ -31,6 +31,7 @@ public partial class SettingsForm : Form
         int panelWidth = (int)(screen.Width * 0.22);
 
         FormBorderStyle = FormBorderStyle.None;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
