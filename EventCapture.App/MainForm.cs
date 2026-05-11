@@ -14,6 +14,7 @@ public partial class MainForm : Form
     private HotkeyManager _hotkeyManager;
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;
+    private AppSettings _appSettings;
     private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
     private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
@@ -25,9 +26,9 @@ public partial class MainForm : Form
         InitializeComponent();
         ShowInTaskbar = false;
         WindowState = FormWindowState.Minimized;
-        _saveFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
-        _ = InitializeCapture(fps: 60, bufferSeconds: 60);
+        _appSettings = AppSettings.Load();
+        _saveFolder = _appSettings.SaveFolder;
+        _ = InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds);
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
@@ -98,25 +99,30 @@ public partial class MainForm : Form
 
     private void ShowSettings()
     {
-        if (_settingsForm != null && _settingsForm.Visible)
+        if (_settingsForm == null)
         {
-            _settingsForm.Hide();
-            return;
+            _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds);
+            _settingsForm.OnSettingsChanged += async (fps, seconds, folder) =>
+            {
+                _saveFolder = folder;
+                _appSettings.Fps = fps;
+                _appSettings.BufferSeconds = seconds;
+                _appSettings.SaveFolder = folder;
+                _appSettings.Save();
+                await InitializeCapture(fps, seconds);
+            };
+            _settingsForm.OnOverlayToggled += (visible) =>
+            {
+                _overlay.SetSystemInfoVisible(visible);
+                if (visible) _overlay.Show();
+                else _overlay.Hide();
+            };
         }
 
-        _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds);
-        _settingsForm.OnSettingsChanged += async (fps, seconds, folder) =>
-        {
-            _saveFolder = folder;
-            await InitializeCapture(fps, seconds);
-        };
-        _settingsForm.OnOverlayToggled += (visible) =>
-        {
-            _overlay.SetSystemInfoVisible(visible);
-            if (visible) _overlay.Show();
-            else _overlay.Hide();
-        };
-        _settingsForm.Show();
+        if (_settingsForm.Visible)
+            _settingsForm.Hide();
+        else
+            _settingsForm.Show();
     }
 
     public void TakeScreenshot()

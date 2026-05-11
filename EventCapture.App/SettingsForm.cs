@@ -10,8 +10,6 @@ public partial class SettingsForm : Form
     public string SaveFolder { get; private set; }
 
     private readonly MainForm _mainForm;
-    private TrackBar _fpsSlider;
-    private TrackBar _durationSlider;
     private Label _fpsValueLabel;
     private Label _durationValueLabel;
     private Label _folderValueLabel;
@@ -63,53 +61,30 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeSubLabel("Alt + F2", Color.FromArgb(80, 80, 80)));
         layout.Controls.Add(MakeSeparator());
 
-        // FPS slider
-        _fpsValueLabel = MakeSubLabel($"Frame Rate: {FrameRate} fps", Color.FromArgb(0, 196, 160));
-        layout.Controls.Add(_fpsValueLabel);
-        _fpsSlider = new TrackBar
-        {
-            Minimum = 0,
-            Maximum = 2,
-            Value = new[] { 15, 30, 60 }.ToList().IndexOf(FrameRate),
-            TickFrequency = 1,
-            TickStyle = TickStyle.Both,
-            Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(28, 28, 30),
-            Height = 36,
-            Margin = new Padding(0)
-        };
-        _fpsSlider.ValueChanged += (s, e) =>
-        {
-            int[] allowed = { 15, 30, 60 };
-            FrameRate = allowed[_fpsSlider.Value];
-            _fpsValueLabel.Text = $"Frame Rate: {FrameRate} fps";
-        };
-        layout.Controls.Add(_fpsSlider);
+        // FPS
+        layout.Controls.Add(MakeSubLabel("Frame Rate", Color.FromArgb(150, 150, 150)));
+        layout.Controls.Add(MakeArrowSelector(
+            new[] { "15 fps", "30 fps", "60 fps" },
+            new[] { 15, 30, 60 },
+            FrameRate,
+            val => {
+                FrameRate = val;
+                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
+            }));
         layout.Controls.Add(MakeSeparator());
 
-        // Duration slider
-        _durationValueLabel = MakeSubLabel($"Buffer Duration: {BufferDurationSeconds} sec", Color.FromArgb(0, 196, 160));
-        layout.Controls.Add(_durationValueLabel);
-        _durationSlider = new TrackBar
-        {
-            Minimum = 0,
-            Maximum = 5,
-            Value = Math.Max(0, new[] { 15, 30, 45, 60, 90, 120 }.ToList().IndexOf(BufferDurationSeconds)),
-            TickFrequency = 1,
-            TickStyle = TickStyle.Both,
-            Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(28, 28, 30),
-            Height = 36,
-            Margin = new Padding(0)
-        };
-        _durationSlider.ValueChanged += (s, e) =>
-        {
-            int[] allowed = { 15, 30, 45, 60, 90, 120 };
-            BufferDurationSeconds = allowed[_durationSlider.Value];
-            _durationValueLabel.Text = $"Buffer Duration: {BufferDurationSeconds} sec";
-        };
-        layout.Controls.Add(_durationSlider);
+        // Duration
+        layout.Controls.Add(MakeSubLabel("Buffer Duration", Color.FromArgb(150, 150, 150)));
+        layout.Controls.Add(MakeArrowSelector(
+            new[] { "15 sec", "30 sec", "45 sec", "60 sec", "90 sec", "120 sec" },
+            new[] { 15, 30, 45, 60, 90, 120 },
+            BufferDurationSeconds,
+            val => {
+                BufferDurationSeconds = val;
+                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
+            }));
         layout.Controls.Add(MakeSeparator());
+
 
         // Save folder
         layout.Controls.Add(MakeSubLabel("Save Folder", Color.FromArgb(150, 150, 150)));
@@ -157,10 +132,6 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeSeparator());
 
         // Buttons
-        layout.Controls.Add(MakePrimaryButton("Save Settings", () =>
-        {
-            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
-        }));
         layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
@@ -258,6 +229,93 @@ public partial class SettingsForm : Form
         btn.FlatAppearance.BorderColor = Color.FromArgb(58, 58, 62);
         btn.Click += (s, e) => Hide();
         return btn;
+    }
+
+    private Control MakeArrowSelector(string[] labels, int[] values, int currentValue, Action<int> onChange)
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            Height = 32,
+            AutoSize = false,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 4, 0, 4)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
+
+        int currentIndex = Array.IndexOf(values, currentValue);
+        if (currentIndex < 0) currentIndex = 0;
+
+        var valueLabel = new Label
+        {
+            Text = labels[currentIndex],
+            TextAlign = ContentAlignment.MiddleCenter,
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(0, 196, 160),
+            BackColor = Color.Transparent,
+            Font = new Font("Segoe UI", 10, FontStyle.Bold)
+        };
+
+        var btnLeft = new Button
+        {
+            Text = "◀",
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.Transparent,
+            ForeColor = Color.FromArgb(0, 196, 160),
+            Font = new Font("Segoe UI", 8),
+            Cursor = Cursors.Hand,
+            Padding = new Padding(0),
+            Margin = new Padding(0)
+        };
+        btnLeft.FlatAppearance.BorderSize = 0;
+        btnLeft.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
+        btnLeft.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
+
+        var btnRight = new Button
+        {
+            Text = "▶",
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.Transparent,
+            ForeColor = Color.FromArgb(0, 196, 160),
+            Font = new Font("Segoe UI", 8),
+            Cursor = Cursors.Hand,
+            Padding = new Padding(0),
+            Margin = new Padding(0)
+        };
+        btnRight.FlatAppearance.BorderSize = 0;
+        btnRight.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
+        btnRight.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
+
+        btnLeft.Click += (s, e) =>
+        {
+            if (currentIndex > 0)
+            {
+                currentIndex--;
+                valueLabel.Text = labels[currentIndex];
+                onChange(values[currentIndex]);
+            }
+        };
+
+        btnRight.Click += (s, e) =>
+        {
+            if (currentIndex < labels.Length - 1)
+            {
+                currentIndex++;
+                valueLabel.Text = labels[currentIndex];
+                onChange(values[currentIndex]);
+            }
+        };
+
+        panel.Controls.Add(btnLeft, 0, 0);
+        panel.Controls.Add(valueLabel, 1, 0);
+        panel.Controls.Add(btnRight, 2, 0);
+
+        return panel;
     }
 
     private void SettingsForm_Load(object sender, EventArgs e)
