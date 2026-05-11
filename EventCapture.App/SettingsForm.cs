@@ -93,8 +93,8 @@ public partial class SettingsForm : Form
         _durationSlider = new TrackBar
         {
             Minimum = 0,
-            Maximum = 4,
-            Value = new[] { 30, 60, 120, 180, 300 }.ToList().IndexOf(BufferDurationSeconds),
+            Maximum = 5,
+            Value = Math.Max(0, new[] { 15, 30, 45, 60, 90, 120 }.ToList().IndexOf(BufferDurationSeconds)),
             TickFrequency = 1,
             TickStyle = TickStyle.Both,
             Dock = DockStyle.Fill,
@@ -104,7 +104,7 @@ public partial class SettingsForm : Form
         };
         _durationSlider.ValueChanged += (s, e) =>
         {
-            int[] allowed = { 30, 60, 120, 180, 300 };
+            int[] allowed = { 15, 30, 45, 60, 90, 120 };
             BufferDurationSeconds = allowed[_durationSlider.Value];
             _durationValueLabel.Text = $"Buffer Duration: {BufferDurationSeconds} sec";
         };
@@ -258,5 +258,10 @@ public partial class SettingsForm : Form
         btn.FlatAppearance.BorderColor = Color.FromArgb(58, 58, 62);
         btn.Click += (s, e) => Hide();
         return btn;
+    }
+
+    private void SettingsForm_Load(object sender, EventArgs e)
+    {
+
     }
 }

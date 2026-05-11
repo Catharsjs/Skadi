@@ -27,7 +27,7 @@ public partial class MainForm : Form
         WindowState = FormWindowState.Minimized;
         _saveFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
-        _ = InitializeCapture(fps: 60, bufferSeconds: 30);
+        _ = InitializeCapture(fps: 60, bufferSeconds: 60);
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
