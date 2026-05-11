@@ -29,6 +29,17 @@ public partial class OverlayForm : Form
         BuildUI();
     }
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TOOLWINDOW = 0x00000080;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+
     private void BuildUI()
     {
         FormBorderStyle = FormBorderStyle.None;

@@ -25,6 +25,17 @@ public partial class SettingsForm : Form
         BuildUI();
     }
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TOOLWINDOW = 0x00000080;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+
     private void BuildUI()
     {
         var screen = Screen.PrimaryScreen!.WorkingArea;

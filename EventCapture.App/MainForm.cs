@@ -25,6 +25,7 @@ public partial class MainForm : Form
     {
         InitializeComponent();
         ShowInTaskbar = false;
+        FormBorderStyle = FormBorderStyle.None;
         WindowState = FormWindowState.Minimized;
         _appSettings = AppSettings.Load();
         _saveFolder = _appSettings.SaveFolder;
@@ -35,6 +36,17 @@ public partial class MainForm : Form
         _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
         StartHardwareMonitor();
         Hide();
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TOOLWINDOW = 0x00000080;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
+        }
     }
 
     private async Task InitializeCapture(int fps, int bufferSeconds,
