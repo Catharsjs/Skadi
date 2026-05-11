@@ -30,8 +30,17 @@ interface IDirect3DDxgiInterfaceAccess
     IntPtr GetInterface([In] ref Guid iid);
 }
 
+[ComImport]
+[Guid("f2cdd966-22ae-5ea1-9596-3a289344c3be")]
+[InterfaceType(ComInterfaceType.InterfaceIsIInspectable)]
+interface IGraphicsCaptureSession3
+{
+    bool IsBorderRequired { get; set; }
+}
 public class ScreenCapturer : IDisposable
 {
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
     private readonly VideoEncoder _encoder;
     private readonly int _fps;
     private readonly int _targetWidth;
@@ -76,6 +85,27 @@ public class ScreenCapturer : IDisposable
 
         _session = _framePool.CreateCaptureSession(item);
         _session.IsCursorCaptureEnabled = false;
+        // Вимикаємо рамку тільки на Windows 11+
+        if (Environment.OSVersion.Version.Build >= 22000)
+        {
+            try
+            {
+                var sessionAbi = ((IWinRTObject)_session).NativeObject.ThisPtr;
+                var session3Guid = new Guid("f2cdd966-22ae-5ea1-9596-3a289344c3be");
+                Marshal.QueryInterface(sessionAbi, ref session3Guid, out var session3Ptr);
+                if (session3Ptr != IntPtr.Zero)
+                {
+                    // Встановлюємо IsBorderRequired = false через vtable
+                    // IsBorderRequired setter — 7й метод в vtable (індекс 6)
+                    var vtable = Marshal.ReadIntPtr(session3Ptr);
+                    var setterPtr = Marshal.ReadIntPtr(vtable, 7 * IntPtr.Size);
+                    var setter = Marshal.GetDelegateForFunctionPointer<SetBoolDelegate>(setterPtr);
+                    setter(session3Ptr, 0);
+                    Marshal.Release(session3Ptr);
+                }
+            }
+            catch { }
+        }
         _session.StartCapture();
 
         _isRunning = true;

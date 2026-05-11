@@ -28,7 +28,7 @@ public partial class MainForm : Form
         WindowState = FormWindowState.Minimized;
         _appSettings = AppSettings.Load();
         _saveFolder = _appSettings.SaveFolder;
-        _ = InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds);
+        Task.Run(async () => await InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds));
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
