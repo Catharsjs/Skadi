@@ -84,18 +84,34 @@ public partial class MainForm : Form
         var itemOpen = new ToolStripMenuItem("Open Settings");
         var itemScreenshot = new ToolStripMenuItem("Save Screenshot\tAlt+F1");
         var itemSaveVideo = new ToolStripMenuItem("Save Video\tAlt+F2");
+
+        bool autoStartEnabled = AppSettings.IsAutoStartEnabled();
+        var itemAutostart = new ToolStripMenuItem(
+            autoStartEnabled ? "✓ Launch at Startup" : "   Launch at Startup")
+        {
+            CheckOnClick = false
+        };
         var itemExit = new ToolStripMenuItem("Exit");
 
         itemOpen.Click += (s, e) => ShowSettings();
         itemScreenshot.Click += (s, e) => TakeScreenshot();
         itemSaveVideo.Click += (s, e) => SaveVideo();
+        itemAutostart.Click += (s, e) =>
+        {
+            autoStartEnabled = !autoStartEnabled;
+            AppSettings.SetAutoStart(autoStartEnabled);
+            itemAutostart.Text = autoStartEnabled ? "✓ Launch at Startup" : "Launch at Startup";
+        };
         itemExit.Click += (s, e) => ExitApp();
 
         _trayMenu.Items.AddRange(new ToolStripItem[]
         {
-            itemOpen, new ToolStripSeparator(),
-            itemScreenshot, itemSaveVideo,
-            new ToolStripSeparator(), itemExit
+        itemOpen, new ToolStripSeparator(),
+        itemScreenshot, itemSaveVideo,
+        new ToolStripSeparator(),
+        itemAutostart,
+        new ToolStripSeparator(),
+        itemExit
         });
 
         _trayIcon = new NotifyIcon
