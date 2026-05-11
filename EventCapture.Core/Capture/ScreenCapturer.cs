@@ -32,27 +32,29 @@ interface IDirect3DDxgiInterfaceAccess
 
 public class ScreenCapturer : IDisposable
 {
-    private readonly RingBuffer<FrameEntry> _buffer;
+    private readonly VideoEncoder _encoder;
     private readonly int _fps;
+    private readonly int _targetWidth;
+    private readonly int _targetHeight;
     private bool _isRunning;
-    private System.Threading.Timer? _timer;
 
     private SharpDX.Direct3D11.Device? _d3dDevice;
     private IDirect3DDevice? _wrtDevice;
     private Direct3D11CaptureFramePool? _framePool;
     private GraphicsCaptureSession? _session;
-
-    // Перевикористовувані ресурси
     private SharpDX.Direct3D11.Texture2D? _stagingTexture;
     private int _textureWidth;
     private int _textureHeight;
 
     public bool IsRunning => _isRunning;
 
-    public ScreenCapturer(RingBuffer<FrameEntry> buffer, int fps = 15)
+    public ScreenCapturer(VideoEncoder encoder, int fps = 15,
+        int targetWidth = 0, int targetHeight = 0)
     {
-        _buffer = buffer;
+        _encoder = encoder;
         _fps = fps;
+        _targetWidth = targetWidth;
+        _targetHeight = targetHeight;
     }
 
     public void Start()
@@ -77,55 +79,119 @@ public class ScreenCapturer : IDisposable
         _session.StartCapture();
 
         _isRunning = true;
-        int interval = 1000 / _fps;
-        _timer = new System.Threading.Timer(_ => CaptureFrame(), null, 0, interval);
+        Task.Run(CaptureLoop);
     }
 
-    private static IDirect3DDevice CreateDirect3DDevice(SharpDX.Direct3D11.Device device)
+    private async Task CaptureLoop()
     {
-        var dxgiDevice = device.QueryInterface<SharpDX.DXGI.Device>();
-        var hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.NativePointer, out var pUnknown);
-        if (hr != 0) throw new Exception($"CreateDirect3D11DeviceFromDXGIDevice failed: 0x{hr:X8}");
-        var result = WinRT.MarshalInterface<IDirect3DDevice>.FromAbi(pUnknown);
-        Marshal.Release(pUnknown);
-        return result;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        long frameNumber = 0;
+        double frameIntervalMs = 1000.0 / _fps;
+
+        while (_isRunning)
+        {
+            double targetMs = frameNumber * frameIntervalMs;
+            double currentMs = sw.Elapsed.TotalMilliseconds;
+            double waitMs = targetMs - currentMs;
+
+            if (waitMs > 2)
+            {
+                await Task.Delay((int)(waitMs - 1));
+            }
+            else if (waitMs > 0)
+            {
+                // Точне очікування через SpinWait
+                double spinTarget = sw.Elapsed.TotalMilliseconds + waitMs;
+                while (sw.Elapsed.TotalMilliseconds < spinTarget)
+                    System.Threading.Thread.SpinWait(10);
+            }
+
+            if (_isRunning)
+                CaptureFrame();
+
+            frameNumber++;
+        }
     }
 
-    [DllImport("d3d11.dll")]
-    private static extern int CreateDirect3D11DeviceFromDXGIDevice(
-        IntPtr dxgiDevice, out IntPtr graphicsDevice);
-
-    private static readonly Guid GraphicsCaptureItemGuid =
-        new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
-
-    private static GraphicsCaptureItem CreateCaptureItem()
+    private void CaptureFrame()
     {
-        var monitor = System.Windows.Forms.Screen.PrimaryScreen!;
-        var hmon = MonitorFromPoint(
-            new POINT { x = monitor.Bounds.Left + 1, y = monitor.Bounds.Top + 1 },
-            MONITOR_DEFAULTTONEAREST);
-
-        string className = "Windows.Graphics.Capture.GraphicsCaptureItem";
-        WindowsCreateString(className, className.Length, out var hstring);
+        if (_framePool == null || _d3dDevice == null) return;
 
         try
         {
-            var interopGuid = typeof(IGraphicsCaptureItemInterop).GUID;
-            var hr = RoGetActivationFactory(hstring, ref interopGuid, out var factoryPtr);
-            if (hr != 0) throw new Exception($"RoGetActivationFactory failed: 0x{hr:X8}");
+            using var frame = _framePool.TryGetNextFrame();
+            if (frame == null) return;
 
-            var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
-            Marshal.Release(factoryPtr);
+            var texGuid = typeof(SharpDX.Direct3D11.Texture2D).GUID;
+            var surfaceNative = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
+            var texPtr = surfaceNative.GetInterface(ref texGuid);
+            using var texture = new SharpDX.Direct3D11.Texture2D(texPtr);
 
-            var iid = GraphicsCaptureItemGuid;
-            var ptr = interop.CreateForMonitor(hmon, ref iid);
-            return WinRT.MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr)
-                ?? throw new Exception("Failed to create GraphicsCaptureItem");
+            var desc = texture.Description;
+            EnsureStagingTexture(desc.Width, desc.Height);
+
+            _d3dDevice.ImmediateContext.CopyResource(texture, _stagingTexture!);
+
+            var mapped = _d3dDevice.ImmediateContext.MapSubresource(
+                _stagingTexture!, 0, MapMode.Read,
+                SharpDX.Direct3D11.MapFlags.None);
+
+            try
+            {
+                int stride = desc.Width * 4;
+                var bgraData = new byte[stride * desc.Height];
+
+                for (int y = 0; y < desc.Height; y++)
+                {
+                    var src = IntPtr.Add(mapped.DataPointer, y * mapped.RowPitch);
+                    Marshal.Copy(src, bgraData, y * stride, stride);
+                }
+
+                // Масштабування якщо потрібно
+                byte[] finalData;
+                if (_targetWidth > 0 && _targetHeight > 0 &&
+                    (_targetWidth != desc.Width || _targetHeight != desc.Height))
+                {
+                    finalData = ScaleFrame(bgraData, desc.Width, desc.Height);
+                }
+                else
+                {
+                    finalData = bgraData;
+                }
+
+                _encoder.WriteFrame(finalData);
+            }
+            finally
+            {
+                if (_d3dDevice != null && _stagingTexture != null)
+                    _d3dDevice.ImmediateContext.UnmapSubresource(_stagingTexture!, 0);
+            }
         }
-        finally
-        {
-            WindowsDeleteString(hstring);
-        }
+        catch { }
+    }
+
+    private byte[] ScaleFrame(byte[] bgraData, int srcWidth, int srcHeight)
+    {
+        using var srcBitmap = new Bitmap(srcWidth, srcHeight, PixelFormat.Format32bppArgb);
+        var srcData = srcBitmap.LockBits(
+            new Rectangle(0, 0, srcWidth, srcHeight),
+            ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        Marshal.Copy(bgraData, 0, srcData.Scan0, bgraData.Length);
+        srcBitmap.UnlockBits(srcData);
+
+        using var dstBitmap = new Bitmap(_targetWidth, _targetHeight);
+        using var g = System.Drawing.Graphics.FromImage(dstBitmap);
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+        g.DrawImage(srcBitmap, 0, 0, _targetWidth, _targetHeight);
+
+        var dstData = dstBitmap.LockBits(
+            new Rectangle(0, 0, _targetWidth, _targetHeight),
+            ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        var result = new byte[_targetWidth * _targetHeight * 4];
+        Marshal.Copy(dstData.Scan0, result, 0, result.Length);
+        dstBitmap.UnlockBits(dstData);
+
+        return result;
     }
 
     private void EnsureStagingTexture(int width, int height)
@@ -155,77 +221,57 @@ public class ScreenCapturer : IDisposable
         _textureHeight = height;
     }
 
-    private int _frameCount = 0;
-
-    private void CaptureFrame()
+    private static IDirect3DDevice CreateDirect3DDevice(
+        SharpDX.Direct3D11.Device device)
     {
-        if (_framePool == null || _d3dDevice == null) return;
+        var dxgiDevice = device.QueryInterface<SharpDX.DXGI.Device>();
+        var hr = CreateDirect3D11DeviceFromDXGIDevice(
+            dxgiDevice.NativePointer, out var pUnknown);
+        if (hr != 0)
+            throw new Exception($"CreateDirect3D11DeviceFromDXGIDevice failed: 0x{hr:X8}");
+        var result = WinRT.MarshalInterface<IDirect3DDevice>.FromAbi(pUnknown);
+        Marshal.Release(pUnknown);
+        return result;
+    }
+
+    [DllImport("d3d11.dll")]
+    private static extern int CreateDirect3D11DeviceFromDXGIDevice(
+        IntPtr dxgiDevice, out IntPtr graphicsDevice);
+
+    private static readonly Guid GraphicsCaptureItemGuid =
+        new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
+
+    private static GraphicsCaptureItem CreateCaptureItem()
+    {
+        var monitor = System.Windows.Forms.Screen.PrimaryScreen!;
+        var hmon = MonitorFromPoint(
+            new POINT { x = monitor.Bounds.Left + 1, y = monitor.Bounds.Top + 1 },
+            MONITOR_DEFAULTTONEAREST);
+
+        string className = "Windows.Graphics.Capture.GraphicsCaptureItem";
+        WindowsCreateString(className, className.Length, out var hstring);
 
         try
         {
-            using var frame = _framePool.TryGetNextFrame();
-            if (frame == null) return;
+            var interopGuid = typeof(IGraphicsCaptureItemInterop).GUID;
+            var hr = RoGetActivationFactory(hstring, ref interopGuid, out var factoryPtr);
+            if (hr != 0)
+                throw new Exception($"RoGetActivationFactory failed: 0x{hr:X8}");
 
-            _frameCount++;
+            var interop = (IGraphicsCaptureItemInterop)
+                Marshal.GetObjectForIUnknown(factoryPtr);
+            Marshal.Release(factoryPtr);
 
-            var texGuid = typeof(SharpDX.Direct3D11.Texture2D).GUID;
-            var surfaceNative = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
-            var texPtr = surfaceNative.GetInterface(ref texGuid);
-            using var texture = new SharpDX.Direct3D11.Texture2D(texPtr);
-
-            var desc = texture.Description;
-            EnsureStagingTexture(desc.Width, desc.Height);
-
-            _d3dDevice.ImmediateContext.CopyResource(texture, _stagingTexture!);
-
-            var mapped = _d3dDevice.ImmediateContext.MapSubresource(
-                _stagingTexture!, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
-
-            byte[] jpegBytes;
-
-            try
-            {
-                var bitmap = new Bitmap(desc.Width, desc.Height, PixelFormat.Format32bppArgb);
-                try
-                {
-                    var bmpData = bitmap.LockBits(
-                        new Rectangle(0, 0, desc.Width, desc.Height),
-                        ImageLockMode.WriteOnly,
-                        PixelFormat.Format32bppArgb);
-
-                    for (int y = 0; y < desc.Height; y++)
-                    {
-                        var src = IntPtr.Add(mapped.DataPointer, y * mapped.RowPitch);
-                        var dst = IntPtr.Add(bmpData.Scan0, y * bmpData.Stride);
-                        CopyMemory(dst, src, (uint)(desc.Width * 4));
-                    }
-
-                    bitmap.UnlockBits(bmpData);
-
-                    using var ms = new MemoryStream();
-                    bitmap.Save(ms, ImageFormat.Jpeg);
-                    jpegBytes = ms.ToArray();
-                }
-                finally
-                {
-                    bitmap.Dispose();
-                }
-            }
-            finally
-            {
-                _d3dDevice.ImmediateContext.UnmapSubresource(_stagingTexture!, 0);
-            }
-
-            _buffer.Write(new FrameEntry(jpegBytes, DateTime.Now));
-
-            if (_frameCount % 50 == 0)
-                GC.Collect(0, GCCollectionMode.Optimized, false);
+            var iid = GraphicsCaptureItemGuid;
+            var ptr = interop.CreateForMonitor(hmon, ref iid);
+            return WinRT.MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr)
+                ?? throw new Exception("Failed to create GraphicsCaptureItem");
         }
-        catch { }
+        finally
+        {
+            WindowsDeleteString(hstring);
+        }
     }
-
-    [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
-    private static extern void CopyMemory(IntPtr dst, IntPtr src, uint size);
 
     [DllImport("combase.dll", PreserveSig = true)]
     private static extern int RoGetActivationFactory(
@@ -233,7 +279,8 @@ public class ScreenCapturer : IDisposable
 
     [DllImport("combase.dll", PreserveSig = true)]
     private static extern int WindowsCreateString(
-        [MarshalAs(UnmanagedType.LPWStr)] string src, int length, out IntPtr hstring);
+        [MarshalAs(UnmanagedType.LPWStr)] string src,
+        int length, out IntPtr hstring);
 
     [DllImport("combase.dll", PreserveSig = true)]
     private static extern int WindowsDeleteString(IntPtr hstring);
@@ -245,11 +292,13 @@ public class ScreenCapturer : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
 
+    [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
+    private static extern void CopyMemory(IntPtr dst, IntPtr src, uint size);
+
     public void Stop()
     {
         _isRunning = false;
-        _timer?.Dispose();
-        _timer = null;
+        System.Threading.Thread.Sleep(200);
         _session?.Dispose();
         _session = null;
         _framePool?.Dispose();

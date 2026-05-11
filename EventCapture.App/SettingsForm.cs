@@ -160,7 +160,6 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakePrimaryButton("Save Settings", () =>
         {
             OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
-            Hide();
         }));
         layout.Controls.Add(MakeExitButton());
 

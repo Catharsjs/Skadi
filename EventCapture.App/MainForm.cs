@@ -1,5 +1,6 @@
 using EventCapture.Core.Buffer;
 using EventCapture.Core.Capture;
+using EventCapture.Core.Diagnostics;
 
 namespace EventCapture.App;
 
@@ -7,10 +8,9 @@ public partial class MainForm : Form
 {
     private NotifyIcon _trayIcon;
     private ContextMenuStrip _trayMenu;
-    private RingBuffer<FrameEntry> _buffer;
+    private VideoEncoder _encoder;
     private ScreenCapturer _capturer;
     private ScreenshotSaver _screenshotSaver;
-    private VideoSaver _videoSaver;
     private HotkeyManager _hotkeyManager;
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;
@@ -27,7 +27,7 @@ public partial class MainForm : Form
         WindowState = FormWindowState.Minimized;
         _saveFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
-        InitializeCapture(fps: 15, bufferSeconds: 60);
+        _ = InitializeCapture(fps: 60, bufferSeconds: 30);
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
@@ -36,15 +36,28 @@ public partial class MainForm : Form
         Hide();
     }
 
-    private void InitializeCapture(int fps, int bufferSeconds)
+    private async Task InitializeCapture(int fps, int bufferSeconds,
+    int targetWidth = 0, int targetHeight = 0)
     {
         _currentFps = fps;
         _currentBufferSeconds = bufferSeconds;
+
         _capturer?.Stop();
-        _buffer = new RingBuffer<FrameEntry>(fps * bufferSeconds);
+        _capturer?.Dispose();
+        _encoder?.Dispose();
+
+        int encWidth = targetWidth > 0 ? targetWidth
+            : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
+        int encHeight = targetHeight > 0 ? targetHeight
+            : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
+
+        AppLogger.LogSettings(fps, bufferSeconds, _saveFolder, encWidth, encHeight);
+
+        _encoder = new VideoEncoder(fps, encWidth, encHeight);
         _screenshotSaver = new ScreenshotSaver(_saveFolder);
-        _videoSaver = new VideoSaver(_saveFolder);
-        _capturer = new ScreenCapturer(_buffer, fps);
+        _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
+
+        _encoder.StartRecording();
         _capturer.Start();
     }
 
@@ -92,10 +105,10 @@ public partial class MainForm : Form
         }
 
         _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds);
-        _settingsForm.OnSettingsChanged += (fps, seconds, folder) =>
+        _settingsForm.OnSettingsChanged += async (fps, seconds, folder) =>
         {
             _saveFolder = folder;
-            InitializeCapture(fps, seconds);
+            await InitializeCapture(fps, seconds);
         };
         _settingsForm.OnOverlayToggled += (visible) =>
         {
@@ -108,31 +121,33 @@ public partial class MainForm : Form
 
     public void TakeScreenshot()
     {
+        AppLogger.LogAction("Screenshot requested");
         try
         {
-            var path = _screenshotSaver.SaveScreenshot(_buffer);
-            _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                "Screenshot saved", ToolTipIcon.Info);
+            var path = _screenshotSaver.SaveScreenshot();
+            AppLogger.LogResult($"Screenshot saved: {path}");
+            _trayIcon.ShowBalloonTip(2000, "EventCapture", "Screenshot saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                $"Error: {ex.Message}", ToolTipIcon.Error);
+            AppLogger.LogError("TakeScreenshot", ex.Message);
+            _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
         }
     }
 
     public async void SaveVideo()
     {
+        AppLogger.LogAction("SaveVideo requested");
         try
         {
-            var path = await _videoSaver.SaveVideoAsync(_buffer, _currentFps);
-            _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                "Video saved", ToolTipIcon.Info);
+            var path = await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
+            AppLogger.LogResult($"Video saved: {path}");
+            _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            _trayIcon.ShowBalloonTip(2000, "EventCapture",
-                $"Error: {ex.Message}", ToolTipIcon.Error);
+            AppLogger.LogError("SaveVideo", ex.Message);
+            _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
         }
     }
 
@@ -143,7 +158,7 @@ public partial class MainForm : Form
             _hardwareMonitor.Update();
             if (_overlay.Visible)
             {
-                _overlay.UpdateBuffer(_buffer.Count);
+                _overlay.UpdateBuffer(_currentBufferSeconds);
                 _overlay.UpdateFps(_capturer.IsRunning ? _currentFps : 0);
                 _overlay.UpdateSystemInfo(
                     _hardwareMonitor.CpuLoad,
@@ -161,7 +176,10 @@ public partial class MainForm : Form
         _hotkeyManager?.Dispose();
         _hardwareMonitor?.Dispose();
         _capturer?.Stop();
+        _capturer?.Dispose();
+        _encoder?.Dispose();
         _trayIcon.Visible = false;
+        System.Threading.Thread.Sleep(500);
         Application.Exit();
     }
 
