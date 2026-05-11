@@ -101,7 +101,7 @@ public partial class MainForm : Form
         _trayIcon = new NotifyIcon
         {
             Text = "EventCapture",
-            Icon = SystemIcons.Application,
+            Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EventCapture.ico")),
             ContextMenuStrip = _trayMenu,
             Visible = true
         };
