@@ -8,14 +8,6 @@ public static class AppLogger
 
     private static readonly object _lock = new();
 
-    static AppLogger()
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(_logPath)!);
-        Log("═══════════════════════════════════════");
-        Log("EventCapture started");
-        Log("═══════════════════════════════════════");
-    }
-
     public static void Log(string message)
     {
         lock (_lock)
@@ -29,31 +21,6 @@ public static class AppLogger
         }
     }
 
-    public static void LogSettings(int fps, int bufferSeconds, string saveFolder, int width, int height)
-    {
-        Log($"SETTINGS — FPS: {fps}, Buffer: {bufferSeconds}s, " +
-            $"Resolution: {width}x{height}, Folder: {saveFolder}");
-    }
-
-    public static void LogAction(string action)
-    {
-        Log($"ACTION — {action}");
-    }
-
-    public static void LogResult(string result)
-    {
-        Log($"RESULT — {result}");
-    }
-
-    public static void LogError(string context, string error)
-    {
+    public static void LogError(string context, string error) =>
         Log($"ERROR [{context}] — {error}");
-    }
-
-    public static void LogEncoder(int frameCount, double elapsedMs, double expectedMs)
-    {
-        Log($"ENCODER — Frame {frameCount}, " +
-            $"Last 50 frames: {elapsedMs:F0}ms, Expected: {expectedMs:F0}ms, " +
-            $"Ratio: {elapsedMs / expectedMs:F2}x");
-    }
 }

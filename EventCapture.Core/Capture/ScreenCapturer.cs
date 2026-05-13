@@ -1,5 +1,4 @@
-﻿using EventCapture.Core.Buffer;
-using SharpDX.Direct3D11;
+﻿using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -30,17 +29,11 @@ interface IDirect3DDxgiInterfaceAccess
     IntPtr GetInterface([In] ref Guid iid);
 }
 
-[ComImport]
-[Guid("f2cdd966-22ae-5ea1-9596-3a289344c3be")]
-[InterfaceType(ComInterfaceType.InterfaceIsIInspectable)]
-interface IGraphicsCaptureSession3
-{
-    bool IsBorderRequired { get; set; }
-}
 public class ScreenCapturer : IDisposable
 {
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
+
     private readonly VideoEncoder _encoder;
     private readonly int _fps;
     private readonly int _targetWidth;
@@ -57,8 +50,7 @@ public class ScreenCapturer : IDisposable
 
     public bool IsRunning => _isRunning;
 
-    public ScreenCapturer(VideoEncoder encoder, int fps = 15,
-        int targetWidth = 0, int targetHeight = 0)
+    public ScreenCapturer(VideoEncoder encoder, int fps = 15, int targetWidth = 0, int targetHeight = 0)
     {
         _encoder = encoder;
         _fps = fps;
@@ -85,7 +77,7 @@ public class ScreenCapturer : IDisposable
 
         _session = _framePool.CreateCaptureSession(item);
         _session.IsCursorCaptureEnabled = false;
-        // Вимикаємо рамку тільки на Windows 11+
+
         if (Environment.OSVersion.Version.Build >= 22000)
         {
             try
@@ -95,8 +87,6 @@ public class ScreenCapturer : IDisposable
                 Marshal.QueryInterface(sessionAbi, ref session3Guid, out var session3Ptr);
                 if (session3Ptr != IntPtr.Zero)
                 {
-                    // Встановлюємо IsBorderRequired = false через vtable
-                    // IsBorderRequired setter — 7й метод в vtable (індекс 6)
                     var vtable = Marshal.ReadIntPtr(session3Ptr);
                     var setterPtr = Marshal.ReadIntPtr(vtable, 7 * IntPtr.Size);
                     var setter = Marshal.GetDelegateForFunctionPointer<SetBoolDelegate>(setterPtr);
@@ -106,8 +96,8 @@ public class ScreenCapturer : IDisposable
             }
             catch { }
         }
-        _session.StartCapture();
 
+        _session.StartCapture();
         _isRunning = true;
         Task.Run(CaptureLoop);
     }
@@ -125,12 +115,9 @@ public class ScreenCapturer : IDisposable
             double waitMs = targetMs - currentMs;
 
             if (waitMs > 2)
-            {
                 await Task.Delay((int)(waitMs - 1));
-            }
             else if (waitMs > 0)
             {
-                // Точне очікування через SpinWait
                 double spinTarget = sw.Elapsed.TotalMilliseconds + waitMs;
                 while (sw.Elapsed.TotalMilliseconds < spinTarget)
                     System.Threading.Thread.SpinWait(10);
@@ -163,8 +150,7 @@ public class ScreenCapturer : IDisposable
             _d3dDevice.ImmediateContext.CopyResource(texture, _stagingTexture!);
 
             var mapped = _d3dDevice.ImmediateContext.MapSubresource(
-                _stagingTexture!, 0, MapMode.Read,
-                SharpDX.Direct3D11.MapFlags.None);
+                _stagingTexture!, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
 
             try
             {
@@ -177,17 +163,10 @@ public class ScreenCapturer : IDisposable
                     Marshal.Copy(src, bgraData, y * stride, stride);
                 }
 
-                // Масштабування якщо потрібно
-                byte[] finalData;
-                if (_targetWidth > 0 && _targetHeight > 0 &&
+                byte[] finalData = (_targetWidth > 0 && _targetHeight > 0 &&
                     (_targetWidth != desc.Width || _targetHeight != desc.Height))
-                {
-                    finalData = ScaleFrame(bgraData, desc.Width, desc.Height);
-                }
-                else
-                {
-                    finalData = bgraData;
-                }
+                    ? ScaleFrame(bgraData, desc.Width, desc.Height)
+                    : bgraData;
 
                 _encoder.WriteFrame(finalData);
             }
@@ -226,13 +205,11 @@ public class ScreenCapturer : IDisposable
 
     private void EnsureStagingTexture(int width, int height)
     {
-        if (_stagingTexture != null &&
-            _textureWidth == width &&
-            _textureHeight == height) return;
+        if (_stagingTexture != null && _textureWidth == width && _textureHeight == height) return;
 
         _stagingTexture?.Dispose();
 
-        var desc = new Texture2DDescription
+        _stagingTexture = new SharpDX.Direct3D11.Texture2D(_d3dDevice!, new Texture2DDescription
         {
             Width = width,
             Height = height,
@@ -244,32 +221,26 @@ public class ScreenCapturer : IDisposable
             CpuAccessFlags = CpuAccessFlags.Read,
             BindFlags = BindFlags.None,
             OptionFlags = ResourceOptionFlags.None
-        };
+        });
 
-        _stagingTexture = new SharpDX.Direct3D11.Texture2D(_d3dDevice!, desc);
         _textureWidth = width;
         _textureHeight = height;
     }
 
-    private static IDirect3DDevice CreateDirect3DDevice(
-        SharpDX.Direct3D11.Device device)
+    private static IDirect3DDevice CreateDirect3DDevice(SharpDX.Direct3D11.Device device)
     {
         var dxgiDevice = device.QueryInterface<SharpDX.DXGI.Device>();
-        var hr = CreateDirect3D11DeviceFromDXGIDevice(
-            dxgiDevice.NativePointer, out var pUnknown);
-        if (hr != 0)
-            throw new Exception($"CreateDirect3D11DeviceFromDXGIDevice failed: 0x{hr:X8}");
+        var hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.NativePointer, out var pUnknown);
+        if (hr != 0) throw new Exception($"CreateDirect3D11DeviceFromDXGIDevice failed: 0x{hr:X8}");
         var result = WinRT.MarshalInterface<IDirect3DDevice>.FromAbi(pUnknown);
         Marshal.Release(pUnknown);
         return result;
     }
 
     [DllImport("d3d11.dll")]
-    private static extern int CreateDirect3D11DeviceFromDXGIDevice(
-        IntPtr dxgiDevice, out IntPtr graphicsDevice);
+    private static extern int CreateDirect3D11DeviceFromDXGIDevice(IntPtr dxgiDevice, out IntPtr graphicsDevice);
 
-    private static readonly Guid GraphicsCaptureItemGuid =
-        new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
+    private static readonly Guid GraphicsCaptureItemGuid = new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
 
     private static GraphicsCaptureItem CreateCaptureItem()
     {
@@ -285,11 +256,9 @@ public class ScreenCapturer : IDisposable
         {
             var interopGuid = typeof(IGraphicsCaptureItemInterop).GUID;
             var hr = RoGetActivationFactory(hstring, ref interopGuid, out var factoryPtr);
-            if (hr != 0)
-                throw new Exception($"RoGetActivationFactory failed: 0x{hr:X8}");
+            if (hr != 0) throw new Exception($"RoGetActivationFactory failed: 0x{hr:X8}");
 
-            var interop = (IGraphicsCaptureItemInterop)
-                Marshal.GetObjectForIUnknown(factoryPtr);
+            var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
             Marshal.Release(factoryPtr);
 
             var iid = GraphicsCaptureItemGuid;
@@ -304,13 +273,10 @@ public class ScreenCapturer : IDisposable
     }
 
     [DllImport("combase.dll", PreserveSig = true)]
-    private static extern int RoGetActivationFactory(
-        IntPtr activatableClassId, ref Guid iid, out IntPtr factory);
+    private static extern int RoGetActivationFactory(IntPtr activatableClassId, ref Guid iid, out IntPtr factory);
 
     [DllImport("combase.dll", PreserveSig = true)]
-    private static extern int WindowsCreateString(
-        [MarshalAs(UnmanagedType.LPWStr)] string src,
-        int length, out IntPtr hstring);
+    private static extern int WindowsCreateString([MarshalAs(UnmanagedType.LPWStr)] string src, int length, out IntPtr hstring);
 
     [DllImport("combase.dll", PreserveSig = true)]
     private static extern int WindowsDeleteString(IntPtr hstring);
@@ -322,23 +288,15 @@ public class ScreenCapturer : IDisposable
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x; public int y; }
 
-    [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
-    private static extern void CopyMemory(IntPtr dst, IntPtr src, uint size);
-
     public void Stop()
     {
         _isRunning = false;
         System.Threading.Thread.Sleep(200);
-        _session?.Dispose();
-        _session = null;
-        _framePool?.Dispose();
-        _framePool = null;
-        _stagingTexture?.Dispose();
-        _stagingTexture = null;
-        _wrtDevice?.Dispose();
-        _wrtDevice = null;
-        _d3dDevice?.Dispose();
-        _d3dDevice = null;
+        _session?.Dispose(); _session = null;
+        _framePool?.Dispose(); _framePool = null;
+        _stagingTexture?.Dispose(); _stagingTexture = null;
+        _wrtDevice?.Dispose(); _wrtDevice = null;
+        _d3dDevice?.Dispose(); _d3dDevice = null;
     }
 
     public void Dispose() => Stop();

@@ -1,6 +1,4 @@
-using EventCapture.Core.Buffer;
 using EventCapture.Core.Capture;
-using EventCapture.Core.Diagnostics;
 
 namespace EventCapture.App;
 
@@ -20,14 +18,9 @@ public partial class MainForm : Form
     private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
     private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
-    private int _currentFps = 15;
+    private int _currentFps = 60;
     private int _currentBufferSeconds = 60;
 
-    private static long GetProcessMemoryMB()
-    {
-        using var proc = System.Diagnostics.Process.GetCurrentProcess();
-        return proc.WorkingSet64 / 1024 / 1024;
-    }
     public MainForm()
     {
         InitializeComponent();
@@ -58,7 +51,7 @@ public partial class MainForm : Form
     }
 
     private async Task InitializeCapture(int fps, int bufferSeconds,
-    int targetWidth = 0, int targetHeight = 0)
+        int targetWidth = 0, int targetHeight = 0)
     {
         _initCts?.Cancel();
         _initCts = new CancellationTokenSource();
@@ -88,6 +81,7 @@ public partial class MainForm : Form
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
+
             await Task.Delay(200);
 
             if (ct.IsCancellationRequested) return;
@@ -97,34 +91,12 @@ public partial class MainForm : Form
             int encHeight = targetHeight > 0 ? targetHeight
                 : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
 
-            AppLogger.Log($"Before stop — RAM: {GetProcessMemoryMB()}MB");
-
-            _capturer?.Stop();
-            _capturer?.Dispose();
-            _capturer = null;
-
-            _encoder?.Stop();
-            _encoder?.Dispose();
-            _encoder = null;
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-
-            await Task.Delay(200);
-
-            AppLogger.Log($"After dispose — RAM: {GetProcessMemoryMB()}MB");
-
-            AppLogger.LogSettings(fps, bufferSeconds, _saveFolder, encWidth, encHeight);
-
             _encoder = new VideoEncoder(fps, encWidth, encHeight);
             _screenshotSaver = new ScreenshotSaver(_saveFolder);
             _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
 
             _encoder.StartRecording();
-            _capturer.Start();  
-
-            AppLogger.Log($"After start — RAM: {GetProcessMemoryMB()}MB");
+            _capturer.Start();
         }
         finally
         {
@@ -145,10 +117,8 @@ public partial class MainForm : Form
 
         bool autoStartEnabled = AppSettings.IsAutoStartEnabled();
         var itemAutostart = new ToolStripMenuItem(
-            autoStartEnabled ? "✓ Launch at Startup" : "   Launch at Startup")
-        {
-            CheckOnClick = false
-        };
+            autoStartEnabled ? "✓ Launch at Startup" : "Launch at Startup");
+
         var itemExit = new ToolStripMenuItem("Exit");
 
         itemOpen.Click += (s, e) => ShowSettings();
@@ -164,12 +134,12 @@ public partial class MainForm : Form
 
         _trayMenu.Items.AddRange(new ToolStripItem[]
         {
-        itemOpen, new ToolStripSeparator(),
-        itemScreenshot, itemSaveVideo,
-        new ToolStripSeparator(),
-        itemAutostart,
-        new ToolStripSeparator(),
-        itemExit
+            itemOpen, new ToolStripSeparator(),
+            itemScreenshot, itemSaveVideo,
+            new ToolStripSeparator(),
+            itemAutostart,
+            new ToolStripSeparator(),
+            itemExit
         });
 
         _trayIcon = new NotifyIcon
@@ -218,10 +188,9 @@ public partial class MainForm : Form
         form.Opacity = 0;
         form.Show();
 
-        int steps = 15;
-        for (int i = 1; i <= steps; i++)
+        for (int i = 1; i <= 15; i++)
         {
-            form.Opacity = i / (double)steps;
+            form.Opacity = i / 15.0;
             await Task.Delay(10);
         }
         form.Opacity = 1;
@@ -229,10 +198,9 @@ public partial class MainForm : Form
 
     private async Task SlideOut(Form form)
     {
-        int steps = 15;
-        for (int i = steps - 1; i >= 0; i--)
+        for (int i = 14; i >= 0; i--)
         {
-            form.Opacity = i / (double)steps;
+            form.Opacity = i / 15.0;
             await Task.Delay(10);
         }
         form.Hide();
@@ -241,32 +209,26 @@ public partial class MainForm : Form
 
     public void TakeScreenshot()
     {
-        AppLogger.LogAction("Screenshot requested");
         try
         {
-            var path = _screenshotSaver.SaveScreenshot();
-            AppLogger.LogResult($"Screenshot saved: {path}");
+            _screenshotSaver.SaveScreenshot();
             _trayIcon.ShowBalloonTip(2000, "EventCapture", "Screenshot saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            AppLogger.LogError("TakeScreenshot", ex.Message);
             _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
         }
     }
 
     public async void SaveVideo()
     {
-        AppLogger.LogAction("SaveVideo requested");
         try
         {
-            var path = await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
-            AppLogger.LogResult($"Video saved: {path}");
+            await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
             _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            AppLogger.LogError("SaveVideo", ex.Message);
             _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
         }
     }
@@ -279,7 +241,7 @@ public partial class MainForm : Form
             if (_overlay.Visible)
             {
                 _overlay.UpdateBuffer(_currentBufferSeconds);
-                _overlay.UpdateFps(_capturer.IsRunning ? _currentFps : 0);
+                _overlay.UpdateFps(_capturer?.IsRunning == true ? _currentFps : 0);
                 _overlay.UpdateSystemInfo(
                     _hardwareMonitor.CpuLoad,
                     _hardwareMonitor.CpuFrequency,
@@ -309,15 +271,9 @@ public partial class MainForm : Form
         {
             switch (m.WParam.ToInt32())
             {
-                case HotkeyManager.HOTKEY_SCREENSHOT:
-                    TakeScreenshot();
-                    break;
-                case HotkeyManager.HOTKEY_SAVE_VIDEO:
-                    SaveVideo();
-                    break;
-                case HotkeyManager.HOTKEY_TOGGLE_OVERLAY:
-                    ShowSettings();
-                    break;
+                case HotkeyManager.HOTKEY_SCREENSHOT: TakeScreenshot(); break;
+                case HotkeyManager.HOTKEY_SAVE_VIDEO: SaveVideo(); break;
+                case HotkeyManager.HOTKEY_TOGGLE_OVERLAY: ShowSettings(); break;
             }
         }
         base.WndProc(ref m);
@@ -337,9 +293,4 @@ public partial class MainForm : Form
     }
 
     private void MainForm_Load(object sender, EventArgs e) { }
-
-    private void MainForm_Load_1(object sender, EventArgs e)
-    {
-
-    }
 }

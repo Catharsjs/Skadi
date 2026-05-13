@@ -10,8 +10,6 @@ public partial class SettingsForm : Form
     public string SaveFolder { get; private set; }
 
     private readonly MainForm _mainForm;
-    private Label _fpsValueLabel;
-    private Label _durationValueLabel;
     private Label _folderValueLabel;
     private ToggleSwitch _toggleOverlay;
 
@@ -73,32 +71,22 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeSubLabel("Alt + F2", Color.FromArgb(80, 80, 80)));
         layout.Controls.Add(MakeSeparator());
 
-        // FPS
         layout.Controls.Add(MakeSubLabel("Frame Rate", Color.FromArgb(150, 150, 150)));
         layout.Controls.Add(MakeArrowSelector(
             new[] { "15 fps", "30 fps", "60 fps" },
             new[] { 15, 30, 60 },
             FrameRate,
-            val => {
-                FrameRate = val;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
-            }));
+            val => { FrameRate = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder); }));
         layout.Controls.Add(MakeSeparator());
 
-        // Duration
         layout.Controls.Add(MakeSubLabel("Buffer Duration", Color.FromArgb(150, 150, 150)));
         layout.Controls.Add(MakeArrowSelector(
             new[] { "15 sec", "30 sec", "45 sec", "60 sec", "90 sec", "120 sec" },
             new[] { 15, 30, 45, 60, 90, 120 },
             BufferDurationSeconds,
-            val => {
-                BufferDurationSeconds = val;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
-            }));
+            val => { BufferDurationSeconds = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder); }));
         layout.Controls.Add(MakeSeparator());
 
-
-        // Save folder
         layout.Controls.Add(MakeSubLabel("Save Folder", Color.FromArgb(150, 150, 150)));
         _folderValueLabel = new Label
         {
@@ -121,11 +109,11 @@ public partial class SettingsForm : Form
             {
                 SaveFolder = dlg.SelectedPath;
                 _folderValueLabel.Text = SaveFolder;
+                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder);
             }
         }));
         layout.Controls.Add(MakeSeparator());
 
-        // Toggle
         var toggleRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -143,48 +131,38 @@ public partial class SettingsForm : Form
         layout.Controls.Add(toggleRow);
         layout.Controls.Add(MakeSeparator());
 
-        // Buttons
         layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
     }
 
-    private Label MakeTitle(string text)
+    private Label MakeTitle(string text) => new Label
     {
-        return new Label
-        {
-            Text = text,
-            AutoSize = true,
-            Font = new Font("Segoe UI", 13, FontStyle.Bold),
-            ForeColor = Color.FromArgb(0, 196, 160),
-            BackColor = Color.Transparent,
-            Margin = new Padding(0, 0, 0, 4)
-        };
-    }
+        Text = text,
+        AutoSize = true,
+        Font = new Font("Segoe UI", 13, FontStyle.Bold),
+        ForeColor = Color.FromArgb(0, 196, 160),
+        BackColor = Color.Transparent,
+        Margin = new Padding(0, 0, 0, 4)
+    };
 
-    private Label MakeSubLabel(string text, Color color)
+    private Label MakeSubLabel(string text, Color color) => new Label
     {
-        return new Label
-        {
-            Text = text,
-            AutoSize = true,
-            Font = new Font("Segoe UI", 9),
-            ForeColor = color,
-            BackColor = Color.Transparent,
-            Margin = new Padding(0, 2, 0, 2)
-        };
-    }
+        Text = text,
+        AutoSize = true,
+        Font = new Font("Segoe UI", 9),
+        ForeColor = color,
+        BackColor = Color.Transparent,
+        Margin = new Padding(0, 2, 0, 2)
+    };
 
-    private Panel MakeSeparator()
+    private Panel MakeSeparator() => new Panel
     {
-        return new Panel
-        {
-            Dock = DockStyle.Fill,
-            Height = 1,
-            BackColor = Color.FromArgb(42, 42, 46),
-            Margin = new Padding(0, 8, 0, 8)
-        };
-    }
+        Dock = DockStyle.Fill,
+        Height = 1,
+        BackColor = Color.FromArgb(42, 42, 46),
+        Margin = new Padding(0, 8, 0, 8)
+    };
 
     private Button MakePrimaryButton(string text, Action onClick)
     {
@@ -258,8 +236,7 @@ public partial class SettingsForm : Form
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
 
-        int currentIndex = Array.IndexOf(values, currentValue);
-        if (currentIndex < 0) currentIndex = 0;
+        int currentIndex = Math.Max(0, Array.IndexOf(values, currentValue));
 
         var valueLabel = new Label
         {
@@ -330,8 +307,5 @@ public partial class SettingsForm : Form
         return panel;
     }
 
-    private void SettingsForm_Load(object sender, EventArgs e)
-    {
-
-    }
+    private void SettingsForm_Load(object sender, EventArgs e) { }
 }

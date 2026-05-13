@@ -37,7 +37,6 @@
             ClientSize = new Size(800, 450);
             Name = "MainForm";
             Text = "EventCapture";
-            Load += MainForm_Load_1;
             ResumeLayout(false);
         }
 

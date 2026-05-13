@@ -1,9 +1,4 @@
-﻿using EventCapture.Core.Diagnostics;
-using SharpDX;
-using SharpDX.Direct3D11;
-using SharpDX.DXGI;
-using SharpDX.MediaFoundation;
-using System.Diagnostics;
+﻿using SharpDX.MediaFoundation;
 using System.Runtime.InteropServices;
 
 namespace EventCapture.Core.Capture;
@@ -15,11 +10,11 @@ public class VideoEncoder : IDisposable
     private readonly int _width;
     private readonly int _height;
     private readonly int _bitrate;
+    private string _currentTempPath = string.Empty;
 
     private SinkWriter? _sinkWriter;
     private int _videoStreamIndex;
     private long _frameDuration;
-    private long _currentTime;
     private bool _isRunning;
 
     private readonly object _writeLock = new();
@@ -32,7 +27,7 @@ public class VideoEncoder : IDisposable
         _width = width;
         _height = height;
         _bitrate = bitrate * 1000;
-        _frameDuration = 10_000_000 / fps; // 100-nanosecond units
+        _frameDuration = 10_000_000 / fps;
     }
 
     public void Start(string outputPath)
@@ -50,12 +45,9 @@ public class VideoEncoder : IDisposable
         outputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
         outputMediaType.Set(MediaTypeAttributeKeys.AvgBitrate, _bitrate);
         outputMediaType.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
-        outputMediaType.Set(MediaTypeAttributeKeys.FrameSize,
-            ((long)_width << 32) | (uint)_height);
-        outputMediaType.Set(MediaTypeAttributeKeys.FrameRate,
-            ((long)_fps << 32) | 1);
-        outputMediaType.Set(MediaTypeAttributeKeys.PixelAspectRatio,
-            (1L << 32) | 1);
+        outputMediaType.Set(MediaTypeAttributeKeys.FrameSize, ((long)_width << 32) | (uint)_height);
+        outputMediaType.Set(MediaTypeAttributeKeys.FrameRate, ((long)_fps << 32) | 1);
+        outputMediaType.Set(MediaTypeAttributeKeys.PixelAspectRatio, (1L << 32) | 1);
 
         _sinkWriter.AddStream(outputMediaType, out _videoStreamIndex);
 
@@ -63,21 +55,15 @@ public class VideoEncoder : IDisposable
         inputMediaType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
         inputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.Rgb32);
         inputMediaType.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
-        inputMediaType.Set(MediaTypeAttributeKeys.FrameSize,
-            ((long)_width << 32) | (uint)_height);
-        inputMediaType.Set(MediaTypeAttributeKeys.FrameRate,
-            ((long)_fps << 32) | 1);
-        inputMediaType.Set(MediaTypeAttributeKeys.PixelAspectRatio,
-            (1L << 32) | 1);
+        inputMediaType.Set(MediaTypeAttributeKeys.FrameSize, ((long)_width << 32) | (uint)_height);
+        inputMediaType.Set(MediaTypeAttributeKeys.FrameRate, ((long)_fps << 32) | 1);
+        inputMediaType.Set(MediaTypeAttributeKeys.PixelAspectRatio, (1L << 32) | 1);
 
         _sinkWriter.SetInputMediaType(_videoStreamIndex, inputMediaType, null);
         _sinkWriter.BeginWriting();
 
-        _currentTime = 0;
         _stopwatch.Restart();
         _isRunning = true;
-
-        AppLogger.Log($"VideoEncoder started (MediaFoundation): {_width}x{_height} {_fps}fps");
     }
 
     public void WriteFrame(byte[] bgraData)
@@ -89,7 +75,6 @@ public class VideoEncoder : IDisposable
             try
             {
                 var buffer = MediaFactory.CreateMemoryBuffer(bgraData.Length);
-
                 var dataPtr = buffer.Lock(out _, out _);
 
                 int stride = _width * 4;
@@ -104,8 +89,7 @@ public class VideoEncoder : IDisposable
 
                 var sample = MediaFactory.CreateSample();
                 sample.AddBuffer(buffer);
-                sample.SampleTime = _stopwatch.ElapsedTicks *
-                    10_000_000 / System.Diagnostics.Stopwatch.Frequency;
+                sample.SampleTime = _stopwatch.ElapsedTicks * 10_000_000 / System.Diagnostics.Stopwatch.Frequency;
                 sample.SampleDuration = _frameDuration;
 
                 _sinkWriter.WriteSample(_videoStreamIndex, sample);
@@ -113,10 +97,7 @@ public class VideoEncoder : IDisposable
                 sample.Dispose();
                 buffer.Dispose();
             }
-            catch (Exception ex)
-            {
-                AppLogger.LogError("WriteFrame", ex.Message);
-            }
+            catch { }
         }
     }
 
@@ -158,26 +139,18 @@ public class VideoEncoder : IDisposable
         await Task.Run(() => process.WaitForExit(30000));
 
         if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
-        {
-            AppLogger.LogError("SaveVideo", error);
             throw new Exception($"FFmpeg trim failed: {error}");
-        }
 
         try { File.Delete(tempPath); } catch { }
-        AppLogger.LogResult($"Video saved: {outputPath}");
 
         StartRecording();
         return outputPath;
     }
 
-    private string _currentTempPath = string.Empty;
-
     public void StartRecording()
     {
         CleanupOldTempFiles();
-
-        _currentTempPath = Path.Combine(Path.GetTempPath(),
-            $"eventcapture_{Guid.NewGuid()}.mp4");
+        _currentTempPath = Path.Combine(Path.GetTempPath(), $"eventcapture_{Guid.NewGuid()}.mp4");
         Start(_currentTempPath);
     }
 
@@ -186,16 +159,10 @@ public class VideoEncoder : IDisposable
         try
         {
             var tempDir = Path.GetTempPath();
-
             foreach (var dir in Directory.GetDirectories(tempDir, "eventcapture_*"))
-            {
                 try { Directory.Delete(dir, true); } catch { }
-            }
-
             foreach (var file in Directory.GetFiles(tempDir, "eventcapture_*.mp4"))
-            {
                 try { File.Delete(file); } catch { }
-            }
         }
         catch { }
     }
@@ -215,19 +182,8 @@ public class VideoEncoder : IDisposable
             }
         }
 
-        // Видаляємо тимчасовий файл якщо він є
-        try
-        {
-            if (File.Exists(_currentTempPath))
-                File.Delete(_currentTempPath);
-        }
-        catch { }
-
-        AppLogger.Log("VideoEncoder stopped");
+        try { if (File.Exists(_currentTempPath)) File.Delete(_currentTempPath); } catch { }
     }
 
-    public void Dispose()
-    {
-        Stop();
-    }
+    public void Dispose() => Stop();
 }
