@@ -6,6 +6,7 @@ public class AppSettings
 {
     public int Fps { get; set; } = 60;
     public int BufferSeconds { get; set; } = 60;
+    public string Resolution { get; set; } = "Native";
     public string SaveFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
 

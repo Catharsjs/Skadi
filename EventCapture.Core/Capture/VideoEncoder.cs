@@ -181,8 +181,6 @@ public class VideoEncoder : IDisposable
                 _sinkWriter = null;
             }
         }
-
-        try { if (File.Exists(_currentTempPath)) File.Delete(_currentTempPath); } catch { }
     }
 
     public void Dispose() => Stop();

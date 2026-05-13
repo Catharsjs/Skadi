@@ -30,7 +30,7 @@ public partial class MainForm : Form
         WindowState = FormWindowState.Minimized;
         _appSettings = AppSettings.Load();
         _saveFolder = _appSettings.SaveFolder;
-        Task.Run(async () => await InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds));
+        Task.Run(async () => await InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds, _appSettings.Resolution));
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
         _overlay = new OverlayForm();
@@ -51,7 +51,7 @@ public partial class MainForm : Form
     }
 
     private async Task InitializeCapture(int fps, int bufferSeconds,
-        int targetWidth = 0, int targetHeight = 0)
+    string resolution = "Native", int targetWidth = 0, int targetHeight = 0)
     {
         _initCts?.Cancel();
         _initCts = new CancellationTokenSource();
@@ -86,10 +86,26 @@ public partial class MainForm : Form
 
             if (ct.IsCancellationRequested) return;
 
-            int encWidth = targetWidth > 0 ? targetWidth
-                : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
-            int encHeight = targetHeight > 0 ? targetHeight
-                : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
+            int nativeWidth = System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
+            int nativeHeight = System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
+
+            int encWidth = resolution switch
+            {
+                "720p" => 1280,
+                "1080p" => 1920,
+                "1440p" => 2560,
+                _ => nativeWidth
+            };
+            int encHeight = resolution switch
+            {
+                "720p" => 720,
+                "1080p" => 1080,
+                "1440p" => 1440,
+                _ => nativeHeight
+            };
+
+            if (targetWidth > 0) encWidth = targetWidth;
+            if (targetHeight > 0) encHeight = targetHeight;
 
             _encoder = new VideoEncoder(fps, encWidth, encHeight);
             _screenshotSaver = new ScreenshotSaver(_saveFolder);
@@ -157,15 +173,16 @@ public partial class MainForm : Form
     {
         if (_settingsForm == null)
         {
-            _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds);
-            _settingsForm.OnSettingsChanged += async (fps, seconds, folder) =>
+            _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds, _appSettings.Resolution);
+            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution) =>
             {
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
                 _appSettings.BufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
+                _appSettings.Resolution = resolution;
                 _appSettings.Save();
-                await InitializeCapture(fps, seconds);
+                await InitializeCapture(fps, seconds, resolution);
             };
             _settingsForm.OnOverlayToggled += (visible) =>
             {
