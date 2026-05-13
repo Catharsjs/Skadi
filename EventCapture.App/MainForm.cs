@@ -15,15 +15,23 @@ public partial class MainForm : Form
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;
     private AppSettings _appSettings;
+    private CancellationTokenSource? _initCts;
+    private readonly SemaphoreSlim _initSemaphore = new SemaphoreSlim(1, 1);
     private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
     private const int WM_HOTKEY = 0x0312;
     private string _saveFolder;
     private int _currentFps = 15;
     private int _currentBufferSeconds = 60;
 
+    private static long GetProcessMemoryMB()
+    {
+        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+        return proc.WorkingSet64 / 1024 / 1024;
+    }
     public MainForm()
     {
         InitializeComponent();
+        Opacity = 0;
         ShowInTaskbar = false;
         FormBorderStyle = FormBorderStyle.None;
         WindowState = FormWindowState.Minimized;
@@ -52,26 +60,76 @@ public partial class MainForm : Form
     private async Task InitializeCapture(int fps, int bufferSeconds,
     int targetWidth = 0, int targetHeight = 0)
     {
-        _currentFps = fps;
-        _currentBufferSeconds = bufferSeconds;
+        _initCts?.Cancel();
+        _initCts = new CancellationTokenSource();
+        var ct = _initCts.Token;
 
-        _capturer?.Stop();
-        _capturer?.Dispose();
-        _encoder?.Dispose();
+        try { await Task.Delay(200, ct); }
+        catch (TaskCanceledException) { return; }
 
-        int encWidth = targetWidth > 0 ? targetWidth
-            : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
-        int encHeight = targetHeight > 0 ? targetHeight
-            : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
+        if (ct.IsCancellationRequested) return;
 
-        AppLogger.LogSettings(fps, bufferSeconds, _saveFolder, encWidth, encHeight);
+        await _initSemaphore.WaitAsync();
+        try
+        {
+            if (ct.IsCancellationRequested) return;
 
-        _encoder = new VideoEncoder(fps, encWidth, encHeight);
-        _screenshotSaver = new ScreenshotSaver(_saveFolder);
-        _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
+            _currentFps = fps;
+            _currentBufferSeconds = bufferSeconds;
 
-        _encoder.StartRecording();
-        _capturer.Start();
+            _capturer?.Stop();
+            _capturer?.Dispose();
+            _capturer = null;
+
+            _encoder?.Stop();
+            _encoder?.Dispose();
+            _encoder = null;
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            await Task.Delay(200);
+
+            if (ct.IsCancellationRequested) return;
+
+            int encWidth = targetWidth > 0 ? targetWidth
+                : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
+            int encHeight = targetHeight > 0 ? targetHeight
+                : System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
+
+            AppLogger.Log($"Before stop — RAM: {GetProcessMemoryMB()}MB");
+
+            _capturer?.Stop();
+            _capturer?.Dispose();
+            _capturer = null;
+
+            _encoder?.Stop();
+            _encoder?.Dispose();
+            _encoder = null;
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            await Task.Delay(200);
+
+            AppLogger.Log($"After dispose — RAM: {GetProcessMemoryMB()}MB");
+
+            AppLogger.LogSettings(fps, bufferSeconds, _saveFolder, encWidth, encHeight);
+
+            _encoder = new VideoEncoder(fps, encWidth, encHeight);
+            _screenshotSaver = new ScreenshotSaver(_saveFolder);
+            _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
+
+            _encoder.StartRecording();
+            _capturer.Start();  
+
+            AppLogger.Log($"After start — RAM: {GetProcessMemoryMB()}MB");
+        }
+        finally
+        {
+            _initSemaphore.Release();
+        }
     }
 
     private void InitializeTray()
@@ -137,6 +195,7 @@ public partial class MainForm : Form
                 _appSettings.BufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
                 _appSettings.Save();
+                await InitializeCapture(fps, seconds);
             };
             _settingsForm.OnOverlayToggled += (visible) =>
             {
@@ -278,4 +337,9 @@ public partial class MainForm : Form
     }
 
     private void MainForm_Load(object sender, EventArgs e) { }
+
+    private void MainForm_Load_1(object sender, EventArgs e)
+    {
+
+    }
 }

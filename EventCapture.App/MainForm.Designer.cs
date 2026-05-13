@@ -36,7 +36,8 @@
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(800, 450);
             Name = "MainForm";
-            Text = "Form1";
+            Text = "EventCapture";
+            Load += MainForm_Load_1;
             ResumeLayout(false);
         }
 

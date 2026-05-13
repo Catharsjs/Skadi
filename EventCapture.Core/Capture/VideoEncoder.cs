@@ -39,16 +39,12 @@ public class VideoEncoder : IDisposable
     {
         if (_isRunning) return;
 
-        MediaFactory.Startup(MediaFactory.Version, 0);
-
-        // Створюємо атрибути для SinkWriter
         using var attributes = new MediaAttributes(2);
         attributes.Set(SinkWriterAttributeKeys.ReadwriteEnableHardwareTransforms, 1);
         attributes.Set(SinkWriterAttributeKeys.DisableThrottling, 1);
 
         _sinkWriter = MediaFactory.CreateSinkWriterFromURL(outputPath, null, attributes);
 
-        // Налаштовуємо вихідний формат H.264
         using var outputMediaType = new MediaType();
         outputMediaType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
         outputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
@@ -63,7 +59,6 @@ public class VideoEncoder : IDisposable
 
         _sinkWriter.AddStream(outputMediaType, out _videoStreamIndex);
 
-        // Налаштовуємо вхідний формат BGRA
         using var inputMediaType = new MediaType();
         inputMediaType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
         inputMediaType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.Rgb32);
@@ -179,9 +174,30 @@ public class VideoEncoder : IDisposable
 
     public void StartRecording()
     {
+        CleanupOldTempFiles();
+
         _currentTempPath = Path.Combine(Path.GetTempPath(),
             $"eventcapture_{Guid.NewGuid()}.mp4");
         Start(_currentTempPath);
+    }
+
+    private static void CleanupOldTempFiles()
+    {
+        try
+        {
+            var tempDir = Path.GetTempPath();
+
+            foreach (var dir in Directory.GetDirectories(tempDir, "eventcapture_*"))
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
+
+            foreach (var file in Directory.GetFiles(tempDir, "eventcapture_*.mp4"))
+            {
+                try { File.Delete(file); } catch { }
+            }
+        }
+        catch { }
     }
 
     public void Stop()
@@ -191,17 +207,21 @@ public class VideoEncoder : IDisposable
 
         lock (_writeLock)
         {
-            try
+            if (_sinkWriter != null)
             {
-                _sinkWriter?.Finalize();
-                _sinkWriter?.Dispose();
+                try { _sinkWriter.Finalize(); } catch { }
+                try { _sinkWriter.Dispose(); } catch { }
                 _sinkWriter = null;
             }
-            catch (Exception ex)
-            {
-                AppLogger.LogError("Stop", ex.Message);
-            }
         }
+
+        // Видаляємо тимчасовий файл якщо він є
+        try
+        {
+            if (File.Exists(_currentTempPath))
+                File.Delete(_currentTempPath);
+        }
+        catch { }
 
         AppLogger.Log("VideoEncoder stopped");
     }
@@ -209,12 +229,5 @@ public class VideoEncoder : IDisposable
     public void Dispose()
     {
         Stop();
-        try
-        {
-            if (File.Exists(_currentTempPath))
-                File.Delete(_currentTempPath);
-        }
-        catch { }
-        MediaFactory.Shutdown();
     }
 }
