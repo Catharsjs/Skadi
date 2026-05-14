@@ -13,7 +13,7 @@
 		<PackageReference Include="FFMpegCore" Version="5.4.0" />
 		<PackageReference Include="FFMpegCore.Extensions.System.Drawing.Common" Version="5.0.3" />
 		<PackageReference Include="LibreHardwareMonitorLib" Version="0.9.7-pre675" />
-		<PackageReference Include="NAudio" Version="3.0.0-preview.5" />
+		<PackageReference Include="NAudio" Version="2.3.0" />
 		<PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
 		<PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
 		<PackageReference Include="SharpDX.MediaFoundation" Version="4.2.0" />

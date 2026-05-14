@@ -12,6 +12,8 @@ public partial class MainForm : Form
     private VideoEncoder _encoder = null!;
     private ScreenCapturer _capturer = null!;
     private ScreenshotSaver _screenshotSaver = null!;
+    private DateTime _videoStartTime;
+    private double _audioVideoStartOffset = 0;
 
     // ─── UI компоненти ────────────────────────────────────────────────────
     private HotkeyManager _hotkeyManager;
@@ -29,6 +31,9 @@ public partial class MainForm : Form
     private int _currentBufferSeconds = 60;
     private volatile bool _overlayVisible = false;
     private System.Threading.Timer? _hardwareTimer;
+    private static readonly string _logPath = System.IO.Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+    "EventCapture", "full_debug.log");
     private EventCapture.Core.Capture.AudioRecorder? _audioRecorder;
 
     public MainForm()
@@ -41,6 +46,17 @@ public partial class MainForm : Form
 
         // Завантажуємо збережені налаштування
         _appSettings = AppSettings.Load();
+       System.IO.Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+    "EventCapture", "full_debug.log");
+        System.IO.File.WriteAllText(_logPath,
+            $"[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM START ═══\n" +
+            $"  Fps: {_appSettings.Fps}, Buffer: {_appSettings.BufferSeconds}s\n" +
+            $"  Resolution: {_appSettings.Resolution}\n" +
+            $"  RecordSystem: {_appSettings.RecordSystemAudio}\n" +
+            $"  RecordMic: {_appSettings.RecordMicrophone}\n" +
+            $"  SystemDeviceId: {_appSettings.SystemAudioDeviceId ?? "null"}\n" +
+            $"  MicDeviceId: {_appSettings.MicDeviceId ?? "null"}\n\n");
         _saveFolder = _appSettings.SaveFolder;
 
         // Запускаємо захоплення в фоні щоб не блокувати UI
@@ -78,6 +94,8 @@ public partial class MainForm : Form
         string resolution = "Native", int targetWidth = 0, int targetHeight = 0)
     {
         _initCts?.Cancel();
+        System.IO.File.AppendAllText(_logPath,
+     $"[{DateTime.Now:HH:mm:ss.fff}] InitializeCapture: fps={fps}, buffer={bufferSeconds}, res={resolution}\n");
         _initCts = new CancellationTokenSource();
         var ct = _initCts.Token;
 
@@ -139,8 +157,35 @@ public partial class MainForm : Form
             _audioRecorder?.Dispose();
             _audioRecorder = new EventCapture.Core.Capture.AudioRecorder();
 
+            // Моніторимо зміну дефолтного пристрою Windows
+            _audioRecorder.DefaultDeviceChanged += (newDeviceId) =>
+            {
+                if (_audioRecorder != null && _audioRecorder.UseDefaultSystemDevice &&
+                    _appSettings.RecordSystemAudio && _audioRecorder.IsRecordingSystem)
+                {
+                    _audioRecorder.RestartSystemCapture(null);
+
+                    if (_settingsForm != null)
+                    {
+                        try
+                        {
+                            var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+                            var device = enumerator.GetDefaultAudioEndpoint(
+                                NAudio.CoreAudioApi.DataFlow.Render,
+                                NAudio.CoreAudioApi.Role.Multimedia);
+                            _settingsForm.UpdateSystemDeviceName(device.FriendlyName);
+                        }
+                        catch { }
+                    }
+                }
+            };
+
             // Запускаємо відео і аудіо максимально близько
             _encoder.StartRecording();
+
+            System.IO.File.AppendAllText(_logPath,
+    $"[{DateTime.Now:HH:mm:ss.fff}] Encoder started: {encWidth}x{encHeight} {fps}fps\n" +
+    $"  AudioRecorder: RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
             _audioRecorder.StartRecording(
                 _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
                 _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
@@ -216,6 +261,16 @@ public partial class MainForm : Form
 
             _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution, hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI, recordSystem, systemDeviceId, recordMic, micDeviceId) =>
             {
+                // Визначаємо чи потрібен перезапуск запису
+                bool needsRestart = fps != _appSettings.Fps ||
+                                    seconds != _appSettings.BufferSeconds ||
+                                    resolution != _appSettings.Resolution ||
+                                    recordSystem != _appSettings.RecordSystemAudio ||
+                                    recordMic != _appSettings.RecordMicrophone ||
+                                    systemDeviceId != _appSettings.SystemAudioDeviceId ||
+                                    micDeviceId != _appSettings.MicDeviceId;
+
+                // Оновлюємо налаштування
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
                 _appSettings.BufferSeconds = seconds;
@@ -229,8 +284,16 @@ public partial class MainForm : Form
                 _appSettings.RecordMicrophone = recordMic;
                 _appSettings.MicDeviceId = micDeviceId;
                 _appSettings.Save();
+
+                // Хоткеї оновлюємо завжди
                 _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
-                await InitializeCapture(fps, seconds, resolution);
+
+                // Перезапускаємо запис тільки якщо змінились відео/аудіо налаштування
+                if (needsRestart)
+                {
+                    await InitializeCapture(fps, seconds, resolution);
+                    _trayIcon.ShowBalloonTip(2000, "EventCapture", "Налаштування застосовано, запис поновлено", ToolTipIcon.Info);
+                }
             };
 
             // Тимчасово знімаємо хоткеї під час введення нової комбінації
@@ -297,6 +360,14 @@ public partial class MainForm : Form
 
     public async void SaveVideo()
     {
+        string logPath = System.IO.Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+    "EventCapture", "full_debug.log");
+        System.IO.File.AppendAllText(_logPath,
+     $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ SaveVideo START ═══\n" +
+     $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
+     $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}, IsRecordingMic={_audioRecorder?.IsRecordingMic}\n" +
+     $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
         try
         {
             double videoElapsed = _encoder.RecordingStopwatch.Elapsed.TotalSeconds;
@@ -305,8 +376,7 @@ public partial class MainForm : Form
             if (_audioRecorder != null &&
                 (_appSettings.RecordSystemAudio || _appSettings.RecordMicrophone))
             {
-                var finalPath = await _audioRecorder.SaveLastSecondsAsync(
-                    _saveFolder, _currentBufferSeconds, videoPath, videoElapsed);
+                var finalPath = await _audioRecorder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds, videoPath, videoElapsed, _encoder.StartTimestamp);
 
                 if (finalPath != null && File.Exists(finalPath))
                     try { File.Delete(videoPath); } catch { }
@@ -349,9 +419,22 @@ public partial class MainForm : Form
         }, null, 0, 1000);
     }
 
+    public void SetUserSelectedSystemDevice(string deviceId)
+    {
+        if (_audioRecorder != null)
+        {
+            _audioRecorder.UseDefaultSystemDevice = false;
+            _audioRecorder.RestartSystemCapture(deviceId);
+        }
+    }
+
     private void ExitApp()
     {
         _audioRecorder?.Dispose();
+        System.IO.File.AppendAllText(_logPath,
+    $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM EXIT ═══\n" +
+    $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}\n" +
+    $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
         _hotkeyManager?.Dispose();
         _hardwareMonitor?.Dispose();
         _capturer?.Stop();

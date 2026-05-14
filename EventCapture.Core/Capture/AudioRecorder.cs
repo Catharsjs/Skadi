@@ -1,4 +1,5 @@
 ﻿using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
 
 namespace EventCapture.Core.Capture;
@@ -16,12 +17,18 @@ public class AudioRecorder : IDisposable
     private string _loopbackTempPath = string.Empty;
     private string _micTempPath = string.Empty;
     private readonly System.Diagnostics.Stopwatch _recordingStopwatch = new();
-    public bool IsRecordingSystem { get; private set; }
-    public bool IsRecordingMic { get; private set; }
-
+    private readonly System.Diagnostics.Stopwatch _firstRecordingStopwatch = new();
+    private long _firstCaptureTimestamp = 0;
     private readonly object _loopbackLock = new();
     private readonly object _micLock = new();
-
+    private MMDeviceEnumerator? _deviceEnumerator;
+    private AudioDeviceChangeCallback? _deviceChangeCallback;
+    public event Action<string>? DefaultDeviceChanged;
+    public readonly List<string> LoopbackTempPaths = new();
+    public bool IsRecordingSystem { get; private set; }
+    public bool IsRecordingMic { get; private set; }
+    public bool UseDefaultSystemDevice { get; set; } = true;
+    public bool UseDefaultMicDevice { get; set; } = true;
     // ─── Отримання списку пристроїв ───────────────────────────────────────
 
     public static List<(string Id, string Name)> GetOutputDevices()
@@ -47,6 +54,10 @@ public class AudioRecorder : IDisposable
     public void StartRecording(bool recordSystem, string? systemDeviceId,
         bool recordMic, string? micDeviceId)
     {
+        // Починаємо моніторинг змін пристроїв
+        _deviceEnumerator = new MMDeviceEnumerator();
+        _deviceChangeCallback = new AudioDeviceChangeCallback(this);
+        _deviceEnumerator.RegisterEndpointNotificationCallback(_deviceChangeCallback);
         CleanupOldTempFiles();
 
         if (recordSystem)
@@ -56,8 +67,40 @@ public class AudioRecorder : IDisposable
             StartMicCapture(micDeviceId);
     }
 
+    public void RestartSystemCapture(string? deviceId)
+    {
+        // Зупиняємо поточне захоплення
+        if (_loopbackCapture != null)
+        {
+            _loopbackCapture.StopRecording();
+            _loopbackCapture.Dispose();
+            _loopbackCapture = null;
+        }
+        lock (_loopbackLock)
+        {
+            _loopbackWriter?.Flush();
+            _loopbackWriter?.Dispose();
+            _loopbackWriter = null;
+        }
+        IsRecordingSystem = false;
+
+        // Новий тимчасовий файл
+        _loopbackTempPath = Path.Combine(Path.GetTempPath(),
+            $"eventcapture_audio_system_{Guid.NewGuid()}.wav");
+        LoopbackTempPaths.Add(_loopbackTempPath);
+        UseDefaultSystemDevice = deviceId == null;
+        // Видаляємо незакриті шляхи від попереднього захоплення
+        if (!string.IsNullOrEmpty(_loopbackTempPath) && !File.Exists(_loopbackTempPath))
+            LoopbackTempPaths.Remove(_loopbackTempPath);
+        StartSystemCapture(deviceId);
+    }
+
     private void StartSystemCapture(string? deviceId)
     {
+        string logPath = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "EventCapture", "full_debug.log");
+
         try
         {
             var enumerator = new MMDeviceEnumerator();
@@ -65,23 +108,49 @@ public class AudioRecorder : IDisposable
                 ? enumerator.GetDevice(deviceId)
                 : enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
 
-            _loopbackCapture = new WasapiLoopbackCapture(device);
             _loopbackTempPath = Path.Combine(Path.GetTempPath(),
                 $"eventcapture_audio_system_{Guid.NewGuid()}.wav");
+            LoopbackTempPaths.Add(_loopbackTempPath);
+
+            System.IO.File.AppendAllText(logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture: {device.FriendlyName}\n" +
+                $"  TempPath: {_loopbackTempPath}\n" +
+                $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n");
+
+            _loopbackCapture = new WasapiLoopbackCapture(device);
             _loopbackWriter = new WaveFileWriter(_loopbackTempPath, _loopbackCapture.WaveFormat);
 
+            int frameCount = 0;
             _loopbackCapture.DataAvailable += (s, e) =>
             {
                 lock (_loopbackLock)
                     _loopbackWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+
+                frameCount++;
+                if (frameCount == 1 || frameCount % 100 == 0)
+                {
+                    System.IO.File.AppendAllText(logPath,
+                        $"[{DateTime.Now:HH:mm:ss}] DataAvailable: frame={frameCount}, bytes={e.BytesRecorded}\n");
+                }
             };
 
             _loopbackCapture.StartRecording();
+            if (_firstCaptureTimestamp == 0)
+                _firstCaptureTimestamp = Environment.TickCount64;
             _recordingStopwatch.Restart();
-            _recordingStartTime = DateTime.Now;
+            if (!_firstRecordingStopwatch.IsRunning)
+                _firstRecordingStopwatch.Restart();
             IsRecordingSystem = true;
+
+            System.IO.File.AppendAllText(logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] Recording started on: {device.FriendlyName}\n");
         }
-        catch { IsRecordingSystem = false; }
+        catch (Exception ex)
+        {
+            System.IO.File.AppendAllText(logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture ERROR: {ex.Message}\n");
+            IsRecordingSystem = false;
+        }
     }
 
     private void StartMicCapture(string? deviceId)
@@ -113,15 +182,64 @@ public class AudioRecorder : IDisposable
 
     // ─── Збереження останніх N секунд ────────────────────────────────────
     public async Task<string?> SaveLastSecondsAsync(string outputFolder, int seconds,
-    string videoPath, double videoElapsedSeconds)
+     string videoPath, double videoElapsedSeconds, long videoStartTimestamp)
     {
         double audioElapsedSeconds = _recordingStopwatch.Elapsed.TotalSeconds;
-
+        double originalAudioElapsed = audioElapsedSeconds;
         StopCapture();
         await Task.Delay(300);
 
         var audioInputs = new List<string>();
-        if (File.Exists(_loopbackTempPath)) audioInputs.Add(_loopbackTempPath);
+        string logPath = System.IO.Path.Combine(
+     Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+     "EventCapture", "full_debug.log");
+        System.IO.File.AppendAllText(logPath,
+            $"[{DateTime.Now:HH:mm:ss.fff}] SaveLastSecondsAsync\n" +
+            $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
+            $"  MicPath exists: {File.Exists(_micTempPath)}, size: {(File.Exists(_micTempPath) ? new FileInfo(_micTempPath).Length : 0)}\n");
+        foreach (var p in LoopbackTempPaths)
+            System.IO.File.AppendAllText(logPath,
+                $"  loopback: exists={File.Exists(p)}, size={(File.Exists(p) ? new FileInfo(p).Length : 0)}, path={p}\n");
+        // Конкатенуємо всі сегменти системного аудіо
+        if (LoopbackTempPaths.Count > 0)
+        {
+            var existingPaths = LoopbackTempPaths.Where(File.Exists).ToList();
+            if (existingPaths.Count == 1)
+            {
+                audioInputs.Add(existingPaths[0]);
+            }
+            else if (existingPaths.Count > 1)
+            {
+                // Зливаємо всі сегменти в один файл
+                string mergedLoopback = Path.Combine(Path.GetTempPath(),
+                    $"eventcapture_audio_system_merged_{Guid.NewGuid()}.wav");
+                var concatInputs = string.Join(" ", existingPaths.Select(p => $"-i \"{p}\""));
+                var concatArgs = $"-y {concatInputs} -filter_complex concat=n={existingPaths.Count}:v=0:a=1 \"{mergedLoopback}\"";
+
+                var concatProcess = new System.Diagnostics.Process
+                {
+                    StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath(),
+                        Arguments = concatArgs,
+                        UseShellExecute = false,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    }
+                };
+                concatProcess.Start();
+                string concatError = await concatProcess.StandardError.ReadToEndAsync();
+                await Task.Run(() => concatProcess.WaitForExit(30000));
+
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(Environment.GetFolderPath(
+                        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
+                    $"[{DateTime.Now:HH:mm:ss.fff}] Concat result: exists={File.Exists(mergedLoopback)}, size={(File.Exists(mergedLoopback) ? new FileInfo(mergedLoopback).Length : 0)}\nError: {concatError}\n");
+
+                if (File.Exists(mergedLoopback))
+                    audioInputs.Add(mergedLoopback);
+            }
+        }
         if (File.Exists(_micTempPath)) audioInputs.Add(_micTempPath);
         if (audioInputs.Count == 0) return null;
 
@@ -149,7 +267,20 @@ public class AudioRecorder : IDisposable
             System.Globalization.CultureInfo.InvariantCulture,
             out double videoDuration))
             videoDuration = seconds;
+        // Якщо є merged файл — коригуємо audioElapsedSeconds
+        if (audioInputs.Count > 0 && audioInputs[0].Contains("merged"))
+        {
+            double realOffset = (_firstCaptureTimestamp > 0 && videoStartTimestamp > 0)
+    ? (_firstCaptureTimestamp - videoStartTimestamp) / 1000.0
+    : 1.8; // fallback якщо timestamps недійсні
+            realOffset = Math.Max(0, Math.Min(realOffset, 5.0)); // обмежуємо від 0 до 5 секунд
+            audioElapsedSeconds = videoElapsedSeconds + realOffset;
 
+            System.IO.File.AppendAllText(
+                System.IO.Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
+                $"[{DateTime.Now:HH:mm:ss.fff}] Merged calc: realOffset={realOffset:F3}, videoElapsed={videoElapsedSeconds:F3}, audioElapsed={audioElapsedSeconds:F3}\n");
+        }
         var trimmedAudio = new List<string>();
         foreach (var audioPath in audioInputs)
         {
@@ -176,7 +307,10 @@ public class AudioRecorder : IDisposable
             trimProcess.Start();
             await trimProcess.StandardError.ReadToEndAsync();
             await Task.Run(() => trimProcess.WaitForExit(15000));
-
+            System.IO.File.AppendAllText(
+    System.IO.Path.Combine(Environment.GetFolderPath(
+        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
+    $"[{DateTime.Now:HH:mm:ss.fff}] Trim result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n");
             if (File.Exists(trimmed) && new FileInfo(trimmed).Length > 0)
                 trimmedAudio.Add(trimmed);
         }
@@ -205,11 +339,15 @@ public class AudioRecorder : IDisposable
             }
         };
         mergeProcess.Start();
-        await mergeProcess.StandardError.ReadToEndAsync();
+        string mergeError = await mergeProcess.StandardError.ReadToEndAsync();
         await Task.Run(() => mergeProcess.WaitForExit(30000));
-
+        System.IO.File.AppendAllText(
+    System.IO.Path.Combine(Environment.GetFolderPath(
+        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
+    $"[{DateTime.Now:HH:mm:ss.fff}] Merge result: exists={File.Exists(outputPath)}, size={(File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0)}\nMergeError: {mergeError}\n");
         foreach (var p in audioInputs) try { File.Delete(p); } catch { }
         foreach (var p in trimmedAudio) try { File.Delete(p); } catch { }
+        LoopbackTempPaths.Clear();
 
         if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
             return null;
@@ -246,7 +384,17 @@ public class AudioRecorder : IDisposable
         }
 
         IsRecordingSystem = false;
+        _firstCaptureTimestamp = 0;
         IsRecordingMic = false;
+        _firstRecordingStopwatch.Reset();
+
+        if (_deviceEnumerator != null && _deviceChangeCallback != null)
+        {
+            _deviceEnumerator.UnregisterEndpointNotificationCallback(_deviceChangeCallback);
+            _deviceEnumerator.Dispose();
+            _deviceEnumerator = null;
+            _deviceChangeCallback = null;
+        }
     }
 
     private static void CleanupOldTempFiles()
@@ -261,4 +409,30 @@ public class AudioRecorder : IDisposable
     }
 
     public void Dispose() => StopCapture();
+
+    private class AudioDeviceChangeCallback : IMMNotificationClient
+    {
+        private readonly AudioRecorder _recorder;
+
+        public AudioDeviceChangeCallback(AudioRecorder recorder)
+        {
+            _recorder = recorder;
+        }
+
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+        {
+            System.IO.File.AppendAllText(
+                System.IO.Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.MyDocuments), "EventCapture", "device_change.log"),
+                $"[{DateTime.Now:HH:mm:ss}] OnDefaultDeviceChanged: flow={flow}, role={role}, id={defaultDeviceId}\n");
+
+            if (flow == DataFlow.Render && role == Role.Multimedia)
+                _recorder.DefaultDeviceChanged?.Invoke(defaultDeviceId);
+        }
+
+        public void OnDeviceAdded(string pwstrDeviceId) { }
+        public void OnDeviceRemoved(string deviceId) { }
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) { }
+        public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
+    }
 }

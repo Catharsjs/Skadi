@@ -10,6 +10,7 @@ public class VideoEncoder : IDisposable
     // Stopwatch для реальних timestamps кадрів (замість лічильника)
     private readonly System.Diagnostics.Stopwatch _stopwatch = new();
     public readonly System.Diagnostics.Stopwatch RecordingStopwatch = new();
+    public long StartTimestamp { get; private set; }
     private readonly int _fps;
     private readonly int _width;
     private readonly int _height;
@@ -69,6 +70,7 @@ public class VideoEncoder : IDisposable
 
         _stopwatch.Restart();
         RecordingStopwatch.Restart();
+        StartTimestamp = Environment.TickCount64;
         RecordingStartTime = DateTime.Now;
         _isRunning = true;
     }

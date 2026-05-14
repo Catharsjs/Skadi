@@ -369,6 +369,12 @@ public partial class SettingsForm : Form
             btn.Text = defaultDevice.FriendlyName;
             if (isSystem) _systemDeviceId = defaultDevice.ID;
             else _micDeviceId = defaultDevice.ID;
+            System.IO.File.AppendAllText(
+    System.IO.Path.Combine(Environment.GetFolderPath(
+        Environment.SpecialFolder.MyDocuments), "EventCapture", "audio_device.log"),
+    $"[{DateTime.Now:HH:mm:ss}] MakeAudioRow isSystem={isSystem}\n" +
+    $"  btn.Text: {btn.Text}\n" +
+    $"  deviceId: {(isSystem ? _systemDeviceId ?? "null" : _micDeviceId ?? "null")}\n");
         }
         catch { btn.Text = "Select device..."; }
 
@@ -433,9 +439,19 @@ public partial class SettingsForm : Form
                 var item = new ToolStripMenuItem(name);
                 item.Click += (_, __) =>
                 {
-                    if (isSystem) _systemDeviceId = id;
-                    else _micDeviceId = id;
+                    if (isSystem)
+                    {
+                        _systemDeviceId = id;
+                        // Повідомляємо AudioRecorder що користувач вибрав конкретний пристрій
+                        if (_mainForm != null)
+                            _mainForm.SetUserSelectedSystemDevice(id);
+                    }
+                    else
+                    {
+                        _micDeviceId = id;
+                    }
                     btn.Text = name;
+                    InvokeSettingsChanged();
                 };
                 menu.Items.Add(item);
             }
@@ -750,6 +766,11 @@ public partial class SettingsForm : Form
         btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
         btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
         return btn;
+    }
+    public void UpdateSystemDeviceName(string deviceName)
+    {
+        if (InvokeRequired) { Invoke(() => UpdateSystemDeviceName(deviceName)); return; }
+        _btnSystemDevice.Text = deviceName;
     }
 
     private void SettingsForm_Load(object sender, EventArgs e) { }
