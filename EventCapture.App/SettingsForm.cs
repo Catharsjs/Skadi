@@ -2,25 +2,38 @@
 
 public partial class SettingsForm : Form
 {
-    public event Action<int, int, string, string>? OnSettingsChanged;
+    public event Action<int, int, string, string, string, string, string>? OnSettingsChanged;
     public event Action<bool>? OnOverlayToggled;
 
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
     public string SaveFolder { get; private set; }
+    public event Action? OnHotkeyInputStarted;
+    public event Action? OnHotkeyInputFinished;
 
     private readonly MainForm _mainForm;
     private string _currentResolution = "Native";
+    private Button? _btnHotkeyScreenshot;
+    private Button? _btnHotkeySaveVideo;
+    private Button? _btnHotkeyToggleUI;
+    private string _hotkeyScreenshot;
+    private string _hotkeySaveVideo;
+    private string _hotkeyToggleUI;
     private Label _folderValueLabel = null!;
     private ToggleSwitch _toggleOverlay = null!;
 
-    public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds, string resolution = "Native")
+    public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds,
+    string resolution = "Native", string hotkeyScreenshot = "Alt+F1",
+    string hotkeySaveVideo = "Alt+F2", string hotkeyToggleUI = "Alt+F3")
     {
         _mainForm = mainForm;
         SaveFolder = saveFolder;
         FrameRate = fps;
         BufferDurationSeconds = bufferSeconds;
         _currentResolution = resolution;
+        _hotkeyScreenshot = hotkeyScreenshot;
+        _hotkeySaveVideo = hotkeySaveVideo;
+        _hotkeyToggleUI = hotkeyToggleUI;
         InitializeComponent();
         BuildUI();
     }
@@ -79,7 +92,7 @@ public partial class SettingsForm : Form
             new[] { "15 fps", "30 fps", "60 fps" },
             new[] { 15, 30, 60 },
             FrameRate,
-            val => { FrameRate = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution); }));
+            val => { FrameRate = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI); }));
         layout.Controls.Add(MakeSeparator());
 
         layout.Controls.Add(MakeSubLabel("Buffer Duration", Color.FromArgb(150, 150, 150)));
@@ -87,7 +100,7 @@ public partial class SettingsForm : Form
             new[] { "15 sec", "30 sec", "45 sec", "60 sec", "90 sec", "120 sec" },
             new[] { 15, 30, 45, 60, 90, 120 },
             BufferDurationSeconds,
-            val => { BufferDurationSeconds = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution); }));
+            val => { BufferDurationSeconds = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI); }));
         layout.Controls.Add(MakeSeparator());
 
         layout.Controls.Add(MakeSubLabel("Save Folder", Color.FromArgb(150, 150, 150)));
@@ -112,7 +125,7 @@ public partial class SettingsForm : Form
             {
                 SaveFolder = dlg.SelectedPath;
                 _folderValueLabel.Text = SaveFolder;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution);
+                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
             }
         }));
         layout.Controls.Add(MakeSeparator());
@@ -133,7 +146,29 @@ public partial class SettingsForm : Form
         toggleRow.Controls.Add(_toggleOverlay, 1, 0);
         layout.Controls.Add(toggleRow);
         layout.Controls.Add(MakeSeparator());
+        layout.Controls.Add(MakeSeparator());
+        layout.Controls.Add(MakeSubLabel("Hot Keys", Color.FromArgb(150, 150, 150)));
+        layout.Controls.Add(MakeHotkeyRow("Save Screenshot", _hotkeyScreenshot, val => {
+            _hotkeyScreenshot = val;
+            if (_hotkeySaveVideo == val) { _hotkeySaveVideo = "Unassigned"; _btnHotkeySaveVideo!.Text = "Unassigned"; }
+            if (_hotkeyToggleUI == val) { _hotkeyToggleUI = "Unassigned"; _btnHotkeyToggleUI!.Text = "Unassigned"; }
+            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+        }, btn => _btnHotkeyScreenshot = btn));
 
+        layout.Controls.Add(MakeHotkeyRow("Save Video", _hotkeySaveVideo, val => {
+            _hotkeySaveVideo = val;
+            if (_hotkeyScreenshot == val) { _hotkeyScreenshot = "Unassigned"; _btnHotkeyScreenshot!.Text = "Unassigned"; }
+            if (_hotkeyToggleUI == val) { _hotkeyToggleUI = "Unassigned"; _btnHotkeyToggleUI!.Text = "Unassigned"; }
+            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+        }, btn => _btnHotkeySaveVideo = btn));
+
+        layout.Controls.Add(MakeHotkeyRow("Toggle UI", _hotkeyToggleUI, val => {
+            _hotkeyToggleUI = val;
+            if (_hotkeyScreenshot == val) { _hotkeyScreenshot = "Unassigned"; _btnHotkeyScreenshot!.Text = "Unassigned"; }
+            if (_hotkeySaveVideo == val) { _hotkeySaveVideo = "Unassigned"; _btnHotkeySaveVideo!.Text = "Unassigned"; }
+            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+        }, btn => _btnHotkeyToggleUI = btn));
+        layout.Controls.Add(MakeSeparator());
         layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
@@ -225,6 +260,214 @@ public partial class SettingsForm : Form
         return btn;
     }
 
+    private Control MakeHotkeyRow(string label, string currentHotkey, Action<string> onChange, Action<Button> registerBtn)
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            Height = 46,
+            AutoSize = false,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 4, 0, 4)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
+
+        var nameLabel = new Label
+        {
+            Text = label,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(190, 190, 190),
+            BackColor = Color.Transparent,
+            Font = new Font("Segoe UI", 9)
+        };
+
+        var hotkeyBtn = new Button
+        {
+            Text = currentHotkey,
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(42, 42, 46),
+            ForeColor = Color.FromArgb(0, 196, 160),
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+        hotkeyBtn.FlatAppearance.BorderColor = Color.FromArgb(58, 58, 62);
+
+        bool isListening = false;
+
+        void StartListening()
+        {
+            if (isListening) return;
+            isListening = true;
+            OnHotkeyInputStarted?.Invoke();
+            hotkeyBtn.Text = "Press keys...";
+            hotkeyBtn.ForeColor = Color.FromArgb(240, 240, 240);
+            hotkeyBtn.BackColor = Color.FromArgb(50, 50, 60);
+
+            string pendingHotkey = string.Empty;
+
+            KeyEventHandler? keyDownHandler = null;
+            KeyEventHandler? keyUpHandler = null;
+
+            keyDownHandler = (s2, e2) =>
+            {
+                e2.SuppressKeyPress = true;
+
+                if (e2.KeyCode == Keys.Escape)
+                {
+                    StopListening(currentHotkey, false);
+                    return;
+                }
+
+                var parts = new List<string>();
+                if (e2.Modifiers.HasFlag(Keys.Control)) parts.Add("Ctrl");
+                if (e2.Modifiers.HasFlag(Keys.Alt)) parts.Add("Alt");
+                if (e2.Modifiers.HasFlag(Keys.Shift)) parts.Add("Shift");
+
+                var key = e2.KeyCode;
+                bool isModifierOnly =
+                    key == Keys.Alt || key == Keys.Menu ||
+                    key == Keys.Control || key == Keys.ControlKey ||
+                    key == Keys.LControlKey || key == Keys.RControlKey ||
+                    key == Keys.Shift || key == Keys.ShiftKey ||
+                    key == Keys.LShiftKey || key == Keys.RShiftKey ||
+                    key == Keys.LMenu || key == Keys.RMenu ||
+                    key == Keys.LWin || key == Keys.RWin;
+
+                if (!isModifierOnly)
+                {
+                    string keyName = key switch
+                    {
+                        Keys.D0 => "0",
+                        Keys.D1 => "1",
+                        Keys.D2 => "2",
+                        Keys.D3 => "3",
+                        Keys.D4 => "4",
+                        Keys.D5 => "5",
+                        Keys.D6 => "6",
+                        Keys.D7 => "7",
+                        Keys.D8 => "8",
+                        Keys.D9 => "9",
+                        Keys.OemPeriod => ".",
+                        Keys.Oemcomma => ",",
+                        Keys.OemMinus => "-",
+                        Keys.Oemplus => "=",
+                        _ => key.ToString()
+                    };
+                    parts.Add(keyName);
+                    pendingHotkey = string.Join("+", parts);
+                }
+                else
+                {
+                    pendingHotkey = string.Empty;
+                }
+            };
+
+            keyUpHandler = (s2, e2) =>
+            {
+                bool isModifierOnly =
+                    e2.KeyCode == Keys.Alt || e2.KeyCode == Keys.Menu ||
+                    e2.KeyCode == Keys.Control || e2.KeyCode == Keys.ControlKey ||
+                    e2.KeyCode == Keys.LControlKey || e2.KeyCode == Keys.RControlKey ||
+                    e2.KeyCode == Keys.Shift || e2.KeyCode == Keys.ShiftKey ||
+                    e2.KeyCode == Keys.LShiftKey || e2.KeyCode == Keys.RShiftKey ||
+                    e2.KeyCode == Keys.LMenu || e2.KeyCode == Keys.RMenu ||
+                    e2.KeyCode == Keys.LWin || e2.KeyCode == Keys.RWin;
+
+                if (isModifierOnly)
+                {
+                    // Відпустили тільки модифікатор без основної клавіші
+                    if (string.IsNullOrEmpty(pendingHotkey))
+                    {
+                        hotkeyBtn.KeyDown -= keyDownHandler;
+                        hotkeyBtn.KeyUp -= keyUpHandler;
+                        isListening = false;
+
+                        hotkeyBtn.Text = "Press keys...";
+                        hotkeyBtn.BackColor = Color.FromArgb(80, 30, 30);
+                        hotkeyBtn.ForeColor = Color.FromArgb(240, 240, 240);
+
+                        Task.Delay(800).ContinueWith(_ =>
+                        {
+                            hotkeyBtn.Invoke(() =>
+                            {
+                                OnHotkeyInputStarted?.Invoke();
+                                StartListening();
+                            });
+                        });
+                    }
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(pendingHotkey))
+                {
+                    // Заборонена комбінація — червоний, потім знову очікування
+                    hotkeyBtn.KeyDown -= keyDownHandler;
+                    hotkeyBtn.KeyUp -= keyUpHandler;
+                    isListening = false;
+
+                    hotkeyBtn.Text = "Press keys...";
+                    hotkeyBtn.BackColor = Color.FromArgb(80, 30, 30);
+                    hotkeyBtn.ForeColor = Color.FromArgb(240, 240, 240);
+
+                    Task.Delay(800).ContinueWith(_ =>
+                    {
+                        hotkeyBtn.Invoke(() =>
+                        {
+                            OnHotkeyInputStarted?.Invoke();
+                            StartListening();
+                        });
+                    });
+                    return;
+                }
+
+                StopListening(pendingHotkey, true);
+            };
+
+            void StopListening(string result, bool apply)
+            {
+                hotkeyBtn.KeyDown -= keyDownHandler;
+                hotkeyBtn.KeyUp -= keyUpHandler;
+                isListening = false;
+                OnHotkeyInputFinished?.Invoke();
+                hotkeyBtn.Text = result;
+                hotkeyBtn.ForeColor = Color.FromArgb(0, 196, 160);
+                hotkeyBtn.BackColor = Color.FromArgb(42, 42, 46);
+
+                if (apply)
+                {
+                    currentHotkey = result;
+                    onChange(result);
+                }
+            }
+
+            hotkeyBtn.KeyDown += keyDownHandler;
+            hotkeyBtn.KeyUp += keyUpHandler;
+
+            hotkeyBtn.LostFocus += (sf, ef) =>
+            {
+                if (isListening)
+                {
+                    StopListening(currentHotkey, false);
+                }
+            };
+
+            hotkeyBtn.Focus();
+        }
+
+        hotkeyBtn.Click += (s, e) => StartListening();
+
+        panel.Controls.Add(nameLabel, 0, 0);
+        panel.Controls.Add(hotkeyBtn, 1, 0);
+
+        registerBtn(hotkeyBtn);
+        return panel;
+    }
+
     private Control MakeResolutionSelector()
     {
         var screen = Screen.PrimaryScreen!.Bounds;
@@ -249,7 +492,7 @@ public partial class SettingsForm : Form
             _currentResolution,
             val => {
                 _currentResolution = val;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution);
+                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
             });
     }
 

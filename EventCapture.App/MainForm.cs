@@ -33,6 +33,10 @@ public partial class MainForm : Form
         Task.Run(async () => await InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds, _appSettings.Resolution));
         InitializeTray();
         _hotkeyManager = new HotkeyManager(Handle);
+        _hotkeyManager.RegisterAll(
+            _appSettings.HotkeyScreenshot,
+            _appSettings.HotkeySaveVideo,
+            _appSettings.HotkeyToggleUI);
         _overlay = new OverlayForm();
         _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
         StartHardwareMonitor();
@@ -173,17 +177,28 @@ public partial class MainForm : Form
     {
         if (_settingsForm == null)
         {
-            _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds, _appSettings.Resolution);
-            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution) =>
+            _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds,
+            _appSettings.Resolution, _appSettings.HotkeyScreenshot,
+            _appSettings.HotkeySaveVideo, _appSettings.HotkeyToggleUI);
+            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution, hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI) =>
             {
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
                 _appSettings.BufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
                 _appSettings.Resolution = resolution;
+                _appSettings.HotkeyScreenshot = hotkeyScreenshot;
+                _appSettings.HotkeySaveVideo = hotkeySaveVideo;
+                _appSettings.HotkeyToggleUI = hotkeyToggleUI;
                 _appSettings.Save();
+                _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
                 await InitializeCapture(fps, seconds, resolution);
             };
+            _settingsForm.OnHotkeyInputStarted += () => _hotkeyManager.UnregisterAll();
+            _settingsForm.OnHotkeyInputFinished += () => _hotkeyManager.RegisterAll(
+                _appSettings.HotkeyScreenshot,
+                _appSettings.HotkeySaveVideo,
+                _appSettings.HotkeyToggleUI);
             _settingsForm.OnOverlayToggled += (visible) =>
             {
                 _overlay.SetSystemInfoVisible(visible);
