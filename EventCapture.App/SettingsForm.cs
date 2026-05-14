@@ -1,16 +1,23 @@
-﻿namespace EventCapture.App;
+﻿using EventCapture.Core.Capture;
+namespace EventCapture.App;
 
 public partial class SettingsForm : Form
 {
     // ─── Події ───────────────────────────────────────────────────────────
     // OnSettingsChanged — спрацьовує при будь-якій зміні налаштувань
     // OnHotkeyInputStarted/Finished — для тимчасового зняття хоткеїв
-    public event Action<int, int, string, string, string, string, string>? OnSettingsChanged;
+    public event Action<int, int, string, string, string, string, string, bool, string?, bool, string?>? OnSettingsChanged;
     public event Action<bool>? OnOverlayToggled;
     public event Action? OnHotkeyInputStarted;
     public event Action? OnHotkeyInputFinished;
     private Label _labelHotkeyScreenshot = null!;
     private Label _labelHotkeySaveVideo = null!;
+    private bool _recordSystem = false;
+    private bool _recordMic = false;
+    private string? _systemDeviceId = null;
+    private string? _micDeviceId = null;
+    private Button _btnSystemDevice = null!;
+    private Button _btnMicDevice = null!;
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
     public string SaveFolder { get; private set; }
@@ -30,8 +37,10 @@ public partial class SettingsForm : Form
     private ToggleSwitch _toggleOverlay = null!;
 
     public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds,
-        string resolution = "Native", string hotkeyScreenshot = "Alt+F1",
-        string hotkeySaveVideo = "Alt+F2", string hotkeyToggleUI = "Alt+F3")
+     string resolution = "Native", string hotkeyScreenshot = "Alt+F1",
+     string hotkeySaveVideo = "Alt+F2", string hotkeyToggleUI = "Alt+F3",
+     bool recordSystem = false, string? systemDeviceId = null,
+     bool recordMic = false, string? micDeviceId = null)
     {
         _mainForm = mainForm;
         SaveFolder = saveFolder;
@@ -41,6 +50,10 @@ public partial class SettingsForm : Form
         _hotkeyScreenshot = hotkeyScreenshot;
         _hotkeySaveVideo = hotkeySaveVideo;
         _hotkeyToggleUI = hotkeyToggleUI;
+        _recordSystem = recordSystem;
+        _systemDeviceId = systemDeviceId;
+        _recordMic = recordMic;
+        _micDeviceId = micDeviceId;
         InitializeComponent();
         BuildUI();
     }
@@ -117,6 +130,11 @@ public partial class SettingsForm : Form
             BufferDurationSeconds,
             val => { BufferDurationSeconds = val; InvokeSettingsChanged(); }));
         layout.Controls.Add(MakeSeparator());
+        // ─── Налаштування звуку ───────────────────────────────────────────────
+        layout.Controls.Add(MakeSubLabel("Audio", Color.FromArgb(150, 150, 150)));
+        layout.Controls.Add(MakeAudioRow("Record System Audio", isSystem: true));
+        layout.Controls.Add(MakeAudioRow("Record Microphone", isSystem: false));
+        layout.Controls.Add(MakeSeparator());
 
         // ─── Папка збереження ─────────────────────────────────────────────
         layout.Controls.Add(MakeSubLabel("Save Folder", Color.FromArgb(150, 150, 150)));
@@ -128,7 +146,7 @@ public partial class SettingsForm : Form
             Dock = DockStyle.Fill,
             Height = 36,
             Font = new Font("Segoe UI", 9),
-            ForeColor = Color.FromArgb(80, 80, 80),
+            ForeColor = Color.FromArgb(0, 196, 160),
             BackColor = Color.Transparent,
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 2, 0, 2)
@@ -200,7 +218,8 @@ public partial class SettingsForm : Form
         _labelHotkeyScreenshot.Text = _hotkeyScreenshot;
         _labelHotkeySaveVideo.Text = _hotkeySaveVideo;
         OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder,
-            _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+            _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI,
+            _recordSystem, _systemDeviceId, _recordMic, _micDeviceId);
     }
 
     private Label MakeTitle(string text) => new Label
@@ -289,6 +308,147 @@ public partial class SettingsForm : Form
         return btn;
     }
 
+    private Control MakeAudioRow(string label, bool isSystem)
+    {
+        var container = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 1,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 4, 0, 4)
+        };
+
+        var toggleRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            BackColor = Color.Transparent
+        };
+        toggleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        toggleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        toggleRow.Controls.Add(MakeSubLabel(label, Color.FromArgb(240, 240, 240)), 0, 0);
+
+        var toggle = new ToggleSwitch { Anchor = AnchorStyles.Right };
+        toggleRow.Controls.Add(toggle, 1, 0);
+
+        var btn = new Button
+        {
+            Dock = DockStyle.Fill,
+            Height = 36,
+            BackColor = Color.FromArgb(28, 28, 30),
+            ForeColor = Color.FromArgb(150, 150, 150),
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9),
+            Cursor = Cursors.Default,
+            Margin = new Padding(0, 4, 0, 0),
+            Enabled = false,
+            UseVisualStyleBackColor = false
+        };
+        btn.FlatAppearance.BorderColor = Color.FromArgb(42, 42, 46);
+
+        btn.Paint += (s, e) =>
+        {
+            e.Graphics.Clear(btn.BackColor);
+            var textColor = btn.Enabled
+                ? Color.FromArgb(0, 196, 160)
+                : Color.FromArgb(150, 150, 150);
+            TextRenderer.DrawText(e.Graphics, btn.Text, btn.Font,
+                btn.ClientRectangle, textColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        };
+
+        // Показуємо дефолтний пристрій одразу
+        try
+        {
+            var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+            var defaultDevice = isSystem
+                ? enumerator.GetDefaultAudioEndpoint(NAudio.CoreAudioApi.DataFlow.Render, NAudio.CoreAudioApi.Role.Multimedia)
+                : enumerator.GetDefaultAudioEndpoint(NAudio.CoreAudioApi.DataFlow.Capture, NAudio.CoreAudioApi.Role.Multimedia);
+            btn.Text = defaultDevice.FriendlyName;
+            if (isSystem) _systemDeviceId = defaultDevice.ID;
+            else _micDeviceId = defaultDevice.ID;
+        }
+        catch { btn.Text = "Select device..."; }
+
+        if (isSystem) _btnSystemDevice = btn;
+        else _btnMicDevice = btn;
+
+        // Відновлюємо збережений стан
+        bool initialState = isSystem ? _recordSystem : _recordMic;
+        if (initialState)
+        {
+            toggle.Checked = true;
+            btn.Enabled = true;
+            btn.Cursor = Cursors.Hand;
+            btn.BackColor = Color.FromArgb(42, 42, 46);
+        }
+
+        // Відновлюємо збережений пристрій
+        string? savedId = isSystem ? _systemDeviceId : _micDeviceId;
+        if (savedId != null)
+        {
+            try
+            {
+                var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+                var device = enumerator.GetDevice(savedId);
+                btn.Text = device.FriendlyName;
+                if (isSystem) _systemDeviceId = savedId;
+                else _micDeviceId = savedId;
+            }
+            catch { }
+        }
+
+        toggle.CheckedChanged += (s, e) =>
+        {
+            if (isSystem) _recordSystem = toggle.Checked;
+            else _recordMic = toggle.Checked;
+
+            btn.Enabled = toggle.Checked;
+            btn.ForeColor = Color.FromArgb(0, 196, 160);
+            btn.Cursor = toggle.Checked ? Cursors.Hand : Cursors.Default;
+            btn.BackColor = toggle.Checked
+                ? Color.FromArgb(42, 42, 46)
+                : Color.FromArgb(28, 28, 30);
+
+            InvokeSettingsChanged();
+        };
+
+        btn.Click += (s, e) =>
+        {
+            if (!(isSystem ? _recordSystem : _recordMic)) return;
+
+            var devices = isSystem
+                ? AudioRecorder.GetOutputDevices()
+                : AudioRecorder.GetInputDevices();
+
+            var menu = new ContextMenuStrip();
+            menu.BackColor = Color.FromArgb(42, 42, 46);
+            menu.ForeColor = Color.FromArgb(240, 240, 240);
+            menu.RenderMode = ToolStripRenderMode.System;
+
+            foreach (var (id, name) in devices)
+            {
+                var item = new ToolStripMenuItem(name);
+                item.Click += (_, __) =>
+                {
+                    if (isSystem) _systemDeviceId = id;
+                    else _micDeviceId = id;
+                    btn.Text = name;
+                };
+                menu.Items.Add(item);
+            }
+
+            menu.Show(btn, new Point(0, btn.Height));
+        };
+
+        container.Controls.Add(toggleRow);
+        container.Controls.Add(btn);
+
+        return container;
+    }
+
     // ─── Рядок хоткея ─────────────────────────────────────────────────────
     // При кліку переходить в режим очікування вводу
     // Escape — скасування, одиночні модифікатори — заборонені (підсвічує червоним)
@@ -322,7 +482,7 @@ public partial class SettingsForm : Form
             Dock = DockStyle.Fill,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(42, 42, 46),
-            ForeColor = Color.FromArgb(0, 196, 160),
+            ForeColor = Color.FromArgb(150, 150, 150),
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             Cursor = Cursors.Hand,
             TextAlign = ContentAlignment.MiddleCenter

@@ -202,10 +202,11 @@ public partial class MainForm : Form
         {
             _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds,
                 _appSettings.Resolution, _appSettings.HotkeyScreenshot,
-                _appSettings.HotkeySaveVideo, _appSettings.HotkeyToggleUI);
+                _appSettings.HotkeySaveVideo, _appSettings.HotkeyToggleUI,
+                _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
+                _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
 
-            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution,
-                hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI) =>
+            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution, hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI, recordSystem, systemDeviceId, recordMic, micDeviceId) =>
             {
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
@@ -215,6 +216,10 @@ public partial class MainForm : Form
                 _appSettings.HotkeyScreenshot = hotkeyScreenshot;
                 _appSettings.HotkeySaveVideo = hotkeySaveVideo;
                 _appSettings.HotkeyToggleUI = hotkeyToggleUI;
+                _appSettings.RecordSystemAudio = recordSystem;
+                _appSettings.SystemAudioDeviceId = systemDeviceId;
+                _appSettings.RecordMicrophone = recordMic;
+                _appSettings.MicDeviceId = micDeviceId;
                 _appSettings.Save();
                 _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
                 await InitializeCapture(fps, seconds, resolution);

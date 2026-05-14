@@ -11,6 +11,12 @@ public class AppSettings
     public int BufferSeconds { get; set; } = 60;
     public string Resolution { get; set; } = "Native";
 
+    // ─── Налаштування аудіо ───────────────────────────────────────────────
+    public bool RecordSystemAudio { get; set; } = false;
+    public bool RecordMicrophone { get; set; } = false;
+    public string? SystemAudioDeviceId { get; set; } = null;
+    public string? MicDeviceId { get; set; } = null;
+
     // ─── Хоткеї ──────────────────────────────────────────────────────────
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
     public string HotkeySaveVideo { get; set; } = "Alt+F2";
