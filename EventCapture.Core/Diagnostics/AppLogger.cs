@@ -1,5 +1,7 @@
 ﻿namespace EventCapture.Core.Diagnostics;
 
+// Мінімальний логер для діагностики помилок
+// Файл: Documents\EventCapture\app.log
 public static class AppLogger
 {
     private static readonly string _logPath = Path.Combine(

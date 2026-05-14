@@ -9,7 +9,8 @@ public partial class SettingsForm : Form
     public event Action<bool>? OnOverlayToggled;
     public event Action? OnHotkeyInputStarted;
     public event Action? OnHotkeyInputFinished;
-
+    private Label _labelHotkeyScreenshot = null!;
+    private Label _labelHotkeySaveVideo = null!;
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
     public string SaveFolder { get; private set; }
@@ -89,9 +90,11 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeSeparator());
 
         layout.Controls.Add(MakePrimaryButton("Save Screenshot", () => _mainForm.TakeScreenshot()));
-        layout.Controls.Add(MakeSubLabel("Alt + F1", Color.FromArgb(80, 80, 80)));
+        _labelHotkeyScreenshot = MakeSubLabel(_hotkeyScreenshot, Color.FromArgb(80, 80, 80));
+        layout.Controls.Add(_labelHotkeyScreenshot);
         layout.Controls.Add(MakePrimaryButton("Save Video", () => _mainForm.SaveVideo()));
-        layout.Controls.Add(MakeSubLabel("Alt + F2", Color.FromArgb(80, 80, 80)));
+        _labelHotkeySaveVideo = MakeSubLabel(_hotkeySaveVideo, Color.FromArgb(80, 80, 80));
+        layout.Controls.Add(_labelHotkeySaveVideo);
         layout.Controls.Add(MakeSeparator());
 
         // ─── Налаштування відео ───────────────────────────────────────────
@@ -192,9 +195,13 @@ public partial class SettingsForm : Form
     }
 
     // Хелпер щоб не дублювати довгий виклик OnSettingsChanged
-    private void InvokeSettingsChanged() =>
+    private void InvokeSettingsChanged()
+    {
+        _labelHotkeyScreenshot.Text = _hotkeyScreenshot;
+        _labelHotkeySaveVideo.Text = _hotkeySaveVideo;
         OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder,
             _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+    }
 
     private Label MakeTitle(string text) => new Label
     {

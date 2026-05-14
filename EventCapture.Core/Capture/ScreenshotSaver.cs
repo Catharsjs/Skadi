@@ -3,6 +3,7 @@ using System.Drawing.Imaging;
 
 namespace EventCapture.Core.Capture;
 
+// Зберігає скріншот через GDI з масштабуванням до роздільної здатності відео
 public class ScreenshotSaver
 {
     private readonly string _outputFolder;
@@ -27,6 +28,7 @@ public class ScreenshotSaver
         using var g = Graphics.FromImage(bitmap);
         g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
 
+        // Масштабуємо до тієї ж роздільної здатності що й відео
         if (_width > 0 && _height > 0 && (_width != bounds.Width || _height != bounds.Height))
         {
             using var scaled = new Bitmap(_width, _height);
