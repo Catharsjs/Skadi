@@ -4,11 +4,11 @@ namespace EventCapture.App;
 
 public partial class MainForm : Form
 {
-    private NotifyIcon _trayIcon;
-    private ContextMenuStrip _trayMenu;
-    private VideoEncoder _encoder;
-    private ScreenCapturer _capturer;
-    private ScreenshotSaver _screenshotSaver;
+    private NotifyIcon _trayIcon = null!;
+    private ContextMenuStrip _trayMenu = null!;
+    private VideoEncoder _encoder = null!;
+    private ScreenCapturer _capturer = null!;
+    private ScreenshotSaver _screenshotSaver = null!;
     private HotkeyManager _hotkeyManager;
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;

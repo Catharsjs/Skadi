@@ -14,11 +14,11 @@ public partial class OverlayForm : Form
     private const int WS_EX_TRANSPARENT = 0x00000020;
     private const int WS_EX_LAYERED = 0x00080000;
 
-    private Label _bufferLabel;
-    private Label _fpsLabel;
-    private Label _cpuLabel;
-    private Label _gpuLabel;
-    private Label _ramLabel;
+    private Label _bufferLabel = null!;
+    private Label _fpsLabel = null!;
+    private Label _cpuLabel = null!;
+    private Label _gpuLabel = null!;
+    private Label _ramLabel = null!;
 
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public bool ShowSystemInfo { get; set; } = false;

@@ -11,8 +11,8 @@ public partial class SettingsForm : Form
 
     private readonly MainForm _mainForm;
     private string _currentResolution = "Native";
-    private Label _folderValueLabel;
-    private ToggleSwitch _toggleOverlay;
+    private Label _folderValueLabel = null!;
+    private ToggleSwitch _toggleOverlay = null!;
 
     public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds, string resolution = "Native")
     {
