@@ -108,7 +108,7 @@ public partial class MainForm : Form
             if (targetHeight > 0) encHeight = targetHeight;
 
             _encoder = new VideoEncoder(fps, encWidth, encHeight);
-            _screenshotSaver = new ScreenshotSaver(_saveFolder);
+            _screenshotSaver = new ScreenshotSaver(_saveFolder, encWidth, encHeight);
             _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
 
             _encoder.StartRecording();
