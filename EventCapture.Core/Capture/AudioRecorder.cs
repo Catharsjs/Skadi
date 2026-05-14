@@ -12,10 +12,10 @@ public class AudioRecorder : IDisposable
     private WasapiCapture? _micCapture;
     private WaveFileWriter? _loopbackWriter;
     private WaveFileWriter? _micWriter;
-
+    private DateTime _recordingStartTime;
     private string _loopbackTempPath = string.Empty;
     private string _micTempPath = string.Empty;
-
+    private readonly System.Diagnostics.Stopwatch _recordingStopwatch = new();
     public bool IsRecordingSystem { get; private set; }
     public bool IsRecordingMic { get; private set; }
 
@@ -77,6 +77,8 @@ public class AudioRecorder : IDisposable
             };
 
             _loopbackCapture.StartRecording();
+            _recordingStopwatch.Restart();
+            _recordingStartTime = DateTime.Now;
             IsRecordingSystem = true;
         }
         catch { IsRecordingSystem = false; }
@@ -103,65 +105,111 @@ public class AudioRecorder : IDisposable
             };
 
             _micCapture.StartRecording();
+            _recordingStartTime = DateTime.Now;
             IsRecordingMic = true;
         }
         catch { IsRecordingMic = false; }
     }
 
     // ─── Збереження останніх N секунд ────────────────────────────────────
-
     public async Task<string?> SaveLastSecondsAsync(string outputFolder, int seconds,
-        string videoPath)
+    string videoPath, double videoElapsedSeconds)
     {
-        // Зупиняємо запис і закриваємо файли
+        double audioElapsedSeconds = _recordingStopwatch.Elapsed.TotalSeconds;
+
         StopCapture();
         await Task.Delay(300);
 
         var audioInputs = new List<string>();
-
-        if (IsRecordingSystem && File.Exists(_loopbackTempPath))
-            audioInputs.Add(_loopbackTempPath);
-
-        if (IsRecordingMic && File.Exists(_micTempPath))
-            audioInputs.Add(_micTempPath);
-
+        if (File.Exists(_loopbackTempPath)) audioInputs.Add(_loopbackTempPath);
+        if (File.Exists(_micTempPath)) audioInputs.Add(_micTempPath);
         if (audioInputs.Count == 0) return null;
-
-        string outputPath = Path.Combine(outputFolder,
-            DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + "_audio.mp4");
 
         var ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
 
-        // Будуємо FFmpeg команду
-        string inputs = string.Join(" ", audioInputs.Select(p => $"-i \"{p}\""));
-        string audioFilter = audioInputs.Count > 1
-            ? $"-filter_complex amix=inputs={audioInputs.Count}:duration=shortest"
-            : string.Empty;
+        // Отримуємо тривалість відео через ffprobe
+        var probeArgs = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{videoPath}\"";
+        var probeProcess = new System.Diagnostics.Process
+        {
+            StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = FFMpegCore.GlobalFFOptions.GetFFProbeBinaryPath(),
+                Arguments = probeArgs,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            }
+        };
+        probeProcess.Start();
+        string durationStr = await probeProcess.StandardOutput.ReadToEndAsync();
+        await Task.Run(() => probeProcess.WaitForExit(5000));
 
-        // Обрізаємо аудіо і мікшуємо з відео
-        var args = $"-y -i \"{videoPath}\" {inputs} " +
-                   $"-sseof -{seconds} " +
-                   $"{audioFilter} " +
-                   $"-c:v copy -c:a aac -shortest \"{outputPath}\"";
+        if (!double.TryParse(durationStr.Trim(),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out double videoDuration))
+            videoDuration = seconds;
 
-        var process = new System.Diagnostics.Process
+        var trimmedAudio = new List<string>();
+        foreach (var audioPath in audioInputs)
+        {
+            string trimmed = Path.Combine(Path.GetTempPath(),
+                $"eventcapture_audio_trim_{Guid.NewGuid()}.wav");
+
+            double syncOffset = audioElapsedSeconds - videoElapsedSeconds;
+            double sseof = videoDuration + syncOffset;
+            var sseofStr = sseof.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            var durationStr2 = videoDuration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            var trimArgs = $"-y -sseof -{sseofStr} -i \"{audioPath}\" -t {durationStr2} \"{trimmed}\"";
+
+            var trimProcess = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = trimArgs,
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+            trimProcess.Start();
+            await trimProcess.StandardError.ReadToEndAsync();
+            await Task.Run(() => trimProcess.WaitForExit(15000));
+
+            if (File.Exists(trimmed) && new FileInfo(trimmed).Length > 0)
+                trimmedAudio.Add(trimmed);
+        }
+
+        if (trimmedAudio.Count == 0) return null;
+
+        string outputPath = Path.Combine(outputFolder,
+            DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".mp4");
+
+        string audioInputArgs = string.Join(" ", trimmedAudio.Select(p => $"-i \"{p}\""));
+        string audioFilter = trimmedAudio.Count > 1
+            ? $"-filter_complex amix=inputs={trimmedAudio.Count}:duration=shortest -c:a aac"
+            : "-c:a aac";
+
+        var mergeArgs = $"-y -i \"{videoPath}\" {audioInputArgs} -c:v copy {audioFilter} -shortest \"{outputPath}\"";
+
+        var mergeProcess = new System.Diagnostics.Process
         {
             StartInfo = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = ffmpegPath,
-                Arguments = args,
+                Arguments = mergeArgs,
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             }
         };
+        mergeProcess.Start();
+        await mergeProcess.StandardError.ReadToEndAsync();
+        await Task.Run(() => mergeProcess.WaitForExit(30000));
 
-        process.Start();
-        await process.StandardError.ReadToEndAsync();
-        await Task.Run(() => process.WaitForExit(30000));
-
-        foreach (var p in audioInputs)
-            try { File.Delete(p); } catch { }
+        foreach (var p in audioInputs) try { File.Delete(p); } catch { }
+        foreach (var p in trimmedAudio) try { File.Delete(p); } catch { }
 
         if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
             return null;

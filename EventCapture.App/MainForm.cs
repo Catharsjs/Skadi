@@ -29,6 +29,7 @@ public partial class MainForm : Form
     private int _currentBufferSeconds = 60;
     private volatile bool _overlayVisible = false;
     private System.Threading.Timer? _hardwareTimer;
+    private EventCapture.Core.Capture.AudioRecorder? _audioRecorder;
 
     public MainForm()
     {
@@ -135,7 +136,14 @@ public partial class MainForm : Form
             _screenshotSaver = new ScreenshotSaver(_saveFolder, encWidth, encHeight);
             _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
 
+            _audioRecorder?.Dispose();
+            _audioRecorder = new EventCapture.Core.Capture.AudioRecorder();
+
+            // Запускаємо відео і аудіо максимально близько
             _encoder.StartRecording();
+            _audioRecorder.StartRecording(
+                _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
+                _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
             _capturer.Start();
         }
         finally
@@ -291,7 +299,23 @@ public partial class MainForm : Form
     {
         try
         {
-            await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
+            double videoElapsed = _encoder.RecordingStopwatch.Elapsed.TotalSeconds;
+            var videoPath = await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
+
+            if (_audioRecorder != null &&
+                (_appSettings.RecordSystemAudio || _appSettings.RecordMicrophone))
+            {
+                var finalPath = await _audioRecorder.SaveLastSecondsAsync(
+                    _saveFolder, _currentBufferSeconds, videoPath, videoElapsed);
+
+                if (finalPath != null && File.Exists(finalPath))
+                    try { File.Delete(videoPath); } catch { }
+
+                _audioRecorder.StartRecording(
+                    _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
+                    _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
+            }
+
             _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
         }
         catch (Exception ex)
@@ -327,6 +351,7 @@ public partial class MainForm : Form
 
     private void ExitApp()
     {
+        _audioRecorder?.Dispose();
         _hotkeyManager?.Dispose();
         _hardwareMonitor?.Dispose();
         _capturer?.Stop();

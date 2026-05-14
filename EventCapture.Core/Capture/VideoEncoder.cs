@@ -9,6 +9,7 @@ public class VideoEncoder : IDisposable
 {
     // Stopwatch для реальних timestamps кадрів (замість лічильника)
     private readonly System.Diagnostics.Stopwatch _stopwatch = new();
+    public readonly System.Diagnostics.Stopwatch RecordingStopwatch = new();
     private readonly int _fps;
     private readonly int _width;
     private readonly int _height;
@@ -23,7 +24,7 @@ public class VideoEncoder : IDisposable
     private readonly object _writeLock = new();
 
     public bool IsRunning => _isRunning;
-
+    public DateTime RecordingStartTime { get; private set; }
     public VideoEncoder(int fps, int width, int height, int bitrate = 8000)
     {
         _fps = fps;
@@ -67,6 +68,8 @@ public class VideoEncoder : IDisposable
         _sinkWriter.BeginWriting();
 
         _stopwatch.Restart();
+        RecordingStopwatch.Restart();
+        RecordingStartTime = DateTime.Now;
         _isRunning = true;
     }
 
