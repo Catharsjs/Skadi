@@ -2,14 +2,21 @@
 
 namespace EventCapture.App;
 
+// Зберігає і завантажує налаштування користувача
+// Файл: %AppData%\EventCapture\settings.json
 public class AppSettings
 {
+    // ─── Налаштування відео ───────────────────────────────────────────────
     public int Fps { get; set; } = 60;
     public int BufferSeconds { get; set; } = 60;
     public string Resolution { get; set; } = "Native";
+
+    // ─── Хоткеї ──────────────────────────────────────────────────────────
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
     public string HotkeySaveVideo { get; set; } = "Alt+F2";
     public string HotkeyToggleUI { get; set; } = "Alt+F3";
+
+    // ─── Загальні ─────────────────────────────────────────────────────────
     public string SaveFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "EventCapture");
 
@@ -42,6 +49,7 @@ public class AppSettings
         catch { }
     }
 
+    // ─── Автозапуск через реєстр Windows ─────────────────────────────────
     private static readonly string _appName = "EventCapture";
     private static readonly string _appPath = System.Diagnostics.Process.GetCurrentProcess().MainModule!.FileName;
 

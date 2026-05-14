@@ -10,6 +10,7 @@ using WinRT;
 
 namespace EventCapture.Core.Capture;
 
+// COM-інтерфейс для створення GraphicsCaptureItem через WinRT interop
 [ComImport]
 [Guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -20,6 +21,7 @@ interface IGraphicsCaptureItemInterop
     IntPtr CreateForMonitor([In] IntPtr monitor, [In] ref Guid iid);
 }
 
+// COM-інтерфейс для отримання DXGI текстури з WinRT surface
 [ComImport]
 [Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -29,8 +31,11 @@ interface IDirect3DDxgiInterfaceAccess
     IntPtr GetInterface([In] ref Guid iid);
 }
 
+// Захоплює екран через Windows Graphics Capture API
+// Передає BGRA кадри в VideoEncoder
 public class ScreenCapturer : IDisposable
 {
+    // Делегат для вимкнення жовтої рамки WGC через vtable (Windows 11+)
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
 
@@ -44,6 +49,8 @@ public class ScreenCapturer : IDisposable
     private IDirect3DDevice? _wrtDevice;
     private Direct3D11CaptureFramePool? _framePool;
     private GraphicsCaptureSession? _session;
+
+    // Staging текстура перевикористовується між кадрами для ефективності
     private SharpDX.Direct3D11.Texture2D? _stagingTexture;
     private int _textureWidth;
     private int _textureHeight;
@@ -78,6 +85,7 @@ public class ScreenCapturer : IDisposable
         _session = _framePool.CreateCaptureSession(item);
         _session.IsCursorCaptureEnabled = false;
 
+        // Вимикаємо жовту рамку WGC тільки на Windows 11 (Build 22000+)
         if (Environment.OSVersion.Version.Build >= 22000)
         {
             try
@@ -102,6 +110,8 @@ public class ScreenCapturer : IDisposable
         Task.Run(CaptureLoop);
     }
 
+    // ─── Цикл захоплення з точним timing ─────────────────────────────────
+    // Task.Delay для грубого очікування + SpinWait для точного
     private async Task CaptureLoop()
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -130,6 +140,8 @@ public class ScreenCapturer : IDisposable
         }
     }
 
+    // ─── Захоплення одного кадру ──────────────────────────────────────────
+    // WGC frame → staging texture → CPU copy → масштабування → encoder
     private void CaptureFrame()
     {
         if (_framePool == null || _d3dDevice == null) return;
@@ -163,6 +175,7 @@ public class ScreenCapturer : IDisposable
                     Marshal.Copy(src, bgraData, y * stride, stride);
                 }
 
+                // Масштабуємо якщо роздільна здатність відрізняється від нативної
                 byte[] finalData = (_targetWidth > 0 && _targetHeight > 0 &&
                     (_targetWidth != desc.Width || _targetHeight != desc.Height))
                     ? ScaleFrame(bgraData, desc.Width, desc.Height)
@@ -179,6 +192,7 @@ public class ScreenCapturer : IDisposable
         catch { }
     }
 
+    // Масштабування через GDI (Bilinear) до цільової роздільної здатності
     private byte[] ScaleFrame(byte[] bgraData, int srcWidth, int srcHeight)
     {
         using var srcBitmap = new Bitmap(srcWidth, srcHeight, PixelFormat.Format32bppArgb);
@@ -203,6 +217,7 @@ public class ScreenCapturer : IDisposable
         return result;
     }
 
+    // Перевикористовуємо staging текстуру якщо розмір не змінився
     private void EnsureStagingTexture(int width, int height)
     {
         if (_stagingTexture != null && _textureWidth == width && _textureHeight == height) return;
@@ -226,6 +241,8 @@ public class ScreenCapturer : IDisposable
         _textureWidth = width;
         _textureHeight = height;
     }
+
+    // ─── WinRT/DXGI interop ───────────────────────────────────────────────
 
     private static IDirect3DDevice CreateDirect3DDevice(SharpDX.Direct3D11.Device device)
     {

@@ -2,29 +2,35 @@
 
 public partial class SettingsForm : Form
 {
+    // ─── Події ───────────────────────────────────────────────────────────
+    // OnSettingsChanged — спрацьовує при будь-якій зміні налаштувань
+    // OnHotkeyInputStarted/Finished — для тимчасового зняття хоткеїв
     public event Action<int, int, string, string, string, string, string>? OnSettingsChanged;
     public event Action<bool>? OnOverlayToggled;
+    public event Action? OnHotkeyInputStarted;
+    public event Action? OnHotkeyInputFinished;
 
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
     public string SaveFolder { get; private set; }
-    public event Action? OnHotkeyInputStarted;
-    public event Action? OnHotkeyInputFinished;
 
     private readonly MainForm _mainForm;
     private string _currentResolution = "Native";
+
+    // Посилання на кнопки хоткеїв для скидання при конфлікті
     private Button? _btnHotkeyScreenshot;
     private Button? _btnHotkeySaveVideo;
     private Button? _btnHotkeyToggleUI;
     private string _hotkeyScreenshot;
     private string _hotkeySaveVideo;
     private string _hotkeyToggleUI;
+
     private Label _folderValueLabel = null!;
     private ToggleSwitch _toggleOverlay = null!;
 
     public SettingsForm(MainForm mainForm, string saveFolder, int fps, int bufferSeconds,
-    string resolution = "Native", string hotkeyScreenshot = "Alt+F1",
-    string hotkeySaveVideo = "Alt+F2", string hotkeyToggleUI = "Alt+F3")
+        string resolution = "Native", string hotkeyScreenshot = "Alt+F1",
+        string hotkeySaveVideo = "Alt+F2", string hotkeyToggleUI = "Alt+F3")
     {
         _mainForm = mainForm;
         SaveFolder = saveFolder;
@@ -38,6 +44,7 @@ public partial class SettingsForm : Form
         BuildUI();
     }
 
+    // Приховуємо з Alt+Tab
     protected override CreateParams CreateParams
     {
         get
@@ -49,6 +56,7 @@ public partial class SettingsForm : Form
         }
     }
 
+    // ─── Побудова UI ──────────────────────────────────────────────────────
     private void BuildUI()
     {
         var screen = Screen.PrimaryScreen!.WorkingArea;
@@ -79,20 +87,24 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeTitle("EventCapture"));
         layout.Controls.Add(MakeSubLabel("● Buffer Active", Color.FromArgb(0, 196, 160)));
         layout.Controls.Add(MakeSeparator());
+
         layout.Controls.Add(MakePrimaryButton("Save Screenshot", () => _mainForm.TakeScreenshot()));
         layout.Controls.Add(MakeSubLabel("Alt + F1", Color.FromArgb(80, 80, 80)));
         layout.Controls.Add(MakePrimaryButton("Save Video", () => _mainForm.SaveVideo()));
         layout.Controls.Add(MakeSubLabel("Alt + F2", Color.FromArgb(80, 80, 80)));
         layout.Controls.Add(MakeSeparator());
+
+        // ─── Налаштування відео ───────────────────────────────────────────
         layout.Controls.Add(MakeSubLabel("Resolution", Color.FromArgb(150, 150, 150)));
         layout.Controls.Add(MakeResolutionSelector());
         layout.Controls.Add(MakeSeparator());
+
         layout.Controls.Add(MakeSubLabel("Frame Rate", Color.FromArgb(150, 150, 150)));
         layout.Controls.Add(MakeArrowSelector(
             new[] { "15 fps", "30 fps", "60 fps" },
             new[] { 15, 30, 60 },
             FrameRate,
-            val => { FrameRate = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI); }));
+            val => { FrameRate = val; InvokeSettingsChanged(); }));
         layout.Controls.Add(MakeSeparator());
 
         layout.Controls.Add(MakeSubLabel("Buffer Duration", Color.FromArgb(150, 150, 150)));
@@ -100,9 +112,10 @@ public partial class SettingsForm : Form
             new[] { "15 sec", "30 sec", "45 sec", "60 sec", "90 sec", "120 sec" },
             new[] { 15, 30, 45, 60, 90, 120 },
             BufferDurationSeconds,
-            val => { BufferDurationSeconds = val; OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI); }));
+            val => { BufferDurationSeconds = val; InvokeSettingsChanged(); }));
         layout.Controls.Add(MakeSeparator());
 
+        // ─── Папка збереження ─────────────────────────────────────────────
         layout.Controls.Add(MakeSubLabel("Save Folder", Color.FromArgb(150, 150, 150)));
         _folderValueLabel = new Label
         {
@@ -125,11 +138,12 @@ public partial class SettingsForm : Form
             {
                 SaveFolder = dlg.SelectedPath;
                 _folderValueLabel.Text = SaveFolder;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+                InvokeSettingsChanged();
             }
         }));
         layout.Controls.Add(MakeSeparator());
 
+        // ─── HUD overlay тумблер ──────────────────────────────────────────
         var toggleRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -146,33 +160,41 @@ public partial class SettingsForm : Form
         toggleRow.Controls.Add(_toggleOverlay, 1, 0);
         layout.Controls.Add(toggleRow);
         layout.Controls.Add(MakeSeparator());
-        layout.Controls.Add(MakeSeparator());
+
+        // ─── Налаштування хоткеїв ─────────────────────────────────────────
+        // При конфлікті — дублікат скидається в "Unassigned"
         layout.Controls.Add(MakeSubLabel("Hot Keys", Color.FromArgb(150, 150, 150)));
         layout.Controls.Add(MakeHotkeyRow("Save Screenshot", _hotkeyScreenshot, val => {
             _hotkeyScreenshot = val;
             if (_hotkeySaveVideo == val) { _hotkeySaveVideo = "Unassigned"; _btnHotkeySaveVideo!.Text = "Unassigned"; }
             if (_hotkeyToggleUI == val) { _hotkeyToggleUI = "Unassigned"; _btnHotkeyToggleUI!.Text = "Unassigned"; }
-            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+            InvokeSettingsChanged();
         }, btn => _btnHotkeyScreenshot = btn));
 
         layout.Controls.Add(MakeHotkeyRow("Save Video", _hotkeySaveVideo, val => {
             _hotkeySaveVideo = val;
             if (_hotkeyScreenshot == val) { _hotkeyScreenshot = "Unassigned"; _btnHotkeyScreenshot!.Text = "Unassigned"; }
             if (_hotkeyToggleUI == val) { _hotkeyToggleUI = "Unassigned"; _btnHotkeyToggleUI!.Text = "Unassigned"; }
-            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+            InvokeSettingsChanged();
         }, btn => _btnHotkeySaveVideo = btn));
 
         layout.Controls.Add(MakeHotkeyRow("Toggle UI", _hotkeyToggleUI, val => {
             _hotkeyToggleUI = val;
             if (_hotkeyScreenshot == val) { _hotkeyScreenshot = "Unassigned"; _btnHotkeyScreenshot!.Text = "Unassigned"; }
             if (_hotkeySaveVideo == val) { _hotkeySaveVideo = "Unassigned"; _btnHotkeySaveVideo!.Text = "Unassigned"; }
-            OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
+            InvokeSettingsChanged();
         }, btn => _btnHotkeyToggleUI = btn));
+
         layout.Controls.Add(MakeSeparator());
         layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
     }
+
+    // Хелпер щоб не дублювати довгий виклик OnSettingsChanged
+    private void InvokeSettingsChanged() =>
+        OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder,
+            _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
 
     private Label MakeTitle(string text) => new Label
     {
@@ -260,6 +282,9 @@ public partial class SettingsForm : Form
         return btn;
     }
 
+    // ─── Рядок хоткея ─────────────────────────────────────────────────────
+    // При кліку переходить в режим очікування вводу
+    // Escape — скасування, одиночні модифікатори — заборонені (підсвічує червоним)
     private Control MakeHotkeyRow(string label, string currentHotkey, Action<string> onChange, Action<Button> registerBtn)
     {
         var panel = new TableLayoutPanel
@@ -309,7 +334,6 @@ public partial class SettingsForm : Form
             hotkeyBtn.BackColor = Color.FromArgb(50, 50, 60);
 
             string pendingHotkey = string.Empty;
-
             KeyEventHandler? keyDownHandler = null;
             KeyEventHandler? keyUpHandler = null;
 
@@ -380,48 +404,30 @@ public partial class SettingsForm : Form
 
                 if (isModifierOnly)
                 {
-                    // Відпустили тільки модифікатор без основної клавіші
                     if (string.IsNullOrEmpty(pendingHotkey))
                     {
                         hotkeyBtn.KeyDown -= keyDownHandler;
                         hotkeyBtn.KeyUp -= keyUpHandler;
                         isListening = false;
-
                         hotkeyBtn.Text = "Press keys...";
                         hotkeyBtn.BackColor = Color.FromArgb(80, 30, 30);
                         hotkeyBtn.ForeColor = Color.FromArgb(240, 240, 240);
-
                         Task.Delay(800).ContinueWith(_ =>
-                        {
-                            hotkeyBtn.Invoke(() =>
-                            {
-                                OnHotkeyInputStarted?.Invoke();
-                                StartListening();
-                            });
-                        });
+                            hotkeyBtn.Invoke(() => { OnHotkeyInputStarted?.Invoke(); StartListening(); }));
                     }
                     return;
                 }
 
                 if (string.IsNullOrEmpty(pendingHotkey))
                 {
-                    // Заборонена комбінація — червоний, потім знову очікування
                     hotkeyBtn.KeyDown -= keyDownHandler;
                     hotkeyBtn.KeyUp -= keyUpHandler;
                     isListening = false;
-
                     hotkeyBtn.Text = "Press keys...";
                     hotkeyBtn.BackColor = Color.FromArgb(80, 30, 30);
                     hotkeyBtn.ForeColor = Color.FromArgb(240, 240, 240);
-
                     Task.Delay(800).ContinueWith(_ =>
-                    {
-                        hotkeyBtn.Invoke(() =>
-                        {
-                            OnHotkeyInputStarted?.Invoke();
-                            StartListening();
-                        });
-                    });
+                        hotkeyBtn.Invoke(() => { OnHotkeyInputStarted?.Invoke(); StartListening(); }));
                     return;
                 }
 
@@ -437,37 +443,24 @@ public partial class SettingsForm : Form
                 hotkeyBtn.Text = result;
                 hotkeyBtn.ForeColor = Color.FromArgb(0, 196, 160);
                 hotkeyBtn.BackColor = Color.FromArgb(42, 42, 46);
-
-                if (apply)
-                {
-                    currentHotkey = result;
-                    onChange(result);
-                }
+                if (apply) { currentHotkey = result; onChange(result); }
             }
 
             hotkeyBtn.KeyDown += keyDownHandler;
             hotkeyBtn.KeyUp += keyUpHandler;
-
-            hotkeyBtn.LostFocus += (sf, ef) =>
-            {
-                if (isListening)
-                {
-                    StopListening(currentHotkey, false);
-                }
-            };
-
+            hotkeyBtn.LostFocus += (sf, ef) => { if (isListening) StopListening(currentHotkey, false); };
             hotkeyBtn.Focus();
         }
 
         hotkeyBtn.Click += (s, e) => StartListening();
-
         panel.Controls.Add(nameLabel, 0, 0);
         panel.Controls.Add(hotkeyBtn, 1, 0);
-
         registerBtn(hotkeyBtn);
         return panel;
     }
 
+    // ─── Селектор роздільної здатності ───────────────────────────────────
+    // Показує тільки варіанти нижчі за нативну роздільну здатність
     private Control MakeResolutionSelector()
     {
         var screen = Screen.PrimaryScreen!.Bounds;
@@ -487,15 +480,11 @@ public partial class SettingsForm : Form
         if (!values.Contains(_currentResolution)) _currentResolution = "Native";
 
         return MakeArrowSelector(
-            labels.ToArray(),
-            values.ToArray(),
-            _currentResolution,
-            val => {
-                _currentResolution = val;
-                OnSettingsChanged?.Invoke(FrameRate, BufferDurationSeconds, SaveFolder, _currentResolution, _hotkeyScreenshot, _hotkeySaveVideo, _hotkeyToggleUI);
-            });
+            labels.ToArray(), values.ToArray(), _currentResolution,
+            val => { _currentResolution = val; InvokeSettingsChanged(); });
     }
 
+    // ─── Універсальний селектор зі стрілками (string версія) ─────────────
     private Control MakeArrowSelector(string[] labels, string[] values, string currentValue, Action<string> onChange)
     {
         var panel = new TableLayoutPanel
@@ -524,65 +513,19 @@ public partial class SettingsForm : Form
             Font = new Font("Segoe UI", 10, FontStyle.Bold)
         };
 
-        var btnLeft = new Button
-        {
-            Text = "◀",
-            Dock = DockStyle.Fill,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.Transparent,
-            ForeColor = Color.FromArgb(0, 196, 160),
-            Font = new Font("Segoe UI", 8),
-            Cursor = Cursors.Hand,
-            Padding = new Padding(0),
-            Margin = new Padding(0)
-        };
-        btnLeft.FlatAppearance.BorderSize = 0;
-        btnLeft.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
-        btnLeft.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
+        var btnLeft = MakeArrowBtn("◀");
+        var btnRight = MakeArrowBtn("▶");
 
-        var btnRight = new Button
-        {
-            Text = "▶",
-            Dock = DockStyle.Fill,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.Transparent,
-            ForeColor = Color.FromArgb(0, 196, 160),
-            Font = new Font("Segoe UI", 8),
-            Cursor = Cursors.Hand,
-            Padding = new Padding(0),
-            Margin = new Padding(0)
-        };
-        btnRight.FlatAppearance.BorderSize = 0;
-        btnRight.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
-        btnRight.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
-
-        btnLeft.Click += (s, e) =>
-        {
-            if (currentIndex > 0)
-            {
-                currentIndex--;
-                valueLabel.Text = labels[currentIndex];
-                onChange(values[currentIndex]);
-            }
-        };
-
-        btnRight.Click += (s, e) =>
-        {
-            if (currentIndex < labels.Length - 1)
-            {
-                currentIndex++;
-                valueLabel.Text = labels[currentIndex];
-                onChange(values[currentIndex]);
-            }
-        };
+        btnLeft.Click += (s, e) => { if (currentIndex > 0) { currentIndex--; valueLabel.Text = labels[currentIndex]; onChange(values[currentIndex]); } };
+        btnRight.Click += (s, e) => { if (currentIndex < labels.Length - 1) { currentIndex++; valueLabel.Text = labels[currentIndex]; onChange(values[currentIndex]); } };
 
         panel.Controls.Add(btnLeft, 0, 0);
         panel.Controls.Add(valueLabel, 1, 0);
         panel.Controls.Add(btnRight, 2, 0);
-
         return panel;
     }
 
+    // ─── Універсальний селектор зі стрілками (int версія) ────────────────
     private Control MakeArrowSelector(string[] labels, int[] values, int currentValue, Action<int> onChange)
     {
         var panel = new TableLayoutPanel
@@ -610,63 +553,36 @@ public partial class SettingsForm : Form
             Font = new Font("Segoe UI", 10, FontStyle.Bold)
         };
 
-        var btnLeft = new Button
-        {
-            Text = "◀",
-            Dock = DockStyle.Fill,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.Transparent,
-            ForeColor = Color.FromArgb(0, 196, 160),
-            Font = new Font("Segoe UI", 8),
-            Cursor = Cursors.Hand,
-            Padding = new Padding(0),
-            Margin = new Padding(0)
-        };
-        btnLeft.FlatAppearance.BorderSize = 0;
-        btnLeft.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
-        btnLeft.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
+        var btnLeft = MakeArrowBtn("◀");
+        var btnRight = MakeArrowBtn("▶");
 
-        var btnRight = new Button
-        {
-            Text = "▶",
-            Dock = DockStyle.Fill,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.Transparent,
-            ForeColor = Color.FromArgb(0, 196, 160),
-            Font = new Font("Segoe UI", 8),
-            Cursor = Cursors.Hand,
-            Padding = new Padding(0),
-            Margin = new Padding(0)
-        };
-        btnRight.FlatAppearance.BorderSize = 0;
-        btnRight.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
-        btnRight.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
-
-        btnLeft.Click += (s, e) =>
-        {
-            if (currentIndex > 0)
-            {
-                currentIndex--;
-                valueLabel.Text = labels[currentIndex];
-                onChange(values[currentIndex]);
-            }
-        };
-
-        btnRight.Click += (s, e) =>
-        {
-            if (currentIndex < labels.Length - 1)
-            {
-                currentIndex++;
-                valueLabel.Text = labels[currentIndex];
-                onChange(values[currentIndex]);
-            }
-        };
+        btnLeft.Click += (s, e) => { if (currentIndex > 0) { currentIndex--; valueLabel.Text = labels[currentIndex]; onChange(values[currentIndex]); } };
+        btnRight.Click += (s, e) => { if (currentIndex < labels.Length - 1) { currentIndex++; valueLabel.Text = labels[currentIndex]; onChange(values[currentIndex]); } };
 
         panel.Controls.Add(btnLeft, 0, 0);
         panel.Controls.Add(valueLabel, 1, 0);
         panel.Controls.Add(btnRight, 2, 0);
-
         return panel;
+    }
+
+    private Button MakeArrowBtn(string text)
+    {
+        var btn = new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.Transparent,
+            ForeColor = Color.FromArgb(0, 196, 160),
+            Font = new Font("Segoe UI", 8),
+            Cursor = Cursors.Hand,
+            Padding = new Padding(0),
+            Margin = new Padding(0)
+        };
+        btn.FlatAppearance.BorderSize = 0;
+        btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(42, 42, 46);
+        btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(58, 58, 62);
+        return btn;
     }
 
     private void SettingsForm_Load(object sender, EventArgs e) { }

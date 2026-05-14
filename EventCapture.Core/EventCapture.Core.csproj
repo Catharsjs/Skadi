@@ -16,6 +16,7 @@
 		<PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
 		<PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
 		<PackageReference Include="SharpDX.MediaFoundation" Version="4.2.0" />
+		<PackageReference Include="System.Management" Version="11.0.0-preview.4.26230.115" />
 	</ItemGroup>
 
 </Project>

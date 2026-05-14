@@ -3,8 +3,11 @@ using System.Runtime.InteropServices;
 
 namespace EventCapture.Core.Capture;
 
+// Кодує відео через Windows Media Foundation (H.264)
+// Записує в тимчасовий файл, при збереженні обрізає через FFmpeg
 public class VideoEncoder : IDisposable
 {
+    // Stopwatch для реальних timestamps кадрів (замість лічильника)
     private readonly System.Diagnostics.Stopwatch _stopwatch = new();
     private readonly int _fps;
     private readonly int _width;
@@ -27,9 +30,10 @@ public class VideoEncoder : IDisposable
         _width = width;
         _height = height;
         _bitrate = bitrate * 1000;
-        _frameDuration = 10_000_000 / fps;
+        _frameDuration = 10_000_000 / fps; // одиниці 100 наносекунд (формат MF)
     }
 
+    // ─── Ініціалізація SinkWriter з вихідним H.264 і вхідним RGB32 форматом ───
     public void Start(string outputPath)
     {
         if (_isRunning) return;
@@ -66,6 +70,8 @@ public class VideoEncoder : IDisposable
         _isRunning = true;
     }
 
+    // ─── Запис кадру ──────────────────────────────────────────────────────
+    // Перевертає рядки (bottom-up → top-down) і передає в SinkWriter
     public void WriteFrame(byte[] bgraData)
     {
         if (!_isRunning || _sinkWriter == null) return;
@@ -89,6 +95,7 @@ public class VideoEncoder : IDisposable
 
                 var sample = MediaFactory.CreateSample();
                 sample.AddBuffer(buffer);
+                // Реальний timestamp на основі Stopwatch
                 sample.SampleTime = _stopwatch.ElapsedTicks * 10_000_000 / System.Diagnostics.Stopwatch.Frequency;
                 sample.SampleDuration = _frameDuration;
 
@@ -101,6 +108,8 @@ public class VideoEncoder : IDisposable
         }
     }
 
+    // ─── Збереження останніх N секунд через FFmpeg ────────────────────────
+    // Зупиняє запис → обрізає файл через -sseof → перезапускає запис
     public async Task<string> SaveLastSecondsAsync(string outputFolder, int seconds)
     {
         if (!_isRunning)
@@ -147,6 +156,7 @@ public class VideoEncoder : IDisposable
         return outputPath;
     }
 
+    // ─── Запуск нового циклу запису ───────────────────────────────────────
     public void StartRecording()
     {
         CleanupOldTempFiles();
@@ -154,6 +164,7 @@ public class VideoEncoder : IDisposable
         Start(_currentTempPath);
     }
 
+    // Видаляємо залишки попередніх сесій з %TEMP%
     private static void CleanupOldTempFiles()
     {
         try

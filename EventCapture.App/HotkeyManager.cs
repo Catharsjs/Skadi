@@ -2,6 +2,8 @@
 
 namespace EventCapture.App;
 
+// Реєструє глобальні хоткеї через Win32 RegisterHotKey
+// Підтримує комбінації з Alt, Ctrl, Shift, Win + будь-яка клавіша
 public class HotkeyManager : IDisposable
 {
     [DllImport("user32.dll")]
@@ -48,6 +50,7 @@ public class HotkeyManager : IDisposable
         UnregisterHotKey(_handle, HOTKEY_TOGGLE_OVERLAY);
     }
 
+    // Парсить рядок типу "Alt+F1" у модифікатори і код клавіші
     public static (uint mods, uint vk) Parse(string hotkey)
     {
         uint mods = 0;

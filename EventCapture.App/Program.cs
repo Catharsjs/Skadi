@@ -8,6 +8,7 @@ static class Program
     [STAThread]
     static void Main()
     {
+        // Захист від запуску кількох екземплярів програми
         using var mutex = new System.Threading.Mutex(true, "EventCapture_SingleInstance", out bool isNewInstance);
 
         if (!isNewInstance)
@@ -21,6 +22,7 @@ static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
 
+        // MediaFactory ініціалізується один раз для всього процесу
         SharpDX.MediaFoundation.MediaFactory.Startup(
             SharpDX.MediaFoundation.MediaFactory.Version, 0);
 

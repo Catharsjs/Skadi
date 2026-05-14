@@ -4,14 +4,21 @@ namespace EventCapture.App;
 
 public partial class MainForm : Form
 {
+    // ─── Компоненти трею ───────────────────────────────────────────────────
     private NotifyIcon _trayIcon = null!;
     private ContextMenuStrip _trayMenu = null!;
+
+    // ─── Захоплення та кодування відео ────────────────────────────────────
     private VideoEncoder _encoder = null!;
     private ScreenCapturer _capturer = null!;
     private ScreenshotSaver _screenshotSaver = null!;
+
+    // ─── UI компоненти ────────────────────────────────────────────────────
     private HotkeyManager _hotkeyManager;
     private OverlayForm _overlay;
     private SettingsForm? _settingsForm;
+
+    // ─── Налаштування та стан ─────────────────────────────────────────────
     private AppSettings _appSettings;
     private CancellationTokenSource? _initCts;
     private readonly SemaphoreSlim _initSemaphore = new SemaphoreSlim(1, 1);
@@ -20,6 +27,8 @@ public partial class MainForm : Form
     private string _saveFolder;
     private int _currentFps = 60;
     private int _currentBufferSeconds = 60;
+    private volatile bool _overlayVisible = false;
+    private System.Threading.Timer? _hardwareTimer;
 
     public MainForm()
     {
@@ -28,21 +37,29 @@ public partial class MainForm : Form
         ShowInTaskbar = false;
         FormBorderStyle = FormBorderStyle.None;
         WindowState = FormWindowState.Minimized;
+
+        // Завантажуємо збережені налаштування
         _appSettings = AppSettings.Load();
         _saveFolder = _appSettings.SaveFolder;
+
+        // Запускаємо захоплення в фоні щоб не блокувати UI
         Task.Run(async () => await InitializeCapture(_appSettings.Fps, _appSettings.BufferSeconds, _appSettings.Resolution));
+
         InitializeTray();
+
         _hotkeyManager = new HotkeyManager(Handle);
         _hotkeyManager.RegisterAll(
             _appSettings.HotkeyScreenshot,
             _appSettings.HotkeySaveVideo,
             _appSettings.HotkeyToggleUI);
+
         _overlay = new OverlayForm();
         _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
         StartHardwareMonitor();
         Hide();
     }
 
+    // Приховуємо форму з Alt+Tab через WS_EX_TOOLWINDOW
     protected override CreateParams CreateParams
     {
         get
@@ -54,8 +71,10 @@ public partial class MainForm : Form
         }
     }
 
+    // ─── Ініціалізація захоплення ──────────────────────────────────────────
+    // Використовує debounce (200ms) і семафор щоб уникнути паралельних запусків
     private async Task InitializeCapture(int fps, int bufferSeconds,
-    string resolution = "Native", int targetWidth = 0, int targetHeight = 0)
+        string resolution = "Native", int targetWidth = 0, int targetHeight = 0)
     {
         _initCts?.Cancel();
         _initCts = new CancellationTokenSource();
@@ -90,6 +109,7 @@ public partial class MainForm : Form
 
             if (ct.IsCancellationRequested) return;
 
+            // Визначаємо роздільну здатність запису
             int nativeWidth = System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Width;
             int nativeHeight = System.Windows.Forms.Screen.PrimaryScreen!.Bounds.Height;
 
@@ -124,6 +144,7 @@ public partial class MainForm : Form
         }
     }
 
+    // ─── Іконка в системному треї ─────────────────────────────────────────
     private void InitializeTray()
     {
         _trayMenu = new ContextMenuStrip();
@@ -173,14 +194,18 @@ public partial class MainForm : Form
         _trayIcon.DoubleClick += (s, e) => ShowSettings();
     }
 
+    // ─── Панель налаштувань ───────────────────────────────────────────────
+    // Створюється один раз і кешується — повторні відкриття анімовані
     private void ShowSettings()
     {
         if (_settingsForm == null)
         {
             _settingsForm = new SettingsForm(this, _saveFolder, _currentFps, _currentBufferSeconds,
-            _appSettings.Resolution, _appSettings.HotkeyScreenshot,
-            _appSettings.HotkeySaveVideo, _appSettings.HotkeyToggleUI);
-            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution, hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI) =>
+                _appSettings.Resolution, _appSettings.HotkeyScreenshot,
+                _appSettings.HotkeySaveVideo, _appSettings.HotkeyToggleUI);
+
+            _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution,
+                hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI) =>
             {
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
@@ -194,15 +219,19 @@ public partial class MainForm : Form
                 _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
                 await InitializeCapture(fps, seconds, resolution);
             };
+
+            // Тимчасово знімаємо хоткеї під час введення нової комбінації
             _settingsForm.OnHotkeyInputStarted += () => _hotkeyManager.UnregisterAll();
             _settingsForm.OnHotkeyInputFinished += () => _hotkeyManager.RegisterAll(
                 _appSettings.HotkeyScreenshot,
                 _appSettings.HotkeySaveVideo,
                 _appSettings.HotkeyToggleUI);
+
             _settingsForm.OnOverlayToggled += (visible) =>
             {
+                _overlayVisible = visible;
                 _overlay.SetSystemInfoVisible(visible);
-                if (visible) _overlay.Show();
+                if (visible) { _overlay.Show(); _overlay.BringToFront(); }
                 else _overlay.Hide();
             };
         }
@@ -213,6 +242,7 @@ public partial class MainForm : Form
             _ = SlideIn(_settingsForm);
     }
 
+    // ─── Анімація панелі налаштувань ──────────────────────────────────────
     private async Task SlideIn(Form form)
     {
         var screen = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
@@ -265,22 +295,27 @@ public partial class MainForm : Form
         }
     }
 
+    // ─── Моніторинг системи (оновлення раз на секунду) ───────────────────
+    // _overlayVisible — volatile флаг для безпечного читання з іншого потоку
     private void StartHardwareMonitor()
     {
-        var timer = new System.Threading.Timer(_ =>
+        _hardwareTimer = new System.Threading.Timer(_ =>
         {
             _hardwareMonitor.Update();
-            if (_overlay.Visible)
+
+            if (_overlayVisible)
             {
-                _overlay.UpdateBuffer(_currentBufferSeconds);
-                _overlay.UpdateFps(_capturer?.IsRunning == true ? _currentFps : 0);
                 _overlay.UpdateSystemInfo(
                     _hardwareMonitor.CpuLoad,
                     _hardwareMonitor.CpuFrequency,
                     _hardwareMonitor.GpuLoad,
-                    _hardwareMonitor.GpuFrequency,
                     _hardwareMonitor.GpuVram,
-                    _hardwareMonitor.RamUsed);
+                    _hardwareMonitor.RamUsed,
+                    _hardwareMonitor.CpuName,
+                    _hardwareMonitor.GpuName,
+                    _hardwareMonitor.RamType,
+                    _hardwareMonitor.RamFrequency,
+                    _hardwareMonitor.TotalRamGB);
             }
         }, null, 0, 1000);
     }
@@ -297,6 +332,7 @@ public partial class MainForm : Form
         Application.Exit();
     }
 
+    // ─── Обробка системних повідомлень Windows ────────────────────────────
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_HOTKEY)
