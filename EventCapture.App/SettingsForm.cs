@@ -105,11 +105,10 @@ public partial class SettingsForm : Form
         layout.Controls.Add(MakeSeparator());
 
         layout.Controls.Add(MakePrimaryButton("Save Screenshot", () => _mainForm.TakeScreenshot()));
-        _labelHotkeyScreenshot = MakeSubLabel(_hotkeyScreenshot, Color.FromArgb(80, 80, 80));
+        _labelHotkeyScreenshot = MakeSubLabel(_hotkeyScreenshot, Color.FromArgb(0, 196, 160));
         layout.Controls.Add(_labelHotkeyScreenshot);
         layout.Controls.Add(MakePrimaryButton("Save Video", () => _mainForm.SaveVideo()));
-        _labelHotkeySaveVideo = MakeSubLabel(_hotkeySaveVideo, Color.FromArgb(80, 80, 80));
-        layout.Controls.Add(_labelHotkeySaveVideo);
+        _labelHotkeySaveVideo = MakeSubLabel(_hotkeySaveVideo, Color.FromArgb(80, 80, 80)); _labelHotkeySaveVideo = MakeSubLabel(_hotkeySaveVideo, Color.FromArgb(0, 196, 160)); layout.Controls.Add(_labelHotkeySaveVideo);
         layout.Controls.Add(MakeSeparator());
 
         // ─── Налаштування відео ───────────────────────────────────────────
@@ -562,8 +561,8 @@ public partial class SettingsForm : Form
             BackColor = Color.Transparent,
             Margin = new Padding(0, 4, 0, 4)
         };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
 
         var nameLabel = new Label
         {
@@ -581,7 +580,7 @@ public partial class SettingsForm : Form
             Dock = DockStyle.Fill,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(42, 42, 46),
-            ForeColor = Color.FromArgb(150, 150, 150),
+            ForeColor = Color.FromArgb(0, 196, 160),
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             Cursor = Cursors.Hand,
             TextAlign = ContentAlignment.MiddleCenter

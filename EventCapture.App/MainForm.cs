@@ -277,7 +277,7 @@ public partial class MainForm : Form
                 if (micDeviceId != _appSettings.MicDeviceId)
                     _settingsForm.LogEvent($"Mic device changed");
                 if (folder != _appSettings.SaveFolder)
-                    _settingsForm.LogEvent($"Save folder changed to {folder}");
+                    _settingsForm.LogEvent($"Save folder changed to ...\\{System.IO.Path.GetFileName(folder)}");
                 if (hotkeyScreenshot != _appSettings.HotkeyScreenshot)
                     _settingsForm.LogEvent($"Screenshot hotkey changed to {hotkeyScreenshot}");
                 if (hotkeySaveVideo != _appSettings.HotkeySaveVideo)
@@ -328,6 +328,7 @@ public partial class MainForm : Form
                 _overlay.SetSystemInfoVisible(visible);
                 if (visible) { _overlay.Show(); _overlay.BringToFront(); }
                 else _overlay.Hide();
+                _settingsForm.LogEvent($"System info {(visible ? "enabled" : "disabled")}");
             };
         }
 
