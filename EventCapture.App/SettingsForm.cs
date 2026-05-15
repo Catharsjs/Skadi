@@ -98,7 +98,7 @@ public partial class SettingsForm : Form
             ( >= 120, >= 1060) => (scale: 1.1f, panelWidth: 460, fontSize: 9f),
 
             // 1080p звичайний (24" монітор, 96dpi)
-            ( < 120, >= 1060) => (scale: 1.0f, panelWidth: 420, fontSize: 11f),
+            ( < 120, >= 1060) => (scale: 1.0f, panelWidth: 420, fontSize: 14f),
 
             // 768p і менше
             _ => (scale: 0.85f, panelWidth: 380, fontSize: 9f),
@@ -119,8 +119,7 @@ public partial class SettingsForm : Form
         BackColor = Color.FromArgb(28, 28, 30);
         ForeColor = Color.FromArgb(240, 240, 240);
         Font = new Font("Segoe UI", fontSize);
-        Padding = new Padding(S(14), 0, S(14), 0);
-
+        Padding = new Padding(S(14), 0, S(14), S(14));
         // ── Головний layout ──────────────────────────────────────────────
         var layout = new TableLayoutPanel
         {
@@ -128,7 +127,7 @@ public partial class SettingsForm : Form
             AutoSize = true,
             ColumnCount = 1,
             BackColor = Color.Transparent,
-            Padding = new Padding(0, S(10), 0, 0)
+            Padding = new Padding(0, S(4), 0, 0)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -190,7 +189,7 @@ public partial class SettingsForm : Form
             Margin = new Padding(0, S(1), 0, S(1))
         };
         layout.Controls.Add(_folderValueLabel);
-        layout.Controls.Add(MakeSecondaryButton("Browse...", () =>
+        var browseBtn = MakeSecondaryButton("Browse...", () =>
         {
             using var dlg = new FolderBrowserDialog();
             if (dlg.ShowDialog() == DialogResult.OK)
@@ -199,7 +198,16 @@ public partial class SettingsForm : Form
                 _folderValueLabel.Text = SaveFolder;
                 InvokeSettingsChanged();
             }
-        }));
+        });
+        browseBtn.Paint += (s, e) =>
+        {
+            e.Graphics.Clear(browseBtn.BackColor);
+            TextRenderer.DrawText(e.Graphics, browseBtn.Text, browseBtn.Font,
+                browseBtn.ClientRectangle, Color.FromArgb(240, 240, 240),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        };
+        layout.Controls.Add(browseBtn);
+        layout.Controls.Add(MakeSeparator());
         layout.Controls.Add(MakeSeparator());
 
         // ── Show System Info тумблер ─────────────────────────────────────
@@ -253,21 +261,39 @@ public partial class SettingsForm : Form
         _eventLog = new Label
         {
             Dock = DockStyle.Fill,
-            Height = S(26),
+            Height = S(40),
             BackColor = Color.Transparent,
             ForeColor = Color.FromArgb(0, 196, 160),
             Font = new Font("Segoe UI", Sf(8.5f)),
             TextAlign = ContentAlignment.MiddleLeft,
-            Margin = new Padding(0, S(2), 0, S(2)),
+            Margin = new Padding(0, S(8), 0, S(8)),
             Visible = true,
             Text = string.Empty
         };
         layout.Controls.Add(_eventLog);
 
         // ── Exit кнопка ──────────────────────────────────────────────────
-        layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
+        var exitBtn = MakeExitButton();
+        exitBtn.Dock = DockStyle.Bottom;
+        Controls.Add(exitBtn);
+        var log = new System.Text.StringBuilder();
+        log.AppendLine($"=== WIDTH DEBUG ===");
+        log.AppendLine($"panelWidth: {panelWidth}");
+        log.AppendLine($"form.Width after Add: {this.Width}");
+        log.AppendLine($"layout.Width: {layout.Width}");
+        log.AppendLine($"layout.PreferredSize: {layout.PreferredSize}");
+        log.AppendLine();
+        log.AppendLine("=== CONTROLS ===");
+        foreach (Control c in layout.Controls)
+        {
+            log.AppendLine($"{c.GetType().Name} | Text='{c.Text?.Substring(0, Math.Min(20, c.Text?.Length ?? 0))}' | Width={c.Width} | PreferredSize={c.PreferredSize} | AutoSize={c.AutoSize} | Dock={c.Dock}");
+        }
+        System.IO.File.WriteAllText(
+            @"C:\Users\user\Documents\EventCapture\eventcapture_debug.txt",
+            log.ToString()
+        );
     }   
 
     protected override void OnMove(EventArgs e)
@@ -300,6 +326,7 @@ public partial class SettingsForm : Form
     {
         Text = text,
         AutoSize = true,
+        Dock = DockStyle.None,
         Font = new Font("Segoe UI", Sf(13f), FontStyle.Bold),
         ForeColor = Color.FromArgb(0, 196, 160),
         BackColor = Color.Transparent,
@@ -310,6 +337,7 @@ public partial class SettingsForm : Form
     {
         Text = text,
         AutoSize = true,
+        Dock = DockStyle.None,
         Font = new Font("Segoe UI", Sf(9f)),
         ForeColor = color,
         BackColor = Color.Transparent,
@@ -321,7 +349,7 @@ public partial class SettingsForm : Form
         Dock = DockStyle.Fill,
         Height = 1,
         BackColor = Color.FromArgb(42, 42, 46),
-        Margin = new Padding(0, S(4), 0, S(4))
+        Margin = new Padding(0, S(2), 0, S(2))
     };
 
     private Button MakePrimaryButton(string text, Action onClick)
@@ -336,7 +364,7 @@ public partial class SettingsForm : Form
             FlatStyle = FlatStyle.Flat,
             Font = new Font("Segoe UI", Sf(9f), FontStyle.Bold),
             Cursor = Cursors.Hand,
-            Margin = new Padding(0, S(2), 0, S(2)),
+            Margin = new Padding(0, S(6), 0, S(6)),
             TextAlign = ContentAlignment.MiddleCenter
         };
         btn.FlatAppearance.BorderSize = 0;
@@ -369,7 +397,8 @@ public partial class SettingsForm : Form
         {
             Text = "Exit",
             Dock = DockStyle.Fill,
-            Height = S(36),
+            Height = S(44),
+            TextAlign = ContentAlignment.MiddleCenter,
             BackColor = Color.FromArgb(42, 42, 46),
             ForeColor = Color.FromArgb(220, 80, 80),
             FlatStyle = FlatStyle.Flat,
