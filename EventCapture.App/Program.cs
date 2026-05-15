@@ -1,16 +1,15 @@
-namespace EventCapture.App;
+using EventCapture.App;
 
 static class Program
 {
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern bool SetProcessDPIAware();
+    // ВИДАЛИ цей DllImport і виклик SetProcessDPIAware() — він конфліктує з PerMonitorV2
+    // [System.Runtime.InteropServices.DllImport("user32.dll")]
+    // private static extern bool SetProcessDPIAware();
 
     [STAThread]
     static void Main()
     {
-        // Захист від запуску кількох екземплярів програми
         using var mutex = new System.Threading.Mutex(true, "EventCapture_SingleInstance", out bool isNewInstance);
-
         if (!isNewInstance)
         {
             MessageBox.Show("EventCapture вже запущено.", "EventCapture",
@@ -18,16 +17,13 @@ static class Program
             return;
         }
 
-        SetProcessDPIAware();
+        // SetProcessDPIAware(); // ВИДАЛИ
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
 
-        // MediaFactory ініціалізується один раз для всього процесу
         SharpDX.MediaFoundation.MediaFactory.Startup(
             SharpDX.MediaFoundation.MediaFactory.Version, 0);
-
         Application.Run(new MainForm());
-
         SharpDX.MediaFoundation.MediaFactory.Shutdown();
     }
 }
