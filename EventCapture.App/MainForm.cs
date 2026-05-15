@@ -261,7 +261,31 @@ public partial class MainForm : Form
 
             _settingsForm.OnSettingsChanged += async (fps, seconds, folder, resolution, hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI, recordSystem, systemDeviceId, recordMic, micDeviceId) =>
             {
-                // Визначаємо чи потрібен перезапуск запису
+                // Логуємо зміни ДО оновлення _appSettings
+                if (fps != _appSettings.Fps)
+                    _settingsForm.LogEvent($"FPS changed {_appSettings.Fps} → {fps}");
+                if (seconds != _appSettings.BufferSeconds)
+                    _settingsForm.LogEvent($"Duration changed {_appSettings.BufferSeconds}s → {seconds}s");
+                if (resolution != _appSettings.Resolution)
+                    _settingsForm.LogEvent($"Resolution changed to {resolution}");
+                if (recordSystem != _appSettings.RecordSystemAudio)
+                    _settingsForm.LogEvent($"System audio {(recordSystem ? "enabled" : "disabled")}");
+                if (recordMic != _appSettings.RecordMicrophone)
+                    _settingsForm.LogEvent($"Microphone {(recordMic ? "enabled" : "disabled")}");
+                if (systemDeviceId != _appSettings.SystemAudioDeviceId)
+                    _settingsForm.LogEvent($"System audio device changed");
+                if (micDeviceId != _appSettings.MicDeviceId)
+                    _settingsForm.LogEvent($"Mic device changed");
+                if (folder != _appSettings.SaveFolder)
+                    _settingsForm.LogEvent($"Save folder changed to {folder}");
+                if (hotkeyScreenshot != _appSettings.HotkeyScreenshot)
+                    _settingsForm.LogEvent($"Screenshot hotkey changed to {hotkeyScreenshot}");
+                if (hotkeySaveVideo != _appSettings.HotkeySaveVideo)
+                    _settingsForm.LogEvent($"Save video hotkey changed to {hotkeySaveVideo}");
+                if (hotkeyToggleUI != _appSettings.HotkeyToggleUI)
+                    _settingsForm.LogEvent($"Toggle UI hotkey changed to {hotkeyToggleUI}");
+
+                // Визначаємо чи потрібен перезапуск
                 bool needsRestart = fps != _appSettings.Fps ||
                                     seconds != _appSettings.BufferSeconds ||
                                     resolution != _appSettings.Resolution ||
@@ -285,15 +309,10 @@ public partial class MainForm : Form
                 _appSettings.MicDeviceId = micDeviceId;
                 _appSettings.Save();
 
-                // Хоткеї оновлюємо завжди
                 _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
 
-                // Перезапускаємо запис тільки якщо змінились відео/аудіо налаштування
                 if (needsRestart)
-                {
                     await InitializeCapture(fps, seconds, resolution);
-                    _trayIcon.ShowBalloonTip(2000, "EventCapture", "Налаштування застосовано, запис поновлено", ToolTipIcon.Info);
-                }
             };
 
             // Тимчасово знімаємо хоткеї під час введення нової комбінації

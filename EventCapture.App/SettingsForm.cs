@@ -18,6 +18,8 @@ public partial class SettingsForm : Form
     private string? _micDeviceId = null;
     private Button _btnSystemDevice = null!;
     private Button _btnMicDevice = null!;
+    private Label? _eventLog;
+    private System.Windows.Forms.Timer? _delayTimer;
     public int BufferDurationSeconds { get; private set; }
     public int FrameRate { get; private set; }
     public string SaveFolder { get; private set; }
@@ -207,6 +209,19 @@ public partial class SettingsForm : Form
         }, btn => _btnHotkeyToggleUI = btn));
 
         layout.Controls.Add(MakeSeparator());
+        _eventLog = new Label
+        {
+            Dock = DockStyle.Fill,
+            Height = 32,
+            BackColor = Color.Transparent,
+            ForeColor = Color.FromArgb(0, 196, 160),
+            Font = new Font("Segoe UI", 8.5f),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0, 4, 0, 4),
+            Visible = true,
+            Text = string.Empty
+        };
+        layout.Controls.Add(_eventLog);
         layout.Controls.Add(MakeExitButton());
 
         Controls.Add(layout);
@@ -287,6 +302,74 @@ public partial class SettingsForm : Form
         btn.FlatAppearance.BorderColor = Color.FromArgb(58, 58, 62);
         btn.Click += (s, e) => onClick();
         return btn;
+    }
+
+    private System.Windows.Forms.Timer? _fadeTimer;
+    private int _fadeAlpha = 255;
+
+    public void LogEvent(string message)
+    {
+        if (InvokeRequired) { Invoke(() => LogEvent(message)); return; }
+        if (_eventLog == null) return;
+
+        // Зупиняємо всі попередні таймери
+        if (_fadeTimer != null)
+        {
+            _fadeTimer.Stop();
+            _fadeTimer.Dispose();
+            _fadeTimer = null;
+        }
+        if (_delayTimer != null)
+        {
+            _delayTimer.Stop();
+            _delayTimer.Dispose();
+            _delayTimer = null;
+        }
+
+        _eventLog.Text = message;
+        _eventLog.ForeColor = Color.FromArgb(0, 196, 160);
+        _fadeAlpha = 255;
+
+        _delayTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+        _delayTimer.Tick += (s, e) =>
+        {
+            if (_delayTimer != null)
+            {
+                _delayTimer.Stop();
+                _delayTimer.Dispose();
+                _delayTimer = null;
+            }
+
+            _fadeTimer = new System.Windows.Forms.Timer { Interval = 30 };
+            _fadeTimer.Tick += (s2, e2) =>
+            {
+                _fadeAlpha -= 8;
+                if (_fadeAlpha <= 0)
+                {
+                    if (_eventLog != null)
+                    {
+                        _eventLog.Text = string.Empty;
+                        _eventLog.ForeColor = Color.FromArgb(0, 196, 160);
+                    }
+                    var t = _fadeTimer;
+                    _fadeTimer = null;
+                    t?.Stop();
+                    t?.Dispose();
+                }
+                else
+                {
+                    if (_eventLog != null)
+                    {
+                        int r = (int)(0 * _fadeAlpha / 255.0 + 28 * (1 - _fadeAlpha / 255.0));
+                        int g = (int)(196 * _fadeAlpha / 255.0 + 28 * (1 - _fadeAlpha / 255.0));
+                        int b = (int)(160 * _fadeAlpha / 255.0 + 30 * (1 - _fadeAlpha / 255.0));
+                        _eventLog.ForeColor = Color.FromArgb(r, g, b);
+                    }
+                }
+            };
+            _fadeTimer.Start();
+        };
+        _delayTimer.Start();
     }
 
     private Button MakeExitButton()
@@ -527,6 +610,12 @@ public partial class SettingsForm : Form
                 if (e2.KeyCode == Keys.Escape)
                 {
                     StopListening(currentHotkey, false);
+                    return;
+                }
+
+                if (e2.KeyCode == Keys.Back)
+                {
+                    StopListening("Unassigned", true);
                     return;
                 }
 
