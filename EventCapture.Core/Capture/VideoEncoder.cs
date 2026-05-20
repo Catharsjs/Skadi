@@ -115,12 +115,15 @@ public class VideoEncoder : IDisposable
 
     // ─── Збереження останніх N секунд через FFmpeg ────────────────────────
     // Зупиняє запис → обрізає файл через -sseof → перезапускає запис
-    public async Task<string> SaveLastSecondsAsync(string outputFolder, int seconds)
+    public async Task<(string videoPath, long startTimestamp, long elapsedMs)> SaveLastSecondsAsync(
+    string outputFolder, int seconds)
     {
         if (!_isRunning)
             throw new InvalidOperationException("Encoder is not running.");
 
         string tempPath = _currentTempPath;
+        long capturedStartTimestamp = StartTimestamp;
+        long capturedElapsedMs = RecordingStopwatch.ElapsedMilliseconds;
         Stop();
 
         await Task.Delay(500);
@@ -158,7 +161,7 @@ public class VideoEncoder : IDisposable
         try { File.Delete(tempPath); } catch { }
 
         StartRecording();
-        return outputPath;
+        return (outputPath, capturedStartTimestamp, capturedElapsedMs);
     }
 
     // ─── Запуск нового циклу запису ───────────────────────────────────────

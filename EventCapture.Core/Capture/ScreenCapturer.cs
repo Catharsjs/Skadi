@@ -56,6 +56,7 @@ public class ScreenCapturer : IDisposable
     private int _textureHeight;
 
     public bool IsRunning => _isRunning;
+    public bool HasFirstFrame { get; private set; } = false;
 
     public ScreenCapturer(VideoEncoder encoder, int fps = 15, int targetWidth = 0, int targetHeight = 0)
     {
@@ -150,6 +151,7 @@ public class ScreenCapturer : IDisposable
         {
             using var frame = _framePool.TryGetNextFrame();
             if (frame == null) return;
+            if (!HasFirstFrame) HasFirstFrame = true;
 
             var texGuid = typeof(SharpDX.Direct3D11.Texture2D).GUID;
             var surfaceNative = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
@@ -308,6 +310,7 @@ public class ScreenCapturer : IDisposable
     public void Stop()
     {
         _isRunning = false;
+        HasFirstFrame = false;
         System.Threading.Thread.Sleep(200);
         _session?.Dispose(); _session = null;
         _framePool?.Dispose(); _framePool = null;

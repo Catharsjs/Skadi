@@ -19,8 +19,12 @@ public class AudioRecorder : IDisposable
     private readonly System.Diagnostics.Stopwatch _recordingStopwatch = new();
     private readonly System.Diagnostics.Stopwatch _firstRecordingStopwatch = new();
     private long _firstCaptureTimestamp = 0;
+    private long _sharedStartTimestamp = 0;
+    private long _audioActualStartTimestamp = 0;
+    private long _firstBufferDurationMs = 0;
     private readonly object _loopbackLock = new();
     private readonly object _micLock = new();
+    private long _firstFrameTimestamp = 0;
     private MMDeviceEnumerator? _deviceEnumerator;
     private AudioDeviceChangeCallback? _deviceChangeCallback;
     public event Action<string>? DefaultDeviceChanged;
@@ -52,14 +56,16 @@ public class AudioRecorder : IDisposable
     // ─── Запуск запису ────────────────────────────────────────────────────
 
     public void StartRecording(bool recordSystem, string? systemDeviceId,
-        bool recordMic, string? micDeviceId)
+      bool recordMic, string? micDeviceId, long sharedStartTimestamp = 0)
     {
         // Починаємо моніторинг змін пристроїв
         _deviceEnumerator = new MMDeviceEnumerator();
         _deviceChangeCallback = new AudioDeviceChangeCallback(this);
         _deviceEnumerator.RegisterEndpointNotificationCallback(_deviceChangeCallback);
         CleanupOldTempFiles();
-
+        _sharedStartTimestamp = sharedStartTimestamp > 0
+    ? sharedStartTimestamp
+    : Environment.TickCount64;
         if (recordSystem)
             StartSystemCapture(systemDeviceId);
 
@@ -120,21 +126,40 @@ public class AudioRecorder : IDisposable
             _loopbackCapture = new WasapiLoopbackCapture(device);
             _loopbackWriter = new WaveFileWriter(_loopbackTempPath, _loopbackCapture.WaveFormat);
 
-            int frameCount = 0;
-            _loopbackCapture.DataAvailable += (s, e) =>
-            {
-                lock (_loopbackLock)
-                    _loopbackWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+           int frameCount = 0;
+_loopbackCapture.DataAvailable += (s, e) =>
+{
+    lock (_loopbackLock)
+        _loopbackWriter?.Write(e.Buffer, 0, e.BytesRecorded);
 
-                frameCount++;
-                if (frameCount == 1 || frameCount % 100 == 0)
-                {
-                    System.IO.File.AppendAllText(logPath,
-                        $"[{DateTime.Now:HH:mm:ss}] DataAvailable: frame={frameCount}, bytes={e.BytesRecorded}\n");
-                }
-            };
+    frameCount++;
+    if (frameCount == 1)
+    {
+        _firstFrameTimestamp = Environment.TickCount64;
+        var format = _loopbackCapture?.WaveFormat;
+        if (format != null)
+            _firstBufferDurationMs = (long)(e.BytesRecorded * 1000.0 / (format.SampleRate * format.Channels * (format.BitsPerSample / 8)));
+        System.IO.File.AppendAllText(logPath,
+            $"[{DateTime.Now:HH:mm:ss.fff}] DataAvailable: frame=1, bytes={e.BytesRecorded}\n" +
+            $"  firstFrameTimestamp: {_firstFrameTimestamp}\n" +
+            $"  firstBufferDurationMs: {_firstBufferDurationMs}\n" +
+            $"  format: {format?.SampleRate}Hz, {format?.Channels}ch, {format?.BitsPerSample}bit\n" +
+            $"  delayFromAudioStart: {_firstFrameTimestamp - _audioActualStartTimestamp}ms\n" +
+            $"  delayFromVideoStart: {_firstFrameTimestamp - _sharedStartTimestamp + (_audioActualStartTimestamp - _sharedStartTimestamp)}ms\n");
+    }
+    else if (frameCount % 100 == 0)
+    {
+        System.IO.File.AppendAllText(logPath,
+            $"[{DateTime.Now:HH:mm:ss}] DataAvailable: frame={frameCount}, bytes={e.BytesRecorded}\n");
+    }
+};
 
             _loopbackCapture.StartRecording();
+            _audioActualStartTimestamp = Environment.TickCount64;
+            System.IO.File.AppendAllText(logPath,
+    $"  _sharedStartTimestamp: {_sharedStartTimestamp}\n" +
+    $"  _audioActualStartTimestamp: {_audioActualStartTimestamp}\n" +
+    $"  audioDelay: {_audioActualStartTimestamp - _sharedStartTimestamp}ms\n");
             if (_firstCaptureTimestamp == 0)
                 _firstCaptureTimestamp = Environment.TickCount64;
             _recordingStopwatch.Restart();
@@ -180,19 +205,20 @@ public class AudioRecorder : IDisposable
         catch { IsRecordingMic = false; }
     }
 
-    // ─── Збереження останніх N секунд ────────────────────────────────────
     public async Task<string?> SaveLastSecondsAsync(string outputFolder, int seconds,
-     string videoPath, double videoElapsedSeconds, long videoStartTimestamp)
+    string videoPath, long videoElapsedMs, long videoStartTimestamp)
     {
-        double audioElapsedSeconds = _recordingStopwatch.Elapsed.TotalSeconds;
-        double originalAudioElapsed = audioElapsedSeconds;
+        long nowMs = Environment.TickCount64;
+        long capturedFirstFrameTimestamp = _firstFrameTimestamp;
+        long capturedFirstBufferDurationMs = _firstBufferDurationMs;
         StopCapture();
         await Task.Delay(300);
 
         var audioInputs = new List<string>();
         string logPath = System.IO.Path.Combine(
-     Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-     "EventCapture", "full_debug.log");
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "EventCapture", "full_debug.log");
+
         System.IO.File.AppendAllText(logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] SaveLastSecondsAsync\n" +
             $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
@@ -200,7 +226,9 @@ public class AudioRecorder : IDisposable
         foreach (var p in LoopbackTempPaths)
             System.IO.File.AppendAllText(logPath,
                 $"  loopback: exists={File.Exists(p)}, size={(File.Exists(p) ? new FileInfo(p).Length : 0)}, path={p}\n");
-        // Конкатенуємо всі сегменти системного аудіо
+        System.IO.File.AppendAllText(logPath,
+            $"  videoElapsedMs: {videoElapsedMs}\n");
+
         if (LoopbackTempPaths.Count > 0)
         {
             var existingPaths = LoopbackTempPaths.Where(File.Exists).ToList();
@@ -210,7 +238,6 @@ public class AudioRecorder : IDisposable
             }
             else if (existingPaths.Count > 1)
             {
-                // Зливаємо всі сегменти в один файл
                 string mergedLoopback = Path.Combine(Path.GetTempPath(),
                     $"eventcapture_audio_system_merged_{Guid.NewGuid()}.wav");
                 var concatInputs = string.Join(" ", existingPaths.Select(p => $"-i \"{p}\""));
@@ -231,21 +258,19 @@ public class AudioRecorder : IDisposable
                 string concatError = await concatProcess.StandardError.ReadToEndAsync();
                 await Task.Run(() => concatProcess.WaitForExit(30000));
 
-                System.IO.File.AppendAllText(
-                    System.IO.Path.Combine(Environment.GetFolderPath(
-                        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
+                System.IO.File.AppendAllText(logPath,
                     $"[{DateTime.Now:HH:mm:ss.fff}] Concat result: exists={File.Exists(mergedLoopback)}, size={(File.Exists(mergedLoopback) ? new FileInfo(mergedLoopback).Length : 0)}\nError: {concatError}\n");
 
                 if (File.Exists(mergedLoopback))
                     audioInputs.Add(mergedLoopback);
             }
         }
+
         if (File.Exists(_micTempPath)) audioInputs.Add(_micTempPath);
         if (audioInputs.Count == 0) return null;
 
         var ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
 
-        // Отримуємо тривалість відео через ffprobe
         var probeArgs = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{videoPath}\"";
         var probeProcess = new System.Diagnostics.Process
         {
@@ -267,31 +292,50 @@ public class AudioRecorder : IDisposable
             System.Globalization.CultureInfo.InvariantCulture,
             out double videoDuration))
             videoDuration = seconds;
-        // Якщо є merged файл — коригуємо audioElapsedSeconds
-        if (audioInputs.Count > 0 && audioInputs[0].Contains("merged"))
-        {
-            double realOffset = (_firstCaptureTimestamp > 0 && videoStartTimestamp > 0)
-    ? (_firstCaptureTimestamp - videoStartTimestamp) / 1000.0
-    : 1.8; // fallback якщо timestamps недійсні
-            realOffset = Math.Max(0, Math.Min(realOffset, 5.0)); // обмежуємо від 0 до 5 секунд
-            audioElapsedSeconds = videoElapsedSeconds + realOffset;
 
-            System.IO.File.AppendAllText(
-                System.IO.Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
-                $"[{DateTime.Now:HH:mm:ss.fff}] Merged calc: realOffset={realOffset:F3}, videoElapsed={videoElapsedSeconds:F3}, audioElapsed={audioElapsedSeconds:F3}\n");
-        }
         var trimmedAudio = new List<string>();
         foreach (var audioPath in audioInputs)
         {
             string trimmed = Path.Combine(Path.GetTempPath(),
                 $"eventcapture_audio_trim_{Guid.NewGuid()}.wav");
 
-            double syncOffset = audioElapsedSeconds - videoElapsedSeconds;
-            double sseof = videoDuration + syncOffset;
-            var sseofStr = sseof.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            long bufferMs = (long)(seconds * 1000);
+            long startOffsetMs = videoElapsedMs - bufferMs;
+            if (startOffsetMs < 0) startOffsetMs = 0;
+
+            long audioDelayMs = capturedFirstFrameTimestamp > 0 && videoStartTimestamp > 0
+                ? capturedFirstFrameTimestamp - videoStartTimestamp
+                : (_audioActualStartTimestamp > 0 && videoStartTimestamp > 0
+                    ? _audioActualStartTimestamp - videoStartTimestamp
+                    : 0);
+
+
+            long audioStartOffsetMs = startOffsetMs - audioDelayMs;
+            if (audioStartOffsetMs < 0) audioStartOffsetMs = 0;
+
+            long audioFileStartMs = capturedFirstFrameTimestamp - capturedFirstBufferDurationMs - videoStartTimestamp;
+            double ssStart = Math.Max(0, (startOffsetMs + audioFileStartMs) / 1000.0);
+
+            long videoToSharedDelayMs = _sharedStartTimestamp - videoStartTimestamp;
+            long totalAudioDelayMs = _audioActualStartTimestamp - videoStartTimestamp;
+
+            var ssStr = ssStart.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
             var durationStr2 = videoDuration.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
-            var trimArgs = $"-y -sseof -{sseofStr} -i \"{audioPath}\" -t {durationStr2} \"{trimmed}\"";
+            var trimArgs = $"-y -ss {ssStr} -i \"{audioPath}\" -t {durationStr2} \"{trimmed}\"";
+
+            System.IO.File.AppendAllText(logPath,
+                $"  videoToSharedDelayMs: {videoToSharedDelayMs}\n" +
+                $"  totalAudioDelayMs: {totalAudioDelayMs}\n" +
+                $"  audioDelayMs (corrected): {audioDelayMs}\n" +
+                $"  firstBufferDurationMs: {capturedFirstBufferDurationMs}\n" +
+                $"  firstFrameTimestamp: {capturedFirstFrameTimestamp}\n" +
+                $"  rawAudioDelay: {(capturedFirstFrameTimestamp > 0 && videoStartTimestamp > 0 ? capturedFirstFrameTimestamp - videoStartTimestamp : 0)}\n" +
+                $"  audioStartOffsetMs: {audioStartOffsetMs}\n" +
+                $"  sharedStartTimestamp: {_sharedStartTimestamp}\n" +
+                $"  startOffsetMs: {startOffsetMs}\n" +
+                $"  ssStart: {ssStart:F3}\n" +
+                $"  videoDuration: {videoDuration:F3}\n" +
+                $"  trimArgs: {trimArgs}\n");
 
             var trimProcess = new System.Diagnostics.Process
             {
@@ -307,10 +351,10 @@ public class AudioRecorder : IDisposable
             trimProcess.Start();
             await trimProcess.StandardError.ReadToEndAsync();
             await Task.Run(() => trimProcess.WaitForExit(15000));
-            System.IO.File.AppendAllText(
-    System.IO.Path.Combine(Environment.GetFolderPath(
-        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
-    $"[{DateTime.Now:HH:mm:ss.fff}] Trim result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n");
+
+            System.IO.File.AppendAllText(logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] Trim result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n");
+
             if (File.Exists(trimmed) && new FileInfo(trimmed).Length > 0)
                 trimmedAudio.Add(trimmed);
         }
@@ -341,10 +385,10 @@ public class AudioRecorder : IDisposable
         mergeProcess.Start();
         string mergeError = await mergeProcess.StandardError.ReadToEndAsync();
         await Task.Run(() => mergeProcess.WaitForExit(30000));
-        System.IO.File.AppendAllText(
-    System.IO.Path.Combine(Environment.GetFolderPath(
-        Environment.SpecialFolder.MyDocuments), "EventCapture", "full_debug.log"),
-    $"[{DateTime.Now:HH:mm:ss.fff}] Merge result: exists={File.Exists(outputPath)}, size={(File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0)}\nMergeError: {mergeError}\n");
+
+        System.IO.File.AppendAllText(logPath,
+            $"[{DateTime.Now:HH:mm:ss.fff}] Merge result: exists={File.Exists(outputPath)}, size={(File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0)}\nMergeError: {mergeError}\n");
+
         foreach (var p in audioInputs) try { File.Delete(p); } catch { }
         foreach (var p in trimmedAudio) try { File.Delete(p); } catch { }
         LoopbackTempPaths.Clear();
@@ -384,6 +428,8 @@ public class AudioRecorder : IDisposable
         }
 
         IsRecordingSystem = false;
+        _firstFrameTimestamp = 0;
+        _firstBufferDurationMs = 0;
         _firstCaptureTimestamp = 0;
         IsRecordingMic = false;
         _firstRecordingStopwatch.Reset();

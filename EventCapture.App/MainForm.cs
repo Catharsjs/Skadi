@@ -31,6 +31,7 @@ public partial class MainForm : Form
     private int _currentBufferSeconds = 60;
     private volatile bool _overlayVisible = false;
     private System.Threading.Timer? _hardwareTimer;
+    private System.Threading.Timer? _memoryTimer;
     private static readonly string _logPath = System.IO.Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
     "EventCapture", "full_debug.log");
@@ -46,9 +47,9 @@ public partial class MainForm : Form
 
         // Завантажуємо збережені налаштування
         _appSettings = AppSettings.Load();
-       System.IO.Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-    "EventCapture", "full_debug.log");
+        System.IO.Path.Combine(
+     Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+     "EventCapture", "full_debug.log");
         System.IO.File.WriteAllText(_logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM START ═══\n" +
             $"  Fps: {_appSettings.Fps}, Buffer: {_appSettings.BufferSeconds}s\n" +
@@ -73,6 +74,7 @@ public partial class MainForm : Form
         _overlay = new OverlayForm();
         _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
         StartHardwareMonitor();
+        StartMemoryMonitor();
         Hide();
     }
 
@@ -99,7 +101,7 @@ public partial class MainForm : Form
         _initCts = new CancellationTokenSource();
         var ct = _initCts.Token;
 
-        try { await Task.Delay(200, ct); }
+        try { await Task.Delay(500, ct); }
         catch (TaskCanceledException) { return; }
 
         if (ct.IsCancellationRequested) return;
@@ -124,7 +126,7 @@ public partial class MainForm : Form
             GC.WaitForPendingFinalizers();
             GC.Collect();
 
-            await Task.Delay(200);
+            await Task.Delay(500);
 
             if (ct.IsCancellationRequested) return;
 
@@ -180,16 +182,21 @@ public partial class MainForm : Form
                 }
             };
 
-            // Запускаємо відео і аудіо максимально близько
+            // Запускаємо відео, чекаємо перший кадр, потім стартуємо аудіо
             _encoder.StartRecording();
+            _capturer.Start();
+
+            var waitStart = Environment.TickCount64;
+            while (!_capturer.HasFirstFrame && Environment.TickCount64 - waitStart < 3000)
+                await Task.Delay(10);
 
             System.IO.File.AppendAllText(_logPath,
     $"[{DateTime.Now:HH:mm:ss.fff}] Encoder started: {encWidth}x{encHeight} {fps}fps\n" +
-    $"  AudioRecorder: RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
+    $"  AudioRecorder: RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
+    $"  WaitedForFirstFrame: {Environment.TickCount64 - waitStart}ms\n");
             _audioRecorder.StartRecording(
                 _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
                 _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
-            _capturer.Start();
         }
         finally
         {
@@ -287,7 +294,6 @@ public partial class MainForm : Form
 
                 // Визначаємо чи потрібен перезапуск
                 bool needsRestart = fps != _appSettings.Fps ||
-                                    seconds != _appSettings.BufferSeconds ||
                                     resolution != _appSettings.Resolution ||
                                     recordSystem != _appSettings.RecordSystemAudio ||
                                     recordMic != _appSettings.RecordMicrophone ||
@@ -298,6 +304,7 @@ public partial class MainForm : Form
                 _saveFolder = folder;
                 _appSettings.Fps = fps;
                 _appSettings.BufferSeconds = seconds;
+                _currentBufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
                 _appSettings.Resolution = resolution;
                 _appSettings.HotkeyScreenshot = hotkeyScreenshot;
@@ -380,30 +387,38 @@ public partial class MainForm : Form
 
     public async void SaveVideo()
     {
-        string logPath = System.IO.Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-    "EventCapture", "full_debug.log");
         System.IO.File.AppendAllText(_logPath,
-     $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ SaveVideo START ═══\n" +
-     $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
-     $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}, IsRecordingMic={_audioRecorder?.IsRecordingMic}\n" +
-     $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
+            $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ SaveVideo START ═══\n" +
+            $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
+            $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}, IsRecordingMic={_audioRecorder?.IsRecordingMic}\n" +
+            $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
         try
         {
-            double videoElapsed = _encoder.RecordingStopwatch.Elapsed.TotalSeconds;
-            var videoPath = await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
+            var (videoPath, videoStartTimestamp, videoElapsedMs) = await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
+
+            System.IO.File.AppendAllText(_logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] VideoEncoder\n" +
+                $"  videoStartTimestamp: {videoStartTimestamp}\n" +
+                $"  videoElapsedMs: {videoElapsedMs}\n");
 
             if (_audioRecorder != null &&
                 (_appSettings.RecordSystemAudio || _appSettings.RecordMicrophone))
             {
-                var finalPath = await _audioRecorder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds, videoPath, videoElapsed, _encoder.StartTimestamp);
+                var finalPath = await _audioRecorder.SaveLastSecondsAsync(
+                    _saveFolder, _currentBufferSeconds, videoPath, videoElapsedMs, videoStartTimestamp);
 
                 if (finalPath != null && File.Exists(finalPath))
                     try { File.Delete(videoPath); } catch { }
 
+                // Чекаємо перший кадр перед стартом аудіо
+                var waitStart = Environment.TickCount64;
+                while (!_capturer.HasFirstFrame && Environment.TickCount64 - waitStart < 3000)
+                    await Task.Delay(10);
+
                 _audioRecorder.StartRecording(
                     _appSettings.RecordSystemAudio, _appSettings.SystemAudioDeviceId,
-                    _appSettings.RecordMicrophone, _appSettings.MicDeviceId);
+                    _appSettings.RecordMicrophone, _appSettings.MicDeviceId,
+                    _encoder.StartTimestamp);
             }
 
             _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
@@ -439,6 +454,23 @@ public partial class MainForm : Form
         }, null, 0, 1000);
     }
 
+    private void StartMemoryMonitor()
+    {
+        _memoryTimer = new System.Threading.Timer(_ =>
+        {
+            var proc = System.Diagnostics.Process.GetCurrentProcess();
+            proc.Refresh();
+            System.IO.File.AppendAllText(_logPath,
+                $"[{DateTime.Now:HH:mm:ss}] MEMORY REPORT\n" +
+                $"  WorkingSet:     {proc.WorkingSet64 / 1024 / 1024} MB\n" +
+                $"  PrivateMemory:  {proc.PrivateMemorySize64 / 1024 / 1024} MB\n" +
+                $"  GC Total:       {GC.GetTotalMemory(false) / 1024 / 1024} MB\n" +
+                $"  Encoder running: {_encoder?.IsRunning}\n" +
+                $"  Capturer running: {_capturer?.IsRunning}\n" +
+                $"  AudioRecorder: system={_audioRecorder?.IsRecordingSystem}, mic={_audioRecorder?.IsRecordingMic}\n\n");
+        }, null, 0, 60_000);
+    }
+
     public void SetUserSelectedSystemDevice(string deviceId)
     {
         if (_audioRecorder != null)
@@ -457,6 +489,7 @@ public partial class MainForm : Form
     $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
         _hotkeyManager?.Dispose();
         _hardwareMonitor?.Dispose();
+        _memoryTimer?.Dispose();
         _capturer?.Stop();
         _capturer?.Dispose();
         _encoder?.Dispose();
