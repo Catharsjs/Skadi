@@ -27,7 +27,8 @@ public partial class MainForm : Form
     private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
 
     private const int WM_HOTKEY = 0x0312;
-
+    private string? _lastDefaultSystemDeviceId;
+    private long _lastDefaultSystemDeviceChangeMs = 0;
     private string _saveFolder;
     private int _currentFps = 60;
     private int _currentBufferSeconds = 60;
@@ -205,6 +206,19 @@ public partial class MainForm : Form
 
         _audioRecorder.DefaultDeviceChanged += newDeviceId =>
         {
+            long now = Environment.TickCount64;
+
+            // Windows інколи спамить однакові device-change events.
+            // Ігноруємо дублікати протягом 3 секунд.
+            if (newDeviceId == _lastDefaultSystemDeviceId &&
+                now - _lastDefaultSystemDeviceChangeMs < 3000)
+            {
+                return;
+            }
+
+            _lastDefaultSystemDeviceId = newDeviceId;
+            _lastDefaultSystemDeviceChangeMs = now;
+
             if (_audioRecorder != null &&
                 _audioRecorder.UseDefaultSystemDevice &&
                 _appSettings.RecordSystemAudio &&
@@ -217,13 +231,16 @@ public partial class MainForm : Form
                     try
                     {
                         using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+
                         var device = enumerator.GetDefaultAudioEndpoint(
                             NAudio.CoreAudioApi.DataFlow.Render,
                             NAudio.CoreAudioApi.Role.Multimedia);
 
                         _settingsForm.UpdateSystemDeviceName(device.FriendlyName);
                     }
-                    catch { }
+                    catch
+                    {
+                    }
                 }
             }
         };
@@ -386,12 +403,24 @@ public partial class MainForm : Form
                 if (hotkeyToggleUI != _appSettings.HotkeyToggleUI)
                     _settingsForm.LogEvent($"Toggle UI hotkey changed to {hotkeyToggleUI}");
 
-                bool needsRestart = fps != _appSettings.Fps ||
-                                    resolution != _appSettings.Resolution ||
-                                    recordSystem != _appSettings.RecordSystemAudio ||
-                                    recordMic != _appSettings.RecordMicrophone ||
-                                    systemDeviceId != _appSettings.SystemAudioDeviceId ||
-                                    micDeviceId != _appSettings.MicDeviceId;
+                // ВАЖЛИВО:
+                // Усі flags рахуємо ДО оновлення _appSettings.
+                bool needsVideoRestart =
+                    fps != _appSettings.Fps ||
+                    resolution != _appSettings.Resolution;
+
+                bool systemAudioChanged =
+                    recordSystem != _appSettings.RecordSystemAudio ||
+                    systemDeviceId != _appSettings.SystemAudioDeviceId;
+
+                bool micAudioChanged =
+                    recordMic != _appSettings.RecordMicrophone ||
+                    micDeviceId != _appSettings.MicDeviceId;
+
+                bool needsAudioOnlyRestart =
+                    systemAudioChanged && !needsVideoRestart && !micAudioChanged;
+
+                bool needsFullRestart = needsVideoRestart;
 
                 _saveFolder = folder;
                 _currentBufferSeconds = seconds;
@@ -409,13 +438,40 @@ public partial class MainForm : Form
                 _appSettings.MicDeviceId = micDeviceId;
                 _appSettings.Save();
 
-                _hotkeyManager.RegisterAll(hotkeyScreenshot, hotkeySaveVideo, hotkeyToggleUI);
+                _hotkeyManager.RegisterAll(
+                    hotkeyScreenshot,
+                    hotkeySaveVideo,
+                    hotkeyToggleUI);
 
-                if (needsRestart)
+                if (needsFullRestart)
+                {
                     await InitializeCapture(fps, seconds, resolution);
+                }
+                else if (systemAudioChanged || micAudioChanged)
+                {
+                    if (_audioRecorder != null)
+                    {
+                        if (systemAudioChanged)
+                        {
+                            _audioRecorder.UseDefaultSystemDevice = systemDeviceId == null;
+
+                            if (recordSystem)
+                                _audioRecorder.RestartSystemCapture(systemDeviceId);
+                        }
+
+                        if (micAudioChanged)
+                        {
+                            _audioRecorder.UseDefaultMicDevice = micDeviceId == null;
+
+                            if (recordMic)
+                                _audioRecorder.RestartMicCapture(micDeviceId);
+                        }
+                    }
+                }
             };
 
             _settingsForm.OnHotkeyInputStarted += () => _hotkeyManager.UnregisterAll();
+
             _settingsForm.OnHotkeyInputFinished += () => _hotkeyManager.RegisterAll(
                 _appSettings.HotkeyScreenshot,
                 _appSettings.HotkeySaveVideo,
