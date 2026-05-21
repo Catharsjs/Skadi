@@ -30,13 +30,28 @@ public class AudioRecorder : IDisposable
 
     private readonly object _loopbackLock = new();
     private readonly object _micLock = new();
+    private readonly object _segmentsLock = new();
 
     private MMDeviceEnumerator? _deviceEnumerator;
     private AudioDeviceChangeCallback? _deviceChangeCallback;
 
     public event Action<string>? DefaultDeviceChanged;
 
+    // Залишаємо для логів/UI/MainForm.
     public readonly List<string> LoopbackTempPaths = new();
+
+    // Реальна структура для коректної синхронізації після перемикання audio device.
+    private class AudioSegment
+    {
+        public string Path { get; set; } = string.Empty;
+        public long StartTimestamp { get; set; }
+        public long ActualStartTimestamp { get; set; }
+        public long FirstFrameTimestamp { get; set; }
+        public long FirstBufferDurationMs { get; set; }
+        public string DeviceName { get; set; } = string.Empty;
+    }
+
+    private readonly List<AudioSegment> _loopbackSegments = new();
 
     public bool IsRecordingSystem { get; private set; }
     public bool IsRecordingMic { get; private set; }
@@ -84,6 +99,12 @@ public class AudioRecorder : IDisposable
 
         CleanupOldTempFiles();
 
+        lock (_segmentsLock)
+        {
+            LoopbackTempPaths.Clear();
+            _loopbackSegments.Clear();
+        }
+
         _sharedStartTimestamp = sharedStartTimestamp > 0
             ? sharedStartTimestamp
             : Environment.TickCount64;
@@ -107,8 +128,9 @@ public class AudioRecorder : IDisposable
         IsRecordingSystem = false;
         UseDefaultSystemDevice = deviceId == null;
 
-        // When the output device changes, the new loopback file starts later than the video timeline.
-        // SaveLastSecondsAsync will compensate this by using the first audio frame timestamp.
+        // ВАЖЛИВО:
+        // Не очищаємо _loopbackSegments і LoopbackTempPaths.
+        // Старий WAV потрібен для save, а новий WAV отримає власний timestamp.
         StartSystemCapture(deviceId);
     }
 
@@ -123,23 +145,40 @@ public class AudioRecorder : IDisposable
                 ? enumerator.GetDevice(deviceId)
                 : enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
 
-            _loopbackTempPath = Path.Combine(
+            string tempPath = Path.Combine(
                 Path.GetTempPath(),
                 $"eventcapture_audio_system_{Guid.NewGuid()}.wav");
 
-            LoopbackTempPaths.Add(_loopbackTempPath);
+            var capture = new WasapiLoopbackCapture(device);
+            var writer = new WaveFileWriter(tempPath, capture.WaveFormat);
+
+            var segment = new AudioSegment
+            {
+                Path = tempPath,
+                StartTimestamp = Environment.TickCount64,
+                DeviceName = device.FriendlyName
+            };
+
+            _loopbackCapture = capture;
+            _loopbackWriter = writer;
+            _loopbackTempPath = tempPath;
+
+            lock (_segmentsLock)
+            {
+                LoopbackTempPaths.Add(tempPath);
+                _loopbackSegments.Add(segment);
+            }
 
             File.AppendAllText(logPath,
                 $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture: {device.FriendlyName}\n" +
-                $"  TempPath: {_loopbackTempPath}\n" +
-                $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n");
-
-            _loopbackCapture = new WasapiLoopbackCapture(device);
-            _loopbackWriter = new WaveFileWriter(_loopbackTempPath, _loopbackCapture.WaveFormat);
+                $"  TempPath: {tempPath}\n" +
+                $"  SegmentStartTimestamp: {segment.StartTimestamp}\n" +
+                $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
+                $"  LoopbackSegments count: {_loopbackSegments.Count}\n");
 
             int frameCount = 0;
 
-            _loopbackCapture.DataAvailable += (s, e) =>
+            capture.DataAvailable += (s, e) =>
             {
                 lock (_loopbackLock)
                     _loopbackWriter?.Write(e.Buffer, 0, e.BytesRecorded);
@@ -148,24 +187,34 @@ public class AudioRecorder : IDisposable
 
                 if (frameCount == 1)
                 {
-                    _firstFrameTimestamp = Environment.TickCount64;
+                    long firstFrameTimestamp = Environment.TickCount64;
+                    long firstBufferDurationMs = 0;
 
-                    var format = _loopbackCapture?.WaveFormat;
+                    var format = capture.WaveFormat;
                     if (format != null)
                     {
-                        _firstBufferDurationMs = (long)(
+                        firstBufferDurationMs = (long)(
                             e.BytesRecorded * 1000.0 /
                             (format.SampleRate * format.Channels * (format.BitsPerSample / 8))
                         );
                     }
 
+                    _firstFrameTimestamp = firstFrameTimestamp;
+                    _firstBufferDurationMs = firstBufferDurationMs;
+
+                    segment.FirstFrameTimestamp = firstFrameTimestamp;
+                    segment.FirstBufferDurationMs = firstBufferDurationMs;
+
                     File.AppendAllText(logPath,
                         $"[{DateTime.Now:HH:mm:ss.fff}] DataAvailable: frame=1, bytes={e.BytesRecorded}\n" +
-                        $"  firstFrameTimestamp: {_firstFrameTimestamp}\n" +
-                        $"  firstBufferDurationMs: {_firstBufferDurationMs}\n" +
+                        $"  device: {segment.DeviceName}\n" +
+                        $"  segmentPath: {segment.Path}\n" +
+                        $"  segmentStartTimestamp: {segment.StartTimestamp}\n" +
+                        $"  firstFrameTimestamp: {segment.FirstFrameTimestamp}\n" +
+                        $"  firstBufferDurationMs: {segment.FirstBufferDurationMs}\n" +
                         $"  format: {format?.SampleRate}Hz, {format?.Channels}ch, {format?.BitsPerSample}bit\n" +
-                        $"  delayFromAudioStart: {_firstFrameTimestamp - _audioActualStartTimestamp}ms\n" +
-                        $"  delayFromVideoStart: {_firstFrameTimestamp - _sharedStartTimestamp}ms\n");
+                        $"  delayFromAudioStart: {segment.FirstFrameTimestamp - segment.ActualStartTimestamp}ms\n" +
+                        $"  delayFromVideoStart: {segment.FirstFrameTimestamp - _sharedStartTimestamp}ms\n");
                 }
                 else if (frameCount % 100 == 0)
                 {
@@ -174,12 +223,16 @@ public class AudioRecorder : IDisposable
                 }
             };
 
-            _loopbackCapture.StartRecording();
-            _audioActualStartTimestamp = Environment.TickCount64;
+            capture.StartRecording();
+
+            long actualStartTimestamp = Environment.TickCount64;
+            _audioActualStartTimestamp = actualStartTimestamp;
+            segment.ActualStartTimestamp = actualStartTimestamp;
 
             File.AppendAllText(logPath,
                 $"  _sharedStartTimestamp: {_sharedStartTimestamp}\n" +
                 $"  _audioActualStartTimestamp: {_audioActualStartTimestamp}\n" +
+                $"  segmentActualStartTimestamp: {segment.ActualStartTimestamp}\n" +
                 $"  audioDelay: {_audioActualStartTimestamp - _sharedStartTimestamp}ms\n");
 
             if (_firstCaptureTimestamp == 0)
@@ -243,175 +296,117 @@ public class AudioRecorder : IDisposable
         long videoElapsedMs,
         long videoStartTimestamp)
     {
-        long capturedFirstFrameTimestamp = _firstFrameTimestamp;
-        long capturedFirstBufferDurationMs = _firstBufferDurationMs;
         long capturedAudioActualStartTimestamp = _audioActualStartTimestamp;
         long capturedSharedStartTimestamp = _sharedStartTimestamp;
+
+        List<AudioSegment> existingSegments;
+
+        lock (_segmentsLock)
+        {
+            existingSegments = _loopbackSegments
+                .Where(s => File.Exists(s.Path))
+                .Select(s => new AudioSegment
+                {
+                    Path = s.Path,
+                    StartTimestamp = s.StartTimestamp,
+                    ActualStartTimestamp = s.ActualStartTimestamp,
+                    FirstFrameTimestamp = s.FirstFrameTimestamp,
+                    FirstBufferDurationMs = s.FirstBufferDurationMs,
+                    DeviceName = s.DeviceName
+                })
+                .ToList();
+        }
 
         StopCapture();
         await Task.Delay(300);
 
-        var audioInputs = new List<string>();
         string logPath = GetLogPath();
 
         File.AppendAllText(logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] SaveLastSecondsAsync\n" +
             $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
+            $"  LoopbackSegments existing count: {existingSegments.Count}\n" +
             $"  MicPath exists: {File.Exists(_micTempPath)}, size: {(File.Exists(_micTempPath) ? new FileInfo(_micTempPath).Length : 0)}\n");
 
         foreach (var p in LoopbackTempPaths)
         {
             File.AppendAllText(logPath,
-                $"  loopback: exists={File.Exists(p)}, size={(File.Exists(p) ? new FileInfo(p).Length : 0)}, path={p}\n");
+                $"  loopback path: exists={File.Exists(p)}, size={(File.Exists(p) ? new FileInfo(p).Length : 0)}, path={p}\n");
+        }
+
+        foreach (var segment in existingSegments)
+        {
+            File.AppendAllText(logPath,
+                $"  segment: exists={File.Exists(segment.Path)}, size={(File.Exists(segment.Path) ? new FileInfo(segment.Path).Length : 0)}\n" +
+                $"    device={segment.DeviceName}\n" +
+                $"    path={segment.Path}\n" +
+                $"    start={segment.StartTimestamp}\n" +
+                $"    actualStart={segment.ActualStartTimestamp}\n" +
+                $"    firstFrame={segment.FirstFrameTimestamp}\n" +
+                $"    firstBufferMs={segment.FirstBufferDurationMs}\n");
         }
 
         File.AppendAllText(logPath,
             $"  videoElapsedMs: {videoElapsedMs}\n" +
             $"  videoStartTimestamp: {videoStartTimestamp}\n");
 
-        if (LoopbackTempPaths.Count > 0)
-        {
-            var existingPaths = LoopbackTempPaths.Where(File.Exists).ToList();
+        bool hasMic = File.Exists(_micTempPath);
 
-            if (existingPaths.Count == 1)
-            {
-                audioInputs.Add(existingPaths[0]);
-            }
-            else if (existingPaths.Count > 1)
-            {
-                string mergedLoopback = Path.Combine(
-                    Path.GetTempPath(),
-                    $"eventcapture_audio_system_merged_{Guid.NewGuid()}.wav");
-
-                var concatInputs = string.Join(" ", existingPaths.Select(p => $"-i \"{p}\""));
-                var concatArgs = $"-y {concatInputs} -filter_complex concat=n={existingPaths.Count}:v=0:a=1 \"{mergedLoopback}\"";
-
-                var concatProcess = new System.Diagnostics.Process
-                {
-                    StartInfo = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath(),
-                        Arguments = concatArgs,
-                        UseShellExecute = false,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    }
-                };
-
-                concatProcess.Start();
-                string concatError = await concatProcess.StandardError.ReadToEndAsync();
-                await Task.Run(() => concatProcess.WaitForExit(30000));
-
-                File.AppendAllText(logPath,
-                    $"[{DateTime.Now:HH:mm:ss.fff}] Concat result: exists={File.Exists(mergedLoopback)}, size={(File.Exists(mergedLoopback) ? new FileInfo(mergedLoopback).Length : 0)}\n" +
-                    $"Error: {concatError}\n");
-
-                if (File.Exists(mergedLoopback) && new FileInfo(mergedLoopback).Length > 0)
-                    audioInputs.Add(mergedLoopback);
-            }
-        }
-
-        if (File.Exists(_micTempPath))
-            audioInputs.Add(_micTempPath);
-
-        if (audioInputs.Count == 0)
+        if (existingSegments.Count == 0 && !hasMic)
             return null;
 
         var ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
         double videoDuration = await ProbeDurationSecondsAsync(videoPath, seconds);
+        long realVideoDurationMs = (long)Math.Round(videoDuration * 1000.0);
+
+        long videoSegmentStartOffsetMs = videoElapsedMs - realVideoDurationMs;
+        if (videoSegmentStartOffsetMs < 0)
+            videoSegmentStartOffsetMs = 0;
 
         var trimmedAudio = new List<string>();
 
-        foreach (var audioPath in audioInputs)
+        foreach (var segment in existingSegments)
         {
-            string trimmed = Path.Combine(
-                Path.GetTempPath(),
-                $"eventcapture_audio_trim_{Guid.NewGuid()}.wav");
+            string? trimmed = await TrimAudioSegmentAsync(
+                ffmpegPath,
+                logPath,
+                segment,
+                videoPath,
+                videoStartTimestamp,
+                videoDuration,
+                realVideoDurationMs,
+                videoSegmentStartOffsetMs);
 
-            long realVideoDurationMs = (long)Math.Round(videoDuration * 1000.0);
+            if (!string.IsNullOrEmpty(trimmed))
+                trimmedAudio.Add(trimmed);
+        }
 
-            // Actual beginning of the already-trimmed video segment on the original encoder timeline.
-            // This must be based on real video duration because ffmpeg -c:v copy may cut at keyframes
-            // and produce e.g. 30.783s instead of exactly 30.000s.
-            long videoSegmentStartOffsetMs = videoElapsedMs - realVideoDurationMs;
-            if (videoSegmentStartOffsetMs < 0)
-                videoSegmentStartOffsetMs = 0;
-
-            long audioFileStartRelativeToVideoMs = CalculateAudioFileStartRelativeToVideoMs(
-                capturedFirstFrameTimestamp,
-                capturedFirstBufferDurationMs,
-                capturedAudioActualStartTimestamp,
-                videoStartTimestamp);
-
-            long ssStartMs = videoSegmentStartOffsetMs - audioFileStartRelativeToVideoMs;
-            long padStartMs = 0;
-
-            // If the audio file starts after the video segment, ffmpeg cannot seek before audio zero.
-            // Add silence to the beginning instead.
-            if (ssStartMs < 0)
+        // Mic залишаємо як fallback зі старою timeline-логікою.
+        // Якщо потрібно буде ідеально підтримати mic device switch, для mic треба зробити окремі MicSegment.
+        if (hasMic)
+        {
+            var micSegment = new AudioSegment
             {
-                padStartMs = -ssStartMs;
-                ssStartMs = 0;
-            }
-
-            var ssStr = (ssStartMs / 1000.0)
-                .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
-
-            var durationStr = videoDuration
-                .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
-
-            string trimArgs;
-
-            if (padStartMs > 0)
-            {
-                string delay = $"{padStartMs}|{padStartMs}";
-
-                trimArgs =
-                    $"-y -ss {ssStr} -i \"{audioPath}\" " +
-                    $"-af \"adelay={delay},apad,atrim=0:{durationStr}\" \"{trimmed}\"";
-            }
-            else
-            {
-                trimArgs =
-                    $"-y -ss {ssStr} -i \"{audioPath}\" " +
-                    $"-t {durationStr} \"{trimmed}\"";
-            }
-
-            File.AppendAllText(logPath,
-                $"  realVideoDurationMs: {realVideoDurationMs}\n" +
-                $"  videoSegmentStartOffsetMs: {videoSegmentStartOffsetMs}\n" +
-                $"  audioFileStartRelativeToVideoMs: {audioFileStartRelativeToVideoMs}\n" +
-                $"  ssStartMs: {ssStartMs}\n" +
-                $"  padStartMs: {padStartMs}\n" +
-                $"  firstBufferDurationMs: {capturedFirstBufferDurationMs}\n" +
-                $"  firstFrameTimestamp: {capturedFirstFrameTimestamp}\n" +
-                $"  sharedStartTimestamp: {capturedSharedStartTimestamp}\n" +
-                $"  audioActualStartTimestamp: {capturedAudioActualStartTimestamp}\n" +
-                $"  videoDuration: {videoDuration:F3}\n" +
-                $"  trimArgs: {trimArgs}\n");
-
-            var trimProcess = new System.Diagnostics.Process
-            {
-                StartInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = ffmpegPath,
-                    Arguments = trimArgs,
-                    UseShellExecute = false,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                }
+                Path = _micTempPath,
+                StartTimestamp = capturedAudioActualStartTimestamp,
+                ActualStartTimestamp = capturedAudioActualStartTimestamp,
+                FirstFrameTimestamp = 0,
+                FirstBufferDurationMs = 0,
+                DeviceName = "Microphone"
             };
 
-            trimProcess.Start();
-            string trimError = await trimProcess.StandardError.ReadToEndAsync();
-            await Task.Run(() => trimProcess.WaitForExit(15000));
+            string? trimmedMic = await TrimAudioSegmentAsync(
+                ffmpegPath,
+                logPath,
+                micSegment,
+                videoPath,
+                videoStartTimestamp,
+                videoDuration,
+                realVideoDurationMs,
+                videoSegmentStartOffsetMs);
 
-            File.AppendAllText(logPath,
-                $"[{DateTime.Now:HH:mm:ss.fff}] Trim result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n" +
-                $"TrimError: {trimError}\n");
-
-            if (File.Exists(trimmed) && new FileInfo(trimmed).Length > 0)
-                trimmedAudio.Add(trimmed);
+            if (!string.IsNullOrEmpty(trimmedMic))
+                trimmedAudio.Add(trimmedMic);
         }
 
         if (trimmedAudio.Count == 0)
@@ -419,11 +414,14 @@ public class AudioRecorder : IDisposable
 
         string outputPath = Path.Combine(
             outputFolder,
-            DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".mp4");
+            DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + "_" +
+            Guid.NewGuid().ToString("N")[..8] +
+            "_final.mp4");
 
         string audioInputArgs = string.Join(" ", trimmedAudio.Select(p => $"-i \"{p}\""));
+
         string audioFilter = trimmedAudio.Count > 1
-            ? $"-filter_complex amix=inputs={trimmedAudio.Count}:duration=shortest -c:a aac"
+            ? $"-filter_complex amix=inputs={trimmedAudio.Count}:duration=longest:dropout_transition=0 -c:a aac"
             : "-c:a aac";
 
         var mergeArgs = $"-y -i \"{videoPath}\" {audioInputArgs} -c:v copy {audioFilter} -shortest \"{outputPath}\"";
@@ -448,18 +446,123 @@ public class AudioRecorder : IDisposable
             $"[{DateTime.Now:HH:mm:ss.fff}] Merge result: exists={File.Exists(outputPath)}, size={(File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0)}\n" +
             $"MergeError: {mergeError}\n");
 
-        foreach (var p in audioInputs)
-            TryDelete(p);
+        foreach (var segment in existingSegments)
+            TryDelete(segment.Path);
+
+        if (hasMic)
+            TryDelete(_micTempPath);
 
         foreach (var p in trimmedAudio)
             TryDelete(p);
 
-        LoopbackTempPaths.Clear();
+        lock (_segmentsLock)
+        {
+            LoopbackTempPaths.Clear();
+            _loopbackSegments.Clear();
+        }
 
         if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
             return null;
 
         return outputPath;
+    }
+
+    private static async Task<string?> TrimAudioSegmentAsync(
+        string ffmpegPath,
+        string logPath,
+        AudioSegment segment,
+        string videoPath,
+        long videoStartTimestamp,
+        double videoDuration,
+        long realVideoDurationMs,
+        long videoSegmentStartOffsetMs)
+    {
+        if (!File.Exists(segment.Path))
+            return null;
+
+        string trimmed = Path.Combine(
+            Path.GetTempPath(),
+            $"eventcapture_audio_trim_{Guid.NewGuid()}.wav");
+
+        long audioFileStartRelativeToVideoMs = CalculateAudioFileStartRelativeToVideoMs(
+            segment.FirstFrameTimestamp,
+            segment.FirstBufferDurationMs,
+            segment.ActualStartTimestamp > 0 ? segment.ActualStartTimestamp : segment.StartTimestamp,
+            videoStartTimestamp);
+
+        long ssStartMs = videoSegmentStartOffsetMs - audioFileStartRelativeToVideoMs;
+        long padStartMs = 0;
+
+        if (ssStartMs < 0)
+        {
+            padStartMs = -ssStartMs;
+            ssStartMs = 0;
+        }
+
+        var ssStr = (ssStartMs / 1000.0)
+            .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+
+        var durationStr = videoDuration
+            .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+
+        string trimArgs;
+
+        if (padStartMs > 0)
+        {
+            string delay = $"{padStartMs}|{padStartMs}";
+
+            trimArgs =
+                $"-y -ss {ssStr} -i \"{segment.Path}\" " +
+                $"-af \"adelay={delay},apad,atrim=0:{durationStr}\" \"{trimmed}\"";
+        }
+        else
+        {
+            trimArgs =
+                $"-y -ss {ssStr} -i \"{segment.Path}\" " +
+                $"-t {durationStr} \"{trimmed}\"";
+        }
+
+        File.AppendAllText(logPath,
+            $"  TrimAudioSegment\n" +
+            $"    device: {segment.DeviceName}\n" +
+            $"    path: {segment.Path}\n" +
+            $"    realVideoDurationMs: {realVideoDurationMs}\n" +
+            $"    videoSegmentStartOffsetMs: {videoSegmentStartOffsetMs}\n" +
+            $"    audioFileStartRelativeToVideoMs: {audioFileStartRelativeToVideoMs}\n" +
+            $"    ssStartMs: {ssStartMs}\n" +
+            $"    padStartMs: {padStartMs}\n" +
+            $"    segmentStartTimestamp: {segment.StartTimestamp}\n" +
+            $"    segmentActualStartTimestamp: {segment.ActualStartTimestamp}\n" +
+            $"    firstBufferDurationMs: {segment.FirstBufferDurationMs}\n" +
+            $"    firstFrameTimestamp: {segment.FirstFrameTimestamp}\n" +
+            $"    videoDuration: {videoDuration:F3}\n" +
+            $"    trimArgs: {trimArgs}\n");
+
+        var trimProcess = new System.Diagnostics.Process
+        {
+            StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                Arguments = trimArgs,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+
+        trimProcess.Start();
+        string trimError = await trimProcess.StandardError.ReadToEndAsync();
+        await Task.Run(() => trimProcess.WaitForExit(15000));
+
+        File.AppendAllText(logPath,
+            $"[{DateTime.Now:HH:mm:ss.fff}] Trim segment result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n" +
+            $"TrimError: {trimError}\n");
+
+        if (File.Exists(trimmed) && new FileInfo(trimmed).Length > 0)
+            return trimmed;
+
+        TryDelete(trimmed);
+        return null;
     }
 
     private static long CalculateAudioFileStartRelativeToVideoMs(
