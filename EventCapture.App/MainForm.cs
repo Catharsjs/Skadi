@@ -1,110 +1,139 @@
 using EventCapture.Core.Capture;
-
+using EventCapture.Core.Diagnostics;
+using EventCapture.Core.Monitoring;
 namespace EventCapture.App;
 
 public partial class MainForm : Form
 {
-    // ─── Компоненти трею ───────────────────────────────────────────────────
-    private NotifyIcon _trayIcon = null!;
-    private ContextMenuStrip _trayMenu = null!;
-
-    // ─── Захоплення та кодування відео ────────────────────────────────────
-    private VideoEncoder _encoder = null!;
-    private ScreenCapturer _capturer = null!;
-    private ScreenshotSaver _screenshotSaver = null!;
-    private EventCapture.Core.Capture.AudioRecorder? _audioRecorder;
-
-    // ─── UI компоненти ────────────────────────────────────────────────────
-    private HotkeyManager _hotkeyManager;
-    private OverlayForm _overlay;
-    private SettingsForm? _settingsForm;
-
-    // ─── Налаштування та стан ─────────────────────────────────────────────
-    private AppSettings _appSettings;
-    private CancellationTokenSource? _initCts;
-    private readonly SemaphoreSlim _initSemaphore = new(1, 1);
-    private readonly SemaphoreSlim _saveSemaphore = new(1, 1);
-    private EventCapture.Core.Monitoring.HardwareMonitor _hardwareMonitor;
-
     private const int WM_HOTKEY = 0x0312;
-    private string? _lastDefaultSystemDeviceId;
-    private long _lastDefaultSystemDeviceChangeMs = 0;
+
+    // Налаштування та стан
+    private AppSettings _appSettings;
     private string _saveFolder;
     private int _currentFps = 60;
     private int _currentBufferSeconds = 60;
-    private volatile bool _overlayVisible = false;
+    private volatile bool _overlayVisible;
 
+    // Capture pipeline
+    private VideoEncoder _encoder = null!;
+    private ScreenCapturer _capturer = null!;
+    private ScreenshotSaver _screenshotSaver = null!;
+    private AudioRecorder? _audioRecorder;
+
+    // UI та tray
+    private NotifyIcon _trayIcon = null!;
+    private ContextMenuStrip _trayMenu = null!;
+    private HotkeyManager _hotkeyManager = null!;
+    private OverlayForm _overlay = null!;
+    private SettingsForm? _settingsForm;
+
+    // Моніторинг
+    private HardwareMonitor _hardwareMonitor = null!;
     private System.Threading.Timer? _hardwareTimer;
     private System.Threading.Timer? _memoryTimer;
 
-    private static readonly string _logPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-        "EventCapture",
-        "full_debug.log");
+    // Синхронізація
+    private CancellationTokenSource? _initCts;
+    private readonly SemaphoreSlim _initSemaphore = new(1, 1);
+    private readonly SemaphoreSlim _saveSemaphore = new(1, 1);
 
-    private static readonly object _logLock = new();
+    // Audio device events
+    private string? _lastDefaultSystemDeviceId;
+    private long _lastDefaultSystemDeviceChangeMs;
 
     public MainForm()
     {
         InitializeComponent();
 
-        Opacity = 0;
-        ShowInTaskbar = false;
-        FormBorderStyle = FormBorderStyle.None;
-        WindowState = FormWindowState.Minimized;
-
-        Directory.CreateDirectory(Path.GetDirectoryName(_logPath)!);
+        ConfigureHiddenWindow();
 
         _appSettings = AppSettings.Load();
         _saveFolder = _appSettings.SaveFolder;
 
-        File.WriteAllText(_logPath,
-            $"[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM START ═══\n" +
-            $"  Fps: {_appSettings.Fps}, Buffer: {_appSettings.BufferSeconds}s\n" +
-            $"  Resolution: {_appSettings.Resolution}\n" +
-            $"  RecordSystem: {_appSettings.RecordSystemAudio}\n" +
-            $"  RecordMic: {_appSettings.RecordMicrophone}\n" +
-            $"  SystemDeviceId: {_appSettings.SystemAudioDeviceId ?? "null"}\n" +
-            $"  MicDeviceId: {_appSettings.MicDeviceId ?? "null"}\n\n");
-
-        // Запускаємо захоплення у фоні, щоб не блокувати UI.
-        Task.Run(async () =>
-            await InitializeCapture(
-                _appSettings.Fps,
-                _appSettings.BufferSeconds,
-                _appSettings.Resolution));
+        LogApplicationStart();
 
         InitializeTray();
+        InitializeHotkeys();
+        InitializeOverlay();
+        InitializeHardwareMonitoring();
 
+        StartCaptureInitializationInBackground();
+
+        Hide();
+    }
+
+    // Початкова конфігурація форми (...
+    private void ConfigureHiddenWindow()
+    {
+        Opacity = 0;
+        ShowInTaskbar = false;
+        FormBorderStyle = FormBorderStyle.None;
+        WindowState = FormWindowState.Minimized;
+    }
+    // ...) Початкова конфігурація форми
+
+    // Ініціалізація компонентів (...
+    private void InitializeHotkeys()
+    {
         _hotkeyManager = new HotkeyManager(Handle);
         _hotkeyManager.RegisterAll(
             _appSettings.HotkeyScreenshot,
             _appSettings.HotkeySaveVideo,
             _appSettings.HotkeyToggleUI);
-
-        _overlay = new OverlayForm();
-        _hardwareMonitor = new EventCapture.Core.Monitoring.HardwareMonitor();
-
-        StartHardwareMonitor();
-        StartMemoryMonitor();
-
-        Hide();
     }
 
-    // Приховуємо форму з Alt+Tab через WS_EX_TOOLWINDOW.
+    private void InitializeOverlay()
+    {
+        _overlay = new OverlayForm();
+    }
+
+    private void InitializeHardwareMonitoring()
+    {
+        _hardwareMonitor = new HardwareMonitor();
+        StartHardwareMonitor();
+        StartMemoryMonitor();
+    }
+
+    private void StartCaptureInitializationInBackground()
+    {
+        // Capture pipeline запускається у фоні, щоб не блокувати UI.
+        Task.Run(async () =>
+            await InitializeCapture(
+                _appSettings.Fps,
+                _appSettings.BufferSeconds,
+                _appSettings.Resolution));
+    }
+    // ...) Ініціалізація компонентів
+
+    // Логування запуску (...
+    private void LogApplicationStart()
+    {
+        AppLogger.Info(
+            "Program started | " +
+            $"Fps={_appSettings.Fps} | " +
+            $"Buffer={_appSettings.BufferSeconds}s | " +
+            $"Resolution={_appSettings.Resolution} | " +
+            $"RecordSystem={_appSettings.RecordSystemAudio} | " +
+            $"RecordMic={_appSettings.RecordMicrophone} | " +
+            $"SystemDeviceId={_appSettings.SystemAudioDeviceId ?? "null"} | " +
+            $"MicDeviceId={_appSettings.MicDeviceId ?? "null"}");
+    }
+    // ...) Логування запуску
+
+    // Приховування вікна з Alt+Tab (...
     protected override CreateParams CreateParams
     {
         get
         {
             const int WS_EX_TOOLWINDOW = 0x00000080;
-            var cp = base.CreateParams;
-            cp.ExStyle |= WS_EX_TOOLWINDOW;
-            return cp;
+            var createParams = base.CreateParams;
+            createParams.ExStyle |= WS_EX_TOOLWINDOW;
+            return createParams;
         }
     }
+    // ...) Приховування вікна з Alt+Tab
 
-    // ─── Ініціалізація захоплення ──────────────────────────────────────────
-    // Використовує debounce і семафор, щоб уникнути паралельних запусків.
+    // Ініціалізація capture pipeline (...
     private async Task InitializeCapture(
         int fps,
         int bufferSeconds,
@@ -113,87 +142,72 @@ public partial class MainForm : Form
         int targetHeight = 0)
     {
         _initCts?.Cancel();
-
-        SafeLog(
-            $"[{DateTime.Now:HH:mm:ss.fff}] InitializeCapture: fps={fps}, buffer={bufferSeconds}, res={resolution}\n");
-
         _initCts = new CancellationTokenSource();
-        var ct = _initCts.Token;
+
+        var cancellationToken = _initCts.Token;
+
+        AppLogger.Info(
+            $"InitializeCapture | " +
+            $"Fps={fps} | " +
+            $"Buffer={bufferSeconds}s | " +
+            $"Resolution={resolution}");
 
         try
         {
-            await Task.Delay(500, ct);
+            await Task.Delay(500, cancellationToken);
         }
         catch (TaskCanceledException)
         {
             return;
         }
 
-        if (ct.IsCancellationRequested)
+        if (cancellationToken.IsCancellationRequested)
             return;
 
         await _initSemaphore.WaitAsync();
 
         try
         {
-            if (ct.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested)
                 return;
 
             _currentFps = fps;
             _currentBufferSeconds = bufferSeconds;
 
             StopCapturePipeline();
+            ForceGarbageCollection();
 
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
+            await Task.Delay(500, cancellationToken);
 
-            await Task.Delay(500, ct);
-
-            if (ct.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested)
                 return;
 
-            int nativeWidth = Screen.PrimaryScreen!.Bounds.Width;
-            int nativeHeight = Screen.PrimaryScreen!.Bounds.Height;
+            var (encoderWidth, encoderHeight) =
+                ResolveEncoderResolution(
+                    resolution,
+                    targetWidth,
+                    targetHeight);
 
-            int encWidth = resolution switch
-            {
-                "720p" => 1280,
-                "1080p" => 1920,
-                "1440p" => 2560,
-                _ => nativeWidth
-            };
-
-            int encHeight = resolution switch
-            {
-                "720p" => 720,
-                "1080p" => 1080,
-                "1440p" => 1440,
-                _ => nativeHeight
-            };
-
-            if (targetWidth > 0)
-                encWidth = targetWidth;
-
-            if (targetHeight > 0)
-                encHeight = targetHeight;
-
-            _encoder = new VideoEncoder(fps, encWidth, encHeight);
-            _screenshotSaver = new ScreenshotSaver(_saveFolder, encWidth, encHeight);
-            _capturer = new ScreenCapturer(_encoder, fps, encWidth, encHeight);
-            _audioRecorder = new EventCapture.Core.Capture.AudioRecorder();
+            CreateCaptureComponents(
+                fps,
+                encoderWidth,
+                encoderHeight);
 
             AttachAudioDeviceChangeHandler();
-
             StartRecordingPipeline();
 
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss.fff}] Encoder started: {encWidth}x{encHeight} {fps}fps\n" +
-                $"  AudioRecorder: RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
+            AppLogger.Info(
+                $"Capture initialized | " +
+                $"Resolution={encoderWidth}x{encoderHeight} | " +
+                $"Fps={fps}");
         }
         catch (TaskCanceledException)
         {
-            // Ініціалізацію скасовано новими налаштуваннями.
+            AppLogger.Debug("InitializeCapture canceled");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainForm), $"InitializeCapture failed: {ex}");
         }
         finally
         {
@@ -201,65 +215,148 @@ public partial class MainForm : Form
         }
     }
 
+    private static void ForceGarbageCollection()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    private static (int Width, int Height) ResolveEncoderResolution(
+        string resolution,
+        int targetWidth,
+        int targetHeight)
+    {
+        int nativeWidth = Screen.PrimaryScreen!.Bounds.Width;
+        int nativeHeight = Screen.PrimaryScreen!.Bounds.Height;
+
+        int width = resolution switch
+        {
+            "720p" => 1280,
+            "1080p" => 1920,
+            "1440p" => 2560,
+            _ => nativeWidth
+        };
+
+        int height = resolution switch
+        {
+            "720p" => 720,
+            "1080p" => 1080,
+            "1440p" => 1440,
+            _ => nativeHeight
+        };
+
+        if (targetWidth > 0)
+            width = targetWidth;
+
+        if (targetHeight > 0)
+            height = targetHeight;
+
+        return (width, height);
+    }
+
+    private void CreateCaptureComponents(
+        int fps,
+        int width,
+        int height)
+    {
+        _encoder = new VideoEncoder(
+            fps,
+            width,
+            height);
+
+        _screenshotSaver = new ScreenshotSaver(
+            _saveFolder,
+            width,
+            height);
+
+        _capturer = new ScreenCapturer(
+             _encoder,
+            fps);
+
+        _audioRecorder = new AudioRecorder();
+    }
+    // ...) Ініціалізація capture pipeline
+
+    // Audio device change events (...
     private void AttachAudioDeviceChangeHandler()
     {
         if (_audioRecorder == null)
             return;
 
-        _audioRecorder.DefaultDeviceChanged += newDeviceId =>
-        {
-            long now = Environment.TickCount64;
-
-            // Windows інколи спамить однакові device-change events.
-            // Ігноруємо дублікати протягом 3 секунд.
-            if (newDeviceId == _lastDefaultSystemDeviceId &&
-                now - _lastDefaultSystemDeviceChangeMs < 3000)
-            {
-                return;
-            }
-
-            _lastDefaultSystemDeviceId = newDeviceId;
-            _lastDefaultSystemDeviceChangeMs = now;
-
-            if (_audioRecorder != null &&
-                _audioRecorder.UseDefaultSystemDevice &&
-                _appSettings.RecordSystemAudio &&
-                _audioRecorder.IsRecordingSystem)
-            {
-                _audioRecorder.RestartSystemCapture(null);
-
-                if (_settingsForm != null)
-                {
-                    try
-                    {
-                        using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
-
-                        var device = enumerator.GetDefaultAudioEndpoint(
-                            NAudio.CoreAudioApi.DataFlow.Render,
-                            NAudio.CoreAudioApi.Role.Multimedia);
-
-                        _settingsForm.UpdateSystemDeviceName(device.FriendlyName);
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-        };
+        _audioRecorder.DefaultDeviceChanged += OnDefaultSystemDeviceChanged;
     }
 
+    private void OnDefaultSystemDeviceChanged(
+        string newDeviceId)
+    {
+        long now = Environment.TickCount64;
+
+        // Windows інколи генерує однакові events декілька разів.
+        // Ігноруємо дублікати протягом 3 секунд.
+        bool isDuplicateEvent =
+            newDeviceId == _lastDefaultSystemDeviceId &&
+            now - _lastDefaultSystemDeviceChangeMs < 3000;
+
+        if (isDuplicateEvent)
+            return;
+
+        _lastDefaultSystemDeviceId = newDeviceId;
+        _lastDefaultSystemDeviceChangeMs = now;
+
+        if (_audioRecorder == null ||
+            !_audioRecorder.UseDefaultSystemDevice ||
+            !_appSettings.RecordSystemAudio ||
+            !_audioRecorder.IsRecordingSystem)
+        {
+            return;
+        }
+
+        AppLogger.Info($"Default system audio device changed | Id={newDeviceId}");
+        _audioRecorder.RestartSystemCapture(null);
+        UpdateSettingsSystemDeviceName();
+    }
+
+    private void UpdateSettingsSystemDeviceName()
+    {
+        if (_settingsForm == null)
+            return;
+
+        try
+        {
+            using var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator();
+
+            var device =
+                enumerator.GetDefaultAudioEndpoint(
+                    NAudio.CoreAudioApi.DataFlow.Render,
+                    NAudio.CoreAudioApi.Role.Multimedia);
+
+            _settingsForm.UpdateSystemDeviceName(device.FriendlyName);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug($"UpdateSettingsSystemDeviceName warning: {ex.Message}");
+        }
+    }
+    // ...) Audio device change events
+
+    // Запуск та зупинка recording pipeline (...
     private void StartRecordingPipeline()
     {
-        if (_encoder == null || _capturer == null)
+        if (_encoder == null ||
+            _capturer == null)
+        {
             return;
+        }
 
         _encoder.StartRecording();
 
         if (!_capturer.IsRunning)
+        {
             _capturer.Start();
+        }
 
-        // ВАЖЛИВО: AudioRecorder отримує той самий StartTimestamp, що й VideoEncoder.
-        // Це базова точка синхронізації audio/video.
+        // Базова точка синхронізації audio/video (StartTimestamp)
         _audioRecorder?.StartRecording(
             _appSettings.RecordSystemAudio,
             _appSettings.SystemAudioDeviceId,
@@ -270,65 +367,105 @@ public partial class MainForm : Form
 
     private void StopCapturePipeline()
     {
+        DisposeAudioRecorder();
+        DisposeScreenCapturer();
+        DisposeVideoEncoder();
+    }
+
+    private void DisposeAudioRecorder()
+    {
         try
         {
             _audioRecorder?.Dispose();
-            _audioRecorder = null;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLogger.Debug($"AudioRecorder dispose warning: {ex.Message}");
+        }
 
+        _audioRecorder = null;
+    }
+
+    private void DisposeScreenCapturer()
+    {
         try
         {
             _capturer?.Stop();
             _capturer?.Dispose();
-            _capturer = null!;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLogger.Debug($"ScreenCapturer dispose warning: {ex.Message}");
+        }
+        _capturer = null!;
+    }
 
+    private void DisposeVideoEncoder()
+    {
         try
         {
             _encoder?.Stop();
             _encoder?.Dispose();
-            _encoder = null!;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLogger.Debug($"VideoEncoder dispose warning: {ex.Message}");
+        }
+        _encoder = null!;
     }
+    // ...) Запуск та зупинка recording pipeline
 
-    // ─── Іконка в системному треї ─────────────────────────────────────────
+    // Іконка системного трею (...
     private void InitializeTray()
     {
-        _trayMenu = new ContextMenuStrip
+        _trayMenu = CreateTrayMenu();
+        _trayIcon = new NotifyIcon
+        {
+            Text = "EventCapture",
+            Icon = new Icon(
+                Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "EventCapture.ico")),
+            ContextMenuStrip = _trayMenu,
+            Visible = true
+        };
+        _trayIcon.DoubleClick += (_, _) => ShowSettings();
+    }
+
+    private ContextMenuStrip CreateTrayMenu()
+    {
+        var menu = new ContextMenuStrip
         {
             BackColor = Color.FromArgb(28, 28, 30),
             ForeColor = Color.FromArgb(240, 240, 240),
             RenderMode = ToolStripRenderMode.System
         };
 
+        bool autoStartEnabled = AppSettings.IsAutoStartEnabled();
         var itemOpen = new ToolStripMenuItem("Open Settings");
         var itemScreenshot = new ToolStripMenuItem("Save Screenshot\tAlt+F1");
         var itemSaveVideo = new ToolStripMenuItem("Save Video\tAlt+F2");
-
-        bool autoStartEnabled = AppSettings.IsAutoStartEnabled();
-        var itemAutostart = new ToolStripMenuItem(
-            autoStartEnabled ? "✓ Launch at Startup" : "Launch at Startup");
-
+        var itemAutostart = new ToolStripMenuItem(autoStartEnabled ? "✓ Launch at Startup" : "Launch at Startup");
         var itemExit = new ToolStripMenuItem("Exit");
 
-        itemOpen.Click += (s, e) => ShowSettings();
-        itemScreenshot.Click += (s, e) => TakeScreenshot();
-        itemSaveVideo.Click += (s, e) => SaveVideo();
-
-        itemAutostart.Click += (s, e) =>
+        itemOpen.Click += (_, _) => ShowSettings();
+        itemScreenshot.Click += (_, _) => TakeScreenshot();
+        itemSaveVideo.Click += (_, _) => SaveVideo();
+        itemAutostart.Click += (_, _) =>
         {
             autoStartEnabled = !autoStartEnabled;
             AppSettings.SetAutoStart(autoStartEnabled);
-            itemAutostart.Text = autoStartEnabled ? "✓ Launch at Startup" : "Launch at Startup";
+            itemAutostart.Text =
+                autoStartEnabled
+                    ? "✓ Launch at Startup"
+                    : "Launch at Startup";
         };
 
-        itemExit.Click += (s, e) => ExitApp();
+        itemExit.Click += (_, _) => ExitApp();
 
-        _trayMenu.Items.AddRange(new ToolStripItem[]
-        {
+        menu.Items.AddRange(
+            new ToolStripItem[]
+            {
             itemOpen,
             new ToolStripSeparator(),
             itemScreenshot,
@@ -337,179 +474,338 @@ public partial class MainForm : Form
             itemAutostart,
             new ToolStripSeparator(),
             itemExit
-        });
-
-        _trayIcon = new NotifyIcon
-        {
-            Text = "EventCapture",
-            Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "EventCapture.ico")),
-            ContextMenuStrip = _trayMenu,
-            Visible = true
-        };
-
-        _trayIcon.DoubleClick += (s, e) => ShowSettings();
+            });
+        return menu;
     }
+    // ...) Іконка системного трею
 
-    // ─── Панель налаштувань ───────────────────────────────────────────────
+    // Панель налаштувань (...
     private void ShowSettings()
     {
         if (_settingsForm == null)
         {
-            _settingsForm = new SettingsForm(
-                this,
-                _saveFolder,
-                _currentFps,
-                _currentBufferSeconds,
-                _appSettings.Resolution,
-                _appSettings.HotkeyScreenshot,
-                _appSettings.HotkeySaveVideo,
-                _appSettings.HotkeyToggleUI,
-                _appSettings.RecordSystemAudio,
-                _appSettings.SystemAudioDeviceId,
-                _appSettings.RecordMicrophone,
-                _appSettings.MicDeviceId);
-
-            _settingsForm.OnSettingsChanged += async (
-                fps,
-                seconds,
-                folder,
-                resolution,
-                hotkeyScreenshot,
-                hotkeySaveVideo,
-                hotkeyToggleUI,
-                recordSystem,
-                systemDeviceId,
-                recordMic,
-                micDeviceId) =>
-            {
-                if (fps != _appSettings.Fps)
-                    _settingsForm.LogEvent($"FPS changed {_appSettings.Fps} → {fps}");
-                if (seconds != _appSettings.BufferSeconds)
-                    _settingsForm.LogEvent($"Duration changed {_appSettings.BufferSeconds}s → {seconds}s");
-                if (resolution != _appSettings.Resolution)
-                    _settingsForm.LogEvent($"Resolution changed to {resolution}");
-                if (recordSystem != _appSettings.RecordSystemAudio)
-                    _settingsForm.LogEvent($"System audio {(recordSystem ? "enabled" : "disabled")}");
-                if (recordMic != _appSettings.RecordMicrophone)
-                    _settingsForm.LogEvent($"Microphone {(recordMic ? "enabled" : "disabled")}");
-                if (systemDeviceId != _appSettings.SystemAudioDeviceId)
-                    _settingsForm.LogEvent("System audio device changed");
-                if (micDeviceId != _appSettings.MicDeviceId)
-                    _settingsForm.LogEvent("Mic device changed");
-                if (folder != _appSettings.SaveFolder)
-                    _settingsForm.LogEvent($"Save folder changed to ...\\{Path.GetFileName(folder)}");
-                if (hotkeyScreenshot != _appSettings.HotkeyScreenshot)
-                    _settingsForm.LogEvent($"Screenshot hotkey changed to {hotkeyScreenshot}");
-                if (hotkeySaveVideo != _appSettings.HotkeySaveVideo)
-                    _settingsForm.LogEvent($"Save video hotkey changed to {hotkeySaveVideo}");
-                if (hotkeyToggleUI != _appSettings.HotkeyToggleUI)
-                    _settingsForm.LogEvent($"Toggle UI hotkey changed to {hotkeyToggleUI}");
-
-                // ВАЖЛИВО:
-                // Усі flags рахуємо ДО оновлення _appSettings.
-                bool needsVideoRestart =
-                    fps != _appSettings.Fps ||
-                    resolution != _appSettings.Resolution;
-
-                bool systemAudioChanged =
-                    recordSystem != _appSettings.RecordSystemAudio ||
-                    systemDeviceId != _appSettings.SystemAudioDeviceId;
-
-                bool micAudioChanged =
-                    recordMic != _appSettings.RecordMicrophone ||
-                    micDeviceId != _appSettings.MicDeviceId;
-
-                bool needsAudioOnlyRestart =
-                    systemAudioChanged && !needsVideoRestart && !micAudioChanged;
-
-                bool needsFullRestart = needsVideoRestart;
-
-                _saveFolder = folder;
-                _currentBufferSeconds = seconds;
-
-                _appSettings.Fps = fps;
-                SafeLog(
-    $"[{DateTime.Now:HH:mm:ss.fff}] UI Settings Mic Selection\n" +
-    $"  recordMic: {recordMic}\n" +
-    $"  micDeviceId from UI: {micDeviceId ?? "null"}\n" +
-    $"  previous MicDeviceId: {_appSettings.MicDeviceId ?? "null"}\n");
-                _appSettings.BufferSeconds = seconds;
-                _appSettings.SaveFolder = folder;
-                _appSettings.Resolution = resolution;
-                _appSettings.HotkeyScreenshot = hotkeyScreenshot;
-                _appSettings.HotkeySaveVideo = hotkeySaveVideo;
-                _appSettings.HotkeyToggleUI = hotkeyToggleUI;
-                _appSettings.RecordSystemAudio = recordSystem;
-                _appSettings.SystemAudioDeviceId = systemDeviceId;
-                _appSettings.RecordMicrophone = recordMic;
-                _appSettings.MicDeviceId = micDeviceId;
-                _appSettings.Save();
-
-                _hotkeyManager.RegisterAll(
-                    hotkeyScreenshot,
-                    hotkeySaveVideo,
-                    hotkeyToggleUI);
-
-                if (needsFullRestart)
-                {
-                    await InitializeCapture(fps, seconds, resolution);
-                }
-                else if (systemAudioChanged || micAudioChanged)
-                {
-                    if (_audioRecorder != null)
-                    {
-                        if (systemAudioChanged)
-                        {
-                            _audioRecorder.UseDefaultSystemDevice = systemDeviceId == null;
-
-                            if (recordSystem)
-                                _audioRecorder.RestartSystemCapture(systemDeviceId);
-                        }
-
-                        if (micAudioChanged)
-                        {
-                            _audioRecorder.UseDefaultMicDevice = micDeviceId == null;
-
-                            if (recordMic)
-                                _audioRecorder.RestartMicCapture(micDeviceId);
-                        }
-                    }
-                }
-            };
-
-            _settingsForm.OnHotkeyInputStarted += () => _hotkeyManager.UnregisterAll();
-
-            _settingsForm.OnHotkeyInputFinished += () => _hotkeyManager.RegisterAll(
-                _appSettings.HotkeyScreenshot,
-                _appSettings.HotkeySaveVideo,
-                _appSettings.HotkeyToggleUI);
-
-            _settingsForm.OnOverlayToggled += visible =>
-            {
-                _overlayVisible = visible;
-                _overlay.SetSystemInfoVisible(visible);
-
-                if (visible)
-                {
-                    _overlay.Show();
-                    _overlay.BringToFront();
-                }
-                else
-                {
-                    _overlay.Hide();
-                }
-
-                _settingsForm.LogEvent($"System info {(visible ? "enabled" : "disabled")}");
-            };
+            CreateSettingsForm();
+            AttachSettingsEvents();
         }
-
-        if (_settingsForm.Visible)
-            _ = SlideOut(_settingsForm);
-        else
-            _ = SlideIn(_settingsForm);
+        ToggleSettingsWindow();
     }
 
-    // ─── Анімація панелі налаштувань ──────────────────────────────────────
+    private void CreateSettingsForm()
+    {
+        _settingsForm = new SettingsForm(
+            this,
+            _saveFolder,
+            _currentFps,
+            _currentBufferSeconds,
+            _appSettings.Resolution,
+            _appSettings.HotkeyScreenshot,
+            _appSettings.HotkeySaveVideo,
+            _appSettings.HotkeyToggleUI,
+            _appSettings.RecordSystemAudio,
+            _appSettings.SystemAudioDeviceId,
+            _appSettings.RecordMicrophone,
+            _appSettings.MicDeviceId);
+    }
+
+    private void ToggleSettingsWindow()
+    {
+        if (_settingsForm == null)
+            return;
+
+        if (_settingsForm.Visible)
+        {
+            _ = SlideOut(_settingsForm);
+        }
+        else
+        {
+            _ = SlideIn(_settingsForm);
+        }
+    }
+    // ...) Панель налаштувань
+
+
+    // Events settings форми (...
+    private void AttachSettingsEvents()
+    {
+        if (_settingsForm == null)
+            return;
+        _settingsForm.OnSettingsChanged += OnSettingsChanged;
+        _settingsForm.OnHotkeyInputStarted += OnHotkeyInputStarted;
+        _settingsForm.OnHotkeyInputFinished += OnHotkeyInputFinished;
+        _settingsForm.OnOverlayToggled += OnOverlayToggled;
+    }
+
+    private void OnHotkeyInputStarted()
+    {
+        _hotkeyManager.UnregisterAll();
+    }
+
+    private void OnHotkeyInputFinished()
+    {
+        _hotkeyManager.RegisterAll(
+            _appSettings.HotkeyScreenshot,
+            _appSettings.HotkeySaveVideo,
+            _appSettings.HotkeyToggleUI);
+    }
+
+    private void OnOverlayToggled(bool visible)
+    {
+        _overlayVisible = visible;
+        _overlay.SetSystemInfoVisible(visible);
+
+        if (visible)
+        {
+            _overlay.Show();
+            _overlay.BringToFront();
+        }
+        else
+        {
+            _overlay.Hide();
+        }
+        _settingsForm?.LogEvent($"System info {(visible ? "enabled" : "disabled")}");
+    }
+    // ...) Events settings форми
+
+    // Застосування налаштувань (...
+    private async void OnSettingsChanged(
+        int fps,
+        int seconds,
+        string folder,
+        string resolution,
+        string hotkeyScreenshot,
+        string hotkeySaveVideo,
+        string hotkeyToggleUI,
+        bool recordSystem,
+        string? systemDeviceId,
+        bool recordMic,
+        string? micDeviceId)
+    {
+        LogSettingsChanges(
+            fps,
+            seconds,
+            folder,
+            resolution,
+            hotkeyScreenshot,
+            hotkeySaveVideo,
+            hotkeyToggleUI,
+            recordSystem,
+            systemDeviceId,
+            recordMic,
+            micDeviceId);
+
+        bool needsVideoRestart =
+            fps != _appSettings.Fps ||
+            resolution != _appSettings.Resolution;
+
+        bool systemAudioChanged =
+            recordSystem != _appSettings.RecordSystemAudio ||
+            systemDeviceId != _appSettings.SystemAudioDeviceId;
+
+        bool micAudioChanged =
+            recordMic != _appSettings.RecordMicrophone ||
+            micDeviceId != _appSettings.MicDeviceId;
+
+        ApplySettingsValues(
+            fps,
+            seconds,
+            folder,
+            resolution,
+            hotkeyScreenshot,
+            hotkeySaveVideo,
+            hotkeyToggleUI,
+            recordSystem,
+            systemDeviceId,
+            recordMic,
+            micDeviceId);
+
+        _hotkeyManager.RegisterAll(
+            hotkeyScreenshot,
+            hotkeySaveVideo,
+            hotkeyToggleUI);
+
+        if (needsVideoRestart)
+        {
+            await InitializeCapture(
+                fps,
+                seconds,
+                resolution);
+            return;
+        }
+
+        if (systemAudioChanged ||
+            micAudioChanged)
+        {
+            RestartAudioDevices(
+                recordSystem,
+                systemDeviceId,
+                systemAudioChanged,
+                recordMic,
+                micDeviceId,
+                micAudioChanged);
+        }
+    }
+
+    private void ApplySettingsValues(
+        int fps,
+        int seconds,
+        string folder,
+        string resolution,
+        string hotkeyScreenshot,
+        string hotkeySaveVideo,
+        string hotkeyToggleUI,
+        bool recordSystem,
+        string? systemDeviceId,
+        bool recordMic,
+        string? micDeviceId)
+    {
+        _saveFolder = folder;
+        _currentBufferSeconds = seconds;
+        _appSettings.Fps = fps;
+        _appSettings.BufferSeconds = seconds;
+        _appSettings.SaveFolder = folder;
+        _appSettings.Resolution = resolution;
+        _appSettings.HotkeyScreenshot = hotkeyScreenshot;
+        _appSettings.HotkeySaveVideo = hotkeySaveVideo;
+        _appSettings.HotkeyToggleUI = hotkeyToggleUI;
+        _appSettings.RecordSystemAudio = recordSystem;
+        _appSettings.SystemAudioDeviceId = systemDeviceId;
+        _appSettings.RecordMicrophone = recordMic;
+        _appSettings.MicDeviceId = micDeviceId;
+        _appSettings.Save();
+    }
+
+    private void RestartAudioDevices(
+        bool recordSystem,
+        string? systemDeviceId,
+        bool systemAudioChanged,
+        bool recordMic,
+        string? micDeviceId,
+        bool micAudioChanged)
+    {
+        if (_audioRecorder == null)
+            return;
+
+        if (systemAudioChanged)
+        {
+            RestartSystemAudio(recordSystem, systemDeviceId);
+        }
+
+        if (micAudioChanged)
+        {
+            RestartMicrophone(recordMic, micDeviceId);
+        }
+    }
+
+    private void RestartSystemAudio(bool recordSystem, string? systemDeviceId)
+    {
+        if (_audioRecorder == null)
+            return;
+
+        _audioRecorder.UseDefaultSystemDevice = systemDeviceId == null;
+
+        if (recordSystem)
+        {
+            _audioRecorder.RestartSystemCapture(systemDeviceId);
+        }
+    }
+
+    private void RestartMicrophone(bool recordMic, string? micDeviceId)
+    {
+        if (_audioRecorder == null)
+            return;
+
+        _audioRecorder.UseDefaultMicDevice = micDeviceId == null;
+
+        if (recordMic)
+        {
+            _audioRecorder.RestartMicCapture(micDeviceId);
+        }
+    }
+    // ...) Застосування налаштувань
+
+    // Логування змін налаштувань (...
+
+    private void LogSettingsChanges(
+        int fps,
+        int seconds,
+        string folder,
+        string resolution,
+        string hotkeyScreenshot,
+        string hotkeySaveVideo,
+        string hotkeyToggleUI,
+        bool recordSystem,
+        string? systemDeviceId,
+        bool recordMic,
+        string? micDeviceId)
+    {
+        if (_settingsForm == null)
+            return;
+
+        if (fps != _appSettings.Fps)
+        {
+            _settingsForm.LogEvent($"FPS changed {_appSettings.Fps} → {fps}");
+        }
+
+        if (seconds != _appSettings.BufferSeconds)
+        {
+            _settingsForm.LogEvent($"Duration changed {_appSettings.BufferSeconds}s → {seconds}s");
+        }
+
+        if (resolution != _appSettings.Resolution)
+        {
+            _settingsForm.LogEvent($"Resolution changed to {resolution}");
+        }
+
+        if (recordSystem != _appSettings.RecordSystemAudio)
+        {
+            _settingsForm.LogEvent($"System audio {(recordSystem ? "enabled" : "disabled")}");
+        }
+
+        if (recordMic != _appSettings.RecordMicrophone)
+        {
+            _settingsForm.LogEvent($"Microphone {(recordMic ? "enabled" : "disabled")}");
+        }
+
+        if (systemDeviceId != _appSettings.SystemAudioDeviceId)
+        {
+            _settingsForm.LogEvent("System audio device changed");
+        }
+
+        if (micDeviceId != _appSettings.MicDeviceId)
+        {
+            _settingsForm.LogEvent("Mic device changed");
+        }
+
+        if (folder != _appSettings.SaveFolder)
+        {
+            _settingsForm.LogEvent($"Save folder changed to ...\\{Path.GetFileName(folder)}");
+        }
+
+        if (hotkeyScreenshot != _appSettings.HotkeyScreenshot)
+        {
+            _settingsForm.LogEvent($"Screenshot hotkey changed to {hotkeyScreenshot}");
+        }
+
+        if (hotkeySaveVideo != _appSettings.HotkeySaveVideo)
+        {
+            _settingsForm.LogEvent($"Save video hotkey changed to {hotkeySaveVideo}");
+        }
+
+        if (hotkeyToggleUI != _appSettings.HotkeyToggleUI)
+        {
+            _settingsForm.LogEvent($"Toggle UI hotkey changed to {hotkeyToggleUI}");
+        }
+
+        AppLogger.Info(
+            $"Settings updated | " +
+            $"MicEnabled={recordMic} | " +
+            $"MicDevice={micDeviceId ?? "null"} | " +
+            $"SystemEnabled={recordSystem} | " +
+            $"SystemDevice={systemDeviceId ?? "null"}");
+    }
+    // ...) Логування змін налаштувань
+
+    // Анімація settings panel (...
     private async Task SlideIn(Form form)
     {
         var screen = Screen.PrimaryScreen!.WorkingArea;
@@ -522,10 +818,8 @@ public partial class MainForm : Form
             form.Opacity = i / 15.0;
             await Task.Delay(10);
         }
-
         form.Opacity = 1;
     }
-
     private async Task SlideOut(Form form)
     {
         for (int i = 14; i >= 0; i--)
@@ -533,24 +827,30 @@ public partial class MainForm : Form
             form.Opacity = i / 15.0;
             await Task.Delay(10);
         }
-
         form.Hide();
         form.Opacity = 1;
     }
+    // ...) Анімація settings panel
 
+    // Збереження скріншота (...
     public void TakeScreenshot()
     {
         try
         {
             _screenshotSaver.SaveScreenshot();
             ShowCustomNotification("Screenshot saved");
+            AppLogger.Info("Screenshot saved");
         }
         catch (Exception ex)
         {
+            AppLogger.Error(nameof(MainForm), $"TakeScreenshot failed: {ex}");
+
             ShowCustomNotification("Screenshot failed");
         }
     }
+    // ...) Збереження скріншота
 
+    // Збереження replay-buffer (...    
     public async void SaveVideo()
     {
         if (!await _saveSemaphore.WaitAsync(0))
@@ -558,117 +858,145 @@ public partial class MainForm : Form
             ShowCustomNotification("Video save is already in progress");
             return;
         }
-
         string? rawVideoPath = null;
         string? finalVideoPath = null;
 
         try
         {
-            SafeLog(
-                $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ SaveVideo START ═══\n" +
-                $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
-                $"  EncoderRunning={_encoder?.IsRunning}\n" +
-                $"  CapturerRunning={_capturer?.IsRunning}\n" +
-                $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}, IsRecordingMic={_audioRecorder?.IsRecordingMic}\n" +
-                $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
+            AppLogger.Info(
+                $"SaveVideo started | " +
+                $"RecordSystem={_appSettings.RecordSystemAudio} | " +
+                $"RecordMic={_appSettings.RecordMicrophone}");
 
-            if (_encoder == null || !_encoder.IsRunning)
-                throw new InvalidOperationException("Video encoder is not running.");
+            ValidateVideoEncoder();
 
-            var (videoPath, videoStartTimestamp, videoElapsedMs) =
-                await _encoder.SaveLastSecondsAsync(_saveFolder, _currentBufferSeconds);
-
-            rawVideoPath = videoPath;
-            finalVideoPath = videoPath;
-
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss.fff}] VideoEncoder\n" +
-                $"  videoPath: {videoPath}\n" +
-                $"  videoStartTimestamp: {videoStartTimestamp}\n" +
-                $"  videoElapsedMs: {videoElapsedMs}\n");
-
-            if (_audioRecorder != null &&
-                (_appSettings.RecordSystemAudio || _appSettings.RecordMicrophone))
-            {
-                var mergedPath = await _audioRecorder.SaveLastSecondsAsync(
+            var saveResult =
+                await _encoder.SaveLastSecondsAsync(
                     _saveFolder,
-                    _currentBufferSeconds,
-                    videoPath,
-                    videoElapsedMs,
-                    videoStartTimestamp);
+                    _currentBufferSeconds);
 
-                if (mergedPath != null && File.Exists(mergedPath))
-                {
-                    finalVideoPath = mergedPath;
+            rawVideoPath = saveResult.videoPath;
+            finalVideoPath = rawVideoPath;
 
-                    try
-                    {
-                        File.Delete(videoPath);
-                    }
-                    catch { }
-                }
+            AppLogger.Info($"Replay buffer saved | " + $"Path={rawVideoPath}");
+
+            if (ShouldMergeAudio())
+            {
+                finalVideoPath =
+                    await MergeAudioWithVideo(
+                        rawVideoPath,
+                        saveResult.videoElapsedMs,
+                        saveResult.videoStartTimestamp)
+                    ?? rawVideoPath;
             }
 
             ShowCustomNotification("Video saved");
-
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo DONE\n" +
-                $"  rawVideoPath: {rawVideoPath}\n" +
-                $"  finalVideoPath: {finalVideoPath}\n");
+            AppLogger.Info($"SaveVideo completed | " + $"FinalPath={finalVideoPath}");
         }
         catch (Exception ex)
         {
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo ERROR: {ex}\n");
-
+            AppLogger.Error(nameof(MainForm), $"SaveVideo failed: {ex}");
             ShowCustomNotification("EventCapture Error");
         }
         finally
         {
-            try
-            {
-                // Критично: після VideoEncoder.SaveLastSecondsAsync encoder зупинений.
-                // Перезапуск робимо тут, централізовано, після завершення audio trim/merge.
-                // Так video й audio отримують один актуальний StartTimestamp.
-                if (_encoder != null)
-                {
-                    if (!_capturer.IsRunning)
-                        _capturer.Start();
-
-                    _encoder.StartRecording();
-
-                    _audioRecorder?.StartRecording(
-                        _appSettings.RecordSystemAudio,
-                        _appSettings.SystemAudioDeviceId,
-                        _appSettings.RecordMicrophone,
-                        _appSettings.MicDeviceId,
-                        _encoder.StartTimestamp);
-
-                    SafeLog(
-                        $"[{DateTime.Now:HH:mm:ss.fff}] Capture restarted after save\n" +
-                        $"  newEncoderStartTimestamp: {_encoder.StartTimestamp}\n" +
-                        $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
-                }
-            }
-            catch (Exception restartEx)
-            {
-                SafeLog(
-                    $"[{DateTime.Now:HH:mm:ss.fff}] Restart after save ERROR: {restartEx}\n");
-            }
-
+            await RestartCaptureAfterSave();
             _saveSemaphore.Release();
         }
     }
 
-    // ─── Моніторинг системи ───────────────────────────────────────────────
+    private void ValidateVideoEncoder()
+    {
+        if (_encoder == null || !_encoder.IsRunning)
+        {
+            throw new InvalidOperationException("Video encoder is not running.");
+        }
+    }
+
+    private bool ShouldMergeAudio()
+    {
+        return _audioRecorder != null && (_appSettings.RecordSystemAudio || _appSettings.RecordMicrophone);
+    }
+
+    private async Task<string?> MergeAudioWithVideo(
+        string rawVideoPath,
+        long videoElapsedMs,
+        long videoStartTimestamp)
+    {
+        if (_audioRecorder == null)
+            return null;
+
+        var mergedPath = await _audioRecorder.SaveLastSecondsAsync(
+                _saveFolder,
+                _currentBufferSeconds,
+                rawVideoPath,
+                videoElapsedMs,
+                videoStartTimestamp);
+
+        if (mergedPath != null && File.Exists(mergedPath))
+        {
+            TryDeleteFile(rawVideoPath);
+            return mergedPath;
+        }
+
+        return rawVideoPath;
+    }
+
+    private async Task RestartCaptureAfterSave()
+    {
+        try
+        {
+            if (_encoder == null)
+                return;
+
+            if (!_capturer.IsRunning)
+            {
+                _capturer.Start();
+            }
+
+            _encoder.StartRecording();
+            _audioRecorder?.StartRecording(
+                _appSettings.RecordSystemAudio,
+                _appSettings.SystemAudioDeviceId,
+                _appSettings.RecordMicrophone,
+                _appSettings.MicDeviceId,
+                _encoder.StartTimestamp);
+
+            AppLogger.Info($"Capture restarted | " + $"NewTimestamp={_encoder.StartTimestamp}");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainForm), $"RestartCaptureAfterSave failed: {ex}");
+        }
+        await Task.CompletedTask;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
+    }
+    // ...) Збереження replay-buffer
+
+    // Моніторинг системи (...    
+
     private void StartHardwareMonitor()
     {
         _hardwareTimer = new System.Threading.Timer(_ =>
-        {
-            _hardwareMonitor.Update();
-
-            if (_overlayVisible)
             {
+                _hardwareMonitor.Update();
+
+                if (!_overlayVisible)
+                    return;
+
                 _overlay.UpdateSystemInfo(
                     _hardwareMonitor.CpuLoad,
                     _hardwareMonitor.CpuFrequency,
@@ -680,44 +1008,51 @@ public partial class MainForm : Form
                     _hardwareMonitor.RamType,
                     _hardwareMonitor.RamFrequency,
                     _hardwareMonitor.TotalRamGB);
-            }
-        }, null, 0, 1000);
+
+            }, null, 0, 1000);
     }
 
     private void StartMemoryMonitor()
     {
         _memoryTimer = new System.Threading.Timer(_ =>
-        {
-            var proc = System.Diagnostics.Process.GetCurrentProcess();
-            proc.Refresh();
+            {
+                var process = System.Diagnostics.Process.GetCurrentProcess();
 
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss}] MEMORY REPORT\n" +
-                $"  WorkingSet:     {proc.WorkingSet64 / 1024 / 1024} MB\n" +
-                $"  PrivateMemory:  {proc.PrivateMemorySize64 / 1024 / 1024} MB\n" +
-                $"  GC Total:       {GC.GetTotalMemory(false) / 1024 / 1024} MB\n" +
-                $"  Encoder running: {_encoder?.IsRunning}\n" +
-                $"  Capturer running: {_capturer?.IsRunning}\n" +
-                $"  AudioRecorder: system={_audioRecorder?.IsRecordingSystem}, mic={_audioRecorder?.IsRecordingMic}\n\n");
-        }, null, 0, 60_000);
+                process.Refresh();
+
+                AppLogger.Debug(
+                    $"Memory report | " +
+                    $"WorkingSet={process.WorkingSet64 / 1024 / 1024}MB | " +
+                    $"Private={process.PrivateMemorySize64 / 1024 / 1024}MB | " +
+                    $"GC={GC.GetTotalMemory(false) / 1024 / 1024}MB");
+
+            }, null, 0, 60_000);
     }
+    // ...) Моніторинг системи
 
+    // Керування audio devices (...    
     public void SetUserSelectedSystemDevice(string deviceId)
     {
-        if (_audioRecorder != null)
-        {
-            _audioRecorder.UseDefaultSystemDevice = false;
-            _audioRecorder.RestartSystemCapture(deviceId);
-        }
-    }
+        if (_audioRecorder == null)
+            return;
 
+        _audioRecorder.UseDefaultSystemDevice = false;
+        _audioRecorder.RestartSystemCapture(deviceId);
+    }
+    // ...) Керування audio devices
+
+    // Завершення програми (...    
     private void ExitApp()
     {
-        SafeLog(
-            $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM EXIT ═══\n" +
-            $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}\n" +
-            $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
+        AppLogger.Info("Program exit");
+        DisposeApplicationResources();
+        _trayIcon.Visible = false;
+        Thread.Sleep(300);
+        Application.Exit();
+    }
 
+    private void DisposeApplicationResources()
+    {
         try { _audioRecorder?.Dispose(); } catch { }
         try { _hotkeyManager?.Dispose(); } catch { }
         try { _hardwareMonitor?.Dispose(); } catch { }
@@ -726,64 +1061,51 @@ public partial class MainForm : Form
         try { _capturer?.Stop(); } catch { }
         try { _capturer?.Dispose(); } catch { }
         try { _encoder?.Dispose(); } catch { }
-
-        _trayIcon.Visible = false;
-
-        Thread.Sleep(500);
-        Application.Exit();
     }
+    // ...) Завершення програми
 
-    // ─── Обробка системних повідомлень Windows ────────────────────────────
+    // Windows messages (...
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_HOTKEY)
         {
-            switch (m.WParam.ToInt32())
-            {
-                case HotkeyManager.HOTKEY_SCREENSHOT:
-                    TakeScreenshot();
-                    break;
-
-                case HotkeyManager.HOTKEY_SAVE_VIDEO:
-                    SaveVideo();
-                    break;
-
-                case HotkeyManager.HOTKEY_TOGGLE_OVERLAY:
-                    ShowSettings();
-                    break;
-            }
+            HandleHotkey(m.WParam.ToInt32());
         }
-
         base.WndProc(ref m);
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    private void HandleHotkey(int hotkeyId)
+    {
+        switch (hotkeyId)
+        {
+            case HotkeyManager.HOTKEY_SCREENSHOT:
+                TakeScreenshot();
+                break;
+
+            case HotkeyManager.HOTKEY_SAVE_VIDEO:
+                SaveVideo();
+                break;
+
+            case HotkeyManager.HOTKEY_TOGGLE_OVERLAY:
+                ShowSettings();
+                break;
+        }
+    }
+
+    protected override void OnFormClosing(
+        FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
             Hide();
+            return;
         }
-        else
-        {
-            base.OnFormClosing(e);
-        }
+        base.OnFormClosing(e);
     }
-    private static void SafeLog(string text)
-    {
-        lock (_logLock)
-        {
-            try
-            {
-                File.AppendAllText(_logPath, text);
-            }
-            catch
-            {
-                // Logging must never crash the app.
-            }
-        }
-    }
+    // ...) Windows messages
 
+    // Notifications (...    
     private void ShowCustomNotification(string message)
     {
         if (InvokeRequired)
@@ -799,10 +1121,10 @@ public partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            SafeLog(
-                $"[{DateTime.Now:HH:mm:ss.fff}] Notification error: {ex}\n");
+            AppLogger.Debug($"Notification error: {ex.Message}");
         }
     }
+    // ...) Notifications
 
-    private void MainForm_Load(object sender, EventArgs e) { }
+    private void MainForm_Load(object sender, EventArgs e) {}
 }

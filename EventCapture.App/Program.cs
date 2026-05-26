@@ -1,29 +1,38 @@
 using EventCapture.App;
+using EventCapture.Core.Diagnostics;
 
+// Точка входу застосунку EventCapture.
 static class Program
 {
-    // ВИДАЛИ цей DllImport і виклик SetProcessDPIAware() — він конфліктує з PerMonitorV2
-    // [System.Runtime.InteropServices.DllImport("user32.dll")]
-    // private static extern bool SetProcessDPIAware();
-
     [STAThread]
     static void Main()
     {
-        using var mutex = new System.Threading.Mutex(true, "EventCapture_SingleInstance", out bool isNewInstance);
+        // Захист від повторного запуску (...
+        using var mutex = new System.Threading.Mutex(
+            true, "EventCapture_SingleInstance", out bool isNewInstance);
+
         if (!isNewInstance)
         {
-            MessageBox.Show("EventCapture вже запущено.", "EventCapture",
+            AppLogger.Info("Спроба повторного запуску — застосунок вже працює.");
+            MessageBox.Show(
+                "EventCapture вже запущено.", "EventCapture",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        // ...) Захист від повторного запуску
 
-        // SetProcessDPIAware(); // ВИДАЛИ
+        // Ініціалізація застосунку (...
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
+        AppLogger.Info("EventCapture запускається.");
+        // ...) Ініціалізація застосунку
 
+        // Запуск MediaFoundation і головної форми (...
         SharpDX.MediaFoundation.MediaFactory.Startup(
             SharpDX.MediaFoundation.MediaFactory.Version, 0);
         Application.Run(new MainForm());
         SharpDX.MediaFoundation.MediaFactory.Shutdown();
+        AppLogger.Info("EventCapture завершив роботу.");
+        // ...) Запуск MediaFoundation і головної форми
     }
 }
