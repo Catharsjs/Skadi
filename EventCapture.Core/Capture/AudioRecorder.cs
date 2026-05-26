@@ -17,7 +17,7 @@ public class AudioRecorder : IDisposable
     private DateTime _recordingStartTime;
     private string _loopbackTempPath = string.Empty;
     private string _micTempPath = string.Empty;
-
+    private static readonly object _logLock = new();
     private readonly System.Diagnostics.Stopwatch _recordingStopwatch = new();
     private readonly System.Diagnostics.Stopwatch _firstRecordingStopwatch = new();
 
@@ -178,8 +178,8 @@ public class AudioRecorder : IDisposable
                 _loopbackSegments.Add(segment);
             }
 
-            File.AppendAllText(logPath,
-                $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture: {device.FriendlyName}\n" +
+            SafeLog(logPath,
+                 $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture: {device.FriendlyName}\n" +
                 $"  TempPath: {tempPath}\n" +
                 $"  SegmentStartTimestamp: {segment.StartTimestamp}\n" +
                 $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
@@ -214,7 +214,7 @@ public class AudioRecorder : IDisposable
                     segment.FirstFrameTimestamp = firstFrameTimestamp;
                     segment.FirstBufferDurationMs = firstBufferDurationMs;
 
-                    File.AppendAllText(logPath,
+                    SafeLog(logPath,
                         $"[{DateTime.Now:HH:mm:ss.fff}] DataAvailable: frame=1, bytes={e.BytesRecorded}\n" +
                         $"  device: {segment.DeviceName}\n" +
                         $"  segmentPath: {segment.Path}\n" +
@@ -227,8 +227,8 @@ public class AudioRecorder : IDisposable
                 }
                 else if (frameCount % 100 == 0)
                 {
-                    File.AppendAllText(logPath,
-                        $"[{DateTime.Now:HH:mm:ss}] DataAvailable: frame={frameCount}, bytes={e.BytesRecorded}\n");
+                    SafeLog(logPath,
+                         $"[{DateTime.Now:HH:mm:ss}] DataAvailable: frame={frameCount}, bytes={e.BytesRecorded}\n");
                 }
             };
 
@@ -238,8 +238,8 @@ public class AudioRecorder : IDisposable
             _audioActualStartTimestamp = actualStartTimestamp;
             segment.ActualStartTimestamp = actualStartTimestamp;
 
-            File.AppendAllText(logPath,
-                $"  _sharedStartTimestamp: {_sharedStartTimestamp}\n" +
+            SafeLog(logPath,
+                 $"  _sharedStartTimestamp: {_sharedStartTimestamp}\n" +
                 $"  _audioActualStartTimestamp: {_audioActualStartTimestamp}\n" +
                 $"  segmentActualStartTimestamp: {segment.ActualStartTimestamp}\n" +
                 $"  audioDelay: {_audioActualStartTimestamp - _sharedStartTimestamp}ms\n");
@@ -254,13 +254,13 @@ public class AudioRecorder : IDisposable
 
             IsRecordingSystem = true;
 
-            File.AppendAllText(logPath,
-                $"[{DateTime.Now:HH:mm:ss.fff}] Recording started on: {device.FriendlyName}\n");
+            SafeLog(logPath,
+                 $"[{DateTime.Now:HH:mm:ss.fff}] Recording started on: {device.FriendlyName}\n");
         }
         catch (Exception ex)
         {
-            File.AppendAllText(logPath,
-                $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture ERROR: {ex.Message}\n");
+            SafeLog(logPath,
+                 $"[{DateTime.Now:HH:mm:ss.fff}] StartSystemCapture ERROR: {ex.Message}\n");
 
             IsRecordingSystem = false;
         }
@@ -276,7 +276,11 @@ public class AudioRecorder : IDisposable
             var device = deviceId != null
                 ? enumerator.GetDevice(deviceId)
                 : enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia);
-
+            SafeLog(logPath,
+    $"[{DateTime.Now:HH:mm:ss.fff}] StartMicCapture device resolved\n" +
+    $"  requestedDeviceId: {deviceId ?? "null"}\n" +
+    $"  actualDeviceId: {device.ID}\n" +
+    $"  actualDeviceName: {device.FriendlyName}\n");
             string tempPath = Path.Combine(
                 Path.GetTempPath(),
                 $"eventcapture_audio_mic_{Guid.NewGuid()}.wav");
@@ -300,8 +304,8 @@ public class AudioRecorder : IDisposable
                 _micSegments.Add(segment);
             }
 
-            File.AppendAllText(logPath,
-                $"[{DateTime.Now:HH:mm:ss.fff}] StartMicCapture: {device.FriendlyName}\n" +
+            SafeLog(logPath,
+                 $"[{DateTime.Now:HH:mm:ss.fff}] StartMicCapture: {device.FriendlyName}\n" +
                 $"  TempPath: {tempPath}\n" +
                 $"  SegmentStartTimestamp: {segment.StartTimestamp}\n" +
                 $"  MicSegments count: {_micSegments.Count}\n");
@@ -332,7 +336,7 @@ public class AudioRecorder : IDisposable
                     segment.FirstFrameTimestamp = firstFrameTimestamp;
                     segment.FirstBufferDurationMs = firstBufferDurationMs;
 
-                    File.AppendAllText(logPath,
+                    SafeLog(logPath,
                         $"[{DateTime.Now:HH:mm:ss.fff}] Mic DataAvailable: frame=1, bytes={e.BytesRecorded}\n" +
                         $"  device: {segment.DeviceName}\n" +
                         $"  segmentPath: {segment.Path}\n" +
@@ -350,7 +354,7 @@ public class AudioRecorder : IDisposable
             long actualStartTimestamp = Environment.TickCount64;
             segment.ActualStartTimestamp = actualStartTimestamp;
 
-            File.AppendAllText(logPath,
+            SafeLog(logPath,
                 $"  micActualStartTimestamp: {segment.ActualStartTimestamp}\n" +
                 $"  micDelay: {segment.ActualStartTimestamp - _sharedStartTimestamp}ms\n");
 
@@ -359,7 +363,7 @@ public class AudioRecorder : IDisposable
         }
         catch (Exception ex)
         {
-            File.AppendAllText(logPath,
+            SafeLog(logPath,
                 $"[{DateTime.Now:HH:mm:ss.fff}] StartMicCapture ERROR: {ex.Message}\n");
 
             IsRecordingMic = false;
@@ -382,12 +386,12 @@ public class AudioRecorder : IDisposable
         lock (_segmentsLock)
         {
             existingSegments = _loopbackSegments
-                .Where(s => File.Exists(s.Path))
-                .Select(CloneSegment)
-                .ToList();
+    .Where(IsValidSegmentForSave)
+    .Select(CloneSegment)
+    .ToList();
 
             existingMicSegments = _micSegments
-                .Where(s => File.Exists(s.Path))
+                .Where(IsValidSegmentForSave)
                 .Select(CloneSegment)
                 .ToList();
         }
@@ -397,7 +401,7 @@ public class AudioRecorder : IDisposable
 
         string logPath = GetLogPath();
 
-        File.AppendAllText(logPath,
+        SafeLog(logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] SaveLastSecondsAsync\n" +
             $"  LoopbackTempPaths count: {LoopbackTempPaths.Count}\n" +
             $"  LoopbackSegments existing count: {existingSegments.Count}\n" +
@@ -405,13 +409,13 @@ public class AudioRecorder : IDisposable
 
         foreach (var p in LoopbackTempPaths)
         {
-            File.AppendAllText(logPath,
+            SafeLog(logPath,
                 $"  loopback path: exists={File.Exists(p)}, size={(File.Exists(p) ? new FileInfo(p).Length : 0)}, path={p}\n");
         }
 
         foreach (var segment in existingSegments)
         {
-            File.AppendAllText(logPath,
+            SafeLog(logPath,
                 $"  segment: exists={File.Exists(segment.Path)}, size={(File.Exists(segment.Path) ? new FileInfo(segment.Path).Length : 0)}\n" +
                 $"    device={segment.DeviceName}\n" +
                 $"    path={segment.Path}\n" +
@@ -421,7 +425,7 @@ public class AudioRecorder : IDisposable
                 $"    firstBufferMs={segment.FirstBufferDurationMs}\n");
         }
 
-        File.AppendAllText(logPath,
+        SafeLog(logPath,
             $"  videoElapsedMs: {videoElapsedMs}\n" +
             $"  videoStartTimestamp: {videoStartTimestamp}\n");
 
@@ -502,7 +506,7 @@ public class AudioRecorder : IDisposable
         string mergeError = await mergeProcess.StandardError.ReadToEndAsync();
         await Task.Run(() => mergeProcess.WaitForExit(30000));
 
-        File.AppendAllText(logPath,
+        SafeLog(logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] Merge result: exists={File.Exists(outputPath)}, size={(File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0)}\n" +
             $"MergeError: {mergeError}\n");
 
@@ -540,6 +544,24 @@ public class AudioRecorder : IDisposable
         };
     }
 
+    private static bool IsValidSegmentForSave(AudioSegment segment)
+    {
+        if (!File.Exists(segment.Path))
+            return false;
+
+        var length = new FileInfo(segment.Path).Length;
+
+        if (length <= 4096)
+            return false;
+
+        if (segment.FirstFrameTimestamp <= 0)
+            return false;
+
+        if (segment.FirstBufferDurationMs <= 0)
+            return false;
+
+        return true;
+    }
     private static async Task<string?> TrimAudioSegmentAsync(
         string ffmpegPath,
         string logPath,
@@ -553,6 +575,19 @@ public class AudioRecorder : IDisposable
         if (!File.Exists(segment.Path))
             return null;
 
+        var sourceLength = new FileInfo(segment.Path).Length;
+
+        if (sourceLength <= 4096 ||
+            segment.FirstFrameTimestamp <= 0 ||
+            segment.FirstBufferDurationMs <= 0)
+        {
+            SafeLog(logPath,
+                $"[{DateTime.Now:HH:mm:ss.fff}] Segment skipped before trim: invalid source, " +
+                $"size={sourceLength}, firstFrame={segment.FirstFrameTimestamp}, " +
+                $"firstBufferMs={segment.FirstBufferDurationMs}, path={segment.Path}\n");
+
+            return null;
+        }
         string trimmed = Path.Combine(
             Path.GetTempPath(),
             $"eventcapture_audio_trim_{Guid.NewGuid()}.wav");
@@ -595,7 +630,7 @@ public class AudioRecorder : IDisposable
                 $"-t {durationStr} \"{trimmed}\"";
         }
 
-        File.AppendAllText(logPath,
+        SafeLog(logPath,
             $"  TrimAudioSegment\n" +
             $"    device: {segment.DeviceName}\n" +
             $"    path: {segment.Path}\n" +
@@ -627,7 +662,7 @@ public class AudioRecorder : IDisposable
         string trimError = await trimProcess.StandardError.ReadToEndAsync();
         await Task.Run(() => trimProcess.WaitForExit(15000));
 
-        File.AppendAllText(logPath,
+        SafeLog(logPath,
             $"[{DateTime.Now:HH:mm:ss.fff}] Trim segment result: exists={File.Exists(trimmed)}, size={(File.Exists(trimmed) ? new FileInfo(trimmed).Length : 0)}\n" +
             $"TrimError: {trimError}\n");
 
@@ -640,7 +675,7 @@ public class AudioRecorder : IDisposable
             if (length > 4096)
                 return trimmed;
 
-            File.AppendAllText(logPath,
+            SafeLog(logPath,
                 $"[{DateTime.Now:HH:mm:ss.fff}] Trim segment skipped: file too small, size={length}, path={trimmed}\n");
         }
 
@@ -796,6 +831,21 @@ public class AudioRecorder : IDisposable
             "full_debug.log");
     }
 
+    private static void SafeLog(string path, string text)
+{
+    lock (_logLock)
+    {
+        try
+        {
+            File.AppendAllText(path, text);
+        }
+        catch
+        {
+            // Logging must never crash audio capture.
+        }
+    }
+}
+
     public void Dispose() => StopCapture();
 
     private class AudioDeviceChangeCallback : IMMNotificationClient
@@ -809,13 +859,12 @@ public class AudioRecorder : IDisposable
 
         public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
         {
-            File.AppendAllText(
-                Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                    "EventCapture",
-                    "device_change.log"),
-                $"[{DateTime.Now:HH:mm:ss}] OnDefaultDeviceChanged: flow={flow}, role={role}, id={defaultDeviceId}\n");
-
+            SafeLog(
+    Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+              "EventCapture",
+              "device_change.log"),
+             $"[{DateTime.Now:HH:mm:ss}] OnDefaultDeviceChanged: flow={flow}, role={role}, id={defaultDeviceId}\n");
             if (flow == DataFlow.Render && role == Role.Multimedia)
                 _recorder.DefaultDeviceChanged?.Invoke(defaultDeviceId);
         }

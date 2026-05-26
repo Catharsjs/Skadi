@@ -42,6 +42,8 @@ public partial class MainForm : Form
         "EventCapture",
         "full_debug.log");
 
+    private static readonly object _logLock = new();
+
     public MainForm()
     {
         InitializeComponent();
@@ -112,7 +114,7 @@ public partial class MainForm : Form
     {
         _initCts?.Cancel();
 
-        File.AppendAllText(_logPath,
+        SafeLog(
             $"[{DateTime.Now:HH:mm:ss.fff}] InitializeCapture: fps={fps}, buffer={bufferSeconds}, res={resolution}\n");
 
         _initCts = new CancellationTokenSource();
@@ -185,7 +187,7 @@ public partial class MainForm : Form
 
             StartRecordingPipeline();
 
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] Encoder started: {encWidth}x{encHeight} {fps}fps\n" +
                 $"  AudioRecorder: RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
         }
@@ -426,6 +428,11 @@ public partial class MainForm : Form
                 _currentBufferSeconds = seconds;
 
                 _appSettings.Fps = fps;
+                SafeLog(
+    $"[{DateTime.Now:HH:mm:ss.fff}] UI Settings Mic Selection\n" +
+    $"  recordMic: {recordMic}\n" +
+    $"  micDeviceId from UI: {micDeviceId ?? "null"}\n" +
+    $"  previous MicDeviceId: {_appSettings.MicDeviceId ?? "null"}\n");
                 _appSettings.BufferSeconds = seconds;
                 _appSettings.SaveFolder = folder;
                 _appSettings.Resolution = resolution;
@@ -557,7 +564,7 @@ public partial class MainForm : Form
 
         try
         {
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ SaveVideo START ═══\n" +
                 $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n" +
                 $"  EncoderRunning={_encoder?.IsRunning}\n" +
@@ -574,7 +581,7 @@ public partial class MainForm : Form
             rawVideoPath = videoPath;
             finalVideoPath = videoPath;
 
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] VideoEncoder\n" +
                 $"  videoPath: {videoPath}\n" +
                 $"  videoStartTimestamp: {videoStartTimestamp}\n" +
@@ -604,14 +611,14 @@ public partial class MainForm : Form
 
             _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
 
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo DONE\n" +
                 $"  rawVideoPath: {rawVideoPath}\n" +
                 $"  finalVideoPath: {finalVideoPath}\n");
         }
         catch (Exception ex)
         {
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo ERROR: {ex}\n");
 
             _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
@@ -637,7 +644,7 @@ public partial class MainForm : Form
                         _appSettings.MicDeviceId,
                         _encoder.StartTimestamp);
 
-                    File.AppendAllText(_logPath,
+                    SafeLog(
                         $"[{DateTime.Now:HH:mm:ss.fff}] Capture restarted after save\n" +
                         $"  newEncoderStartTimestamp: {_encoder.StartTimestamp}\n" +
                         $"  RecordSystem={_appSettings.RecordSystemAudio}, RecordMic={_appSettings.RecordMicrophone}\n");
@@ -645,7 +652,7 @@ public partial class MainForm : Form
             }
             catch (Exception restartEx)
             {
-                File.AppendAllText(_logPath,
+                SafeLog(
                     $"[{DateTime.Now:HH:mm:ss.fff}] Restart after save ERROR: {restartEx}\n");
             }
 
@@ -684,7 +691,7 @@ public partial class MainForm : Form
             var proc = System.Diagnostics.Process.GetCurrentProcess();
             proc.Refresh();
 
-            File.AppendAllText(_logPath,
+            SafeLog(
                 $"[{DateTime.Now:HH:mm:ss}] MEMORY REPORT\n" +
                 $"  WorkingSet:     {proc.WorkingSet64 / 1024 / 1024} MB\n" +
                 $"  PrivateMemory:  {proc.PrivateMemorySize64 / 1024 / 1024} MB\n" +
@@ -706,7 +713,7 @@ public partial class MainForm : Form
 
     private void ExitApp()
     {
-        File.AppendAllText(_logPath,
+        SafeLog(
             $"\n[{DateTime.Now:HH:mm:ss.fff}] ═══ PROGRAM EXIT ═══\n" +
             $"  IsRecordingSystem={_audioRecorder?.IsRecordingSystem}\n" +
             $"  LoopbackPaths={_audioRecorder?.LoopbackTempPaths.Count ?? 0}\n");
@@ -760,6 +767,20 @@ public partial class MainForm : Form
         else
         {
             base.OnFormClosing(e);
+        }
+    }
+    private static void SafeLog(string text)
+    {
+        lock (_logLock)
+        {
+            try
+            {
+                File.AppendAllText(_logPath, text);
+            }
+            catch
+            {
+                // Logging must never crash the app.
+            }
         }
     }
 
