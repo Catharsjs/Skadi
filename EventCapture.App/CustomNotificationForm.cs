@@ -131,14 +131,15 @@ public class CustomNotificationForm : Form
     {
         base.OnShown(e);
 
-        // Поки можна залишити закоментованим для тестів.
-        // try
-        // {
-        //     SetWindowDisplayAffinity(Handle, WDA_EXCLUDEFROMCAPTURE);
-        // }
-        // catch
-        // {
-        // }
+        try
+        {
+            SetWindowDisplayAffinity(
+                Handle,
+                WDA_EXCLUDEFROMCAPTURE);
+        }
+        catch
+        {
+        }
 
         var screen = Screen.FromPoint(Cursor.Position);
         var area = screen.WorkingArea;
