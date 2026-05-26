@@ -543,11 +543,11 @@ public partial class MainForm : Form
         try
         {
             _screenshotSaver.SaveScreenshot();
-            _trayIcon.ShowBalloonTip(2000, "EventCapture", "Screenshot saved", ToolTipIcon.Info);
+            ShowCustomNotification("Screenshot saved");
         }
         catch (Exception ex)
         {
-            _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
+            ShowCustomNotification("Screenshot failed");
         }
     }
 
@@ -555,7 +555,7 @@ public partial class MainForm : Form
     {
         if (!await _saveSemaphore.WaitAsync(0))
         {
-            _trayIcon.ShowBalloonTip(1500, "EventCapture", "Video save is already in progress", ToolTipIcon.Info);
+            ShowCustomNotification("Video save is already in progress");
             return;
         }
 
@@ -609,7 +609,7 @@ public partial class MainForm : Form
                 }
             }
 
-            _trayIcon.ShowBalloonTip(2000, "EventCapture", "Video saved", ToolTipIcon.Info);
+            ShowCustomNotification("Video saved");
 
             SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo DONE\n" +
@@ -621,7 +621,7 @@ public partial class MainForm : Form
             SafeLog(
                 $"[{DateTime.Now:HH:mm:ss.fff}] SaveVideo ERROR: {ex}\n");
 
-            _trayIcon.ShowBalloonTip(2000, "EventCapture", $"Error: {ex.Message}", ToolTipIcon.Error);
+            ShowCustomNotification("EventCapture Error");
         }
         finally
         {
@@ -781,6 +781,26 @@ public partial class MainForm : Form
             {
                 // Logging must never crash the app.
             }
+        }
+    }
+
+    private void ShowCustomNotification(string message)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => ShowCustomNotification(message));
+            return;
+        }
+
+        try
+        {
+            var notification = new CustomNotificationForm(message);
+            notification.Show();
+        }
+        catch (Exception ex)
+        {
+            SafeLog(
+                $"[{DateTime.Now:HH:mm:ss.fff}] Notification error: {ex}\n");
         }
     }
 
