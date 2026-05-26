@@ -2,6 +2,9 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using EventCapture.Core.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 namespace EventCapture.Core.Capture;
 
 // Кодує відео через Windows Media Foundation.
@@ -19,6 +22,7 @@ public class VideoEncoder : IDisposable
     private readonly int _height;
     private readonly int _bitrate;
     private readonly long _frameDuration;
+    private byte[]? _scaledFrameBuffer;
 
     public bool IsRunning => _isRunning;
     public long StartTimestamp { get; private set; }
@@ -143,13 +147,15 @@ public class VideoEncoder : IDisposable
         {
             try
             {
-                using var buffer = MediaFactory.CreateMemoryBuffer(bgraData.Length);
+                byte[] frameData = EnsureFrameMatchesEncoderSize(bgraData);
+
+                using var buffer = MediaFactory.CreateMemoryBuffer(frameData.Length);
                 var dataPointer = buffer.Lock(out _, out _);
 
-                CopyFrameData(bgraData, dataPointer);
+                CopyFrameData(frameData, dataPointer);
 
                 buffer.Unlock();
-                buffer.CurrentLength = bgraData.Length;
+                buffer.CurrentLength = frameData.Length;
 
                 using var sample = MediaFactory.CreateSample();
 
@@ -163,6 +169,78 @@ public class VideoEncoder : IDisposable
             {
                 AppLogger.Error(nameof(VideoEncoder), $"WriteFrame error: {ex}");
             }
+        }
+    }
+
+    private byte[] EnsureFrameMatchesEncoderSize(byte[] source)
+    {
+        int expectedSize = _width * _height * 4;
+
+        if (source.Length == expectedSize)
+            return source;
+
+        int nativeWidth = Screen.PrimaryScreen!.Bounds.Width;
+        int nativeHeight = Screen.PrimaryScreen!.Bounds.Height;
+
+        using var sourceBitmap = new Bitmap(
+            nativeWidth,
+            nativeHeight,
+            PixelFormat.Format32bppArgb);
+
+        var sourceData = sourceBitmap.LockBits(
+            new Rectangle(0, 0, nativeWidth, nativeHeight),
+            ImageLockMode.WriteOnly,
+            PixelFormat.Format32bppArgb);
+
+        try
+        {
+            Marshal.Copy(source, 0, sourceData.Scan0, source.Length);
+        }
+        finally
+        {
+            sourceBitmap.UnlockBits(sourceData);
+        }
+
+        using var scaledBitmap = new Bitmap(
+            _width,
+            _height,
+            PixelFormat.Format32bppArgb);
+
+        using (var graphics = Graphics.FromImage(scaledBitmap))
+        {
+            graphics.InterpolationMode = InterpolationMode.Bilinear;
+            graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            graphics.DrawImage(
+                sourceBitmap,
+                new Rectangle(0, 0, _width, _height),
+                new Rectangle(0, 0, nativeWidth, nativeHeight),
+                GraphicsUnit.Pixel);
+        }
+
+        var scaledData = scaledBitmap.LockBits(
+            new Rectangle(0, 0, _width, _height),
+            ImageLockMode.ReadOnly,
+            PixelFormat.Format32bppArgb);
+
+        try
+        {
+            if (_scaledFrameBuffer == null ||
+                _scaledFrameBuffer.Length != expectedSize)
+            {
+                _scaledFrameBuffer = new byte[expectedSize];
+            }
+
+            Marshal.Copy(
+                scaledData.Scan0,
+                _scaledFrameBuffer,
+                0,
+                expectedSize);
+
+            return _scaledFrameBuffer;
+        }
+        finally
+        {
+            scaledBitmap.UnlockBits(scaledData);
         }
     }
 

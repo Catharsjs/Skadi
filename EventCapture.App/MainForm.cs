@@ -287,12 +287,17 @@ public partial class MainForm : Form
             height);
 
         _capturer = new ScreenCapturer(
-             _encoder,
+            _encoder,
             fps);
 
         _audioRecorder = new AudioRecorder();
     }
     // ...) Ініціалізація capture pipeline
+
+    private void RecreateScreenshotSaver()
+    {
+        _screenshotSaver = new ScreenshotSaver(_saveFolder);
+    }
 
     // Audio device change events (...
     private void AttachAudioDeviceChangeHandler()
@@ -675,6 +680,7 @@ public partial class MainForm : Form
         string? micDeviceId)
     {
         _saveFolder = folder;
+        RecreateScreenshotSaver();
         _currentBufferSeconds = seconds;
         _appSettings.Fps = fps;
         _appSettings.BufferSeconds = seconds;
@@ -1044,18 +1050,18 @@ public partial class MainForm : Form
     private void StartMemoryMonitor()
     {
         _memoryTimer = new System.Threading.Timer(_ =>
-            {
-                var process = System.Diagnostics.Process.GetCurrentProcess();
+        {
+            var process = System.Diagnostics.Process.GetCurrentProcess();
 
-                process.Refresh();
+            process.Refresh();
 
-                AppLogger.Debug(
-                    $"Memory report | " +
-                    $"WorkingSet={process.WorkingSet64 / 1024 / 1024}MB | " +
-                    $"Private={process.PrivateMemorySize64 / 1024 / 1024}MB | " +
-                    $"GC={GC.GetTotalMemory(false) / 1024 / 1024}MB");
+            AppLogger.Debug(
+                $"Memory report | " +
+                $"WorkingSet={process.WorkingSet64 / 1024 / 1024}MB | " +
+                $"Private={process.PrivateMemorySize64 / 1024 / 1024}MB | " +
+                $"GC={GC.GetTotalMemory(false) / 1024 / 1024}MB");
 
-            }, null, 0, 60_000);
+        }, null, 0, 60_000);
     }
     // ...) Моніторинг системи
 
@@ -1155,5 +1161,5 @@ public partial class MainForm : Form
     }
     // ...) Notifications
 
-    private void MainForm_Load(object sender, EventArgs e) {}
+    private void MainForm_Load(object sender, EventArgs e) { }
 }
