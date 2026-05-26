@@ -55,11 +55,27 @@ public partial class MainForm : Form
         InitializeTray();
         InitializeHotkeys();
         InitializeOverlay();
-        InitializeHardwareMonitoring();
-
-        StartCaptureInitializationInBackground();
 
         Hide();
+
+        BeginInvoke(new Action(StartDeferredInitialization));
+    }
+
+    private void StartDeferredInitialization()
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                InitializeHardwareMonitoring();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error(nameof(MainForm), $"InitializeHardwareMonitoring failed: {ex}");
+            }
+        });
+
+        StartCaptureInitializationInBackground();
     }
 
     // Початкова конфігурація форми (...
@@ -991,25 +1007,38 @@ public partial class MainForm : Form
     private void StartHardwareMonitor()
     {
         _hardwareTimer = new System.Threading.Timer(_ =>
+        {
+            try
             {
                 _hardwareMonitor.Update();
 
-                if (!_overlayVisible)
+                if (!_overlayVisible || _overlay.IsDisposed)
                     return;
 
-                _overlay.UpdateSystemInfo(
-                    _hardwareMonitor.CpuLoad,
-                    _hardwareMonitor.CpuFrequency,
-                    _hardwareMonitor.GpuLoad,
-                    _hardwareMonitor.GpuVram,
-                    _hardwareMonitor.RamUsed,
-                    _hardwareMonitor.CpuName,
-                    _hardwareMonitor.GpuName,
-                    _hardwareMonitor.RamType,
-                    _hardwareMonitor.RamFrequency,
-                    _hardwareMonitor.TotalRamGB);
+                _overlay.BeginInvoke(new Action(() =>
+                {
+                    if (_overlay.IsDisposed)
+                        return;
 
-            }, null, 0, 1000);
+                    _overlay.UpdateSystemInfo(
+                        _hardwareMonitor.CpuLoad,
+                        _hardwareMonitor.CpuFrequency,
+                        _hardwareMonitor.GpuLoad,
+                        _hardwareMonitor.GpuVram,
+                        _hardwareMonitor.RamUsed,
+                        _hardwareMonitor.CpuName,
+                        _hardwareMonitor.GpuName,
+                        _hardwareMonitor.RamType,
+                        _hardwareMonitor.RamFrequency,
+                        _hardwareMonitor.TotalRamGB);
+                }));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Debug($"StartHardwareMonitor warning: {ex.Message}");
+            }
+
+        }, null, 0, 1000);
     }
 
     private void StartMemoryMonitor()

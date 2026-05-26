@@ -261,9 +261,16 @@ public partial class SettingsForm : Form
         toggleRow.Controls.Add(
             MakeSubLabel("Show System Info", Color.FromArgb(240, 240, 240)), 0, 0);
 
-        _toggleOverlay = new ToggleSwitch { Anchor = AnchorStyles.Right };
+        _toggleOverlay = new ToggleSwitch
+        {
+            Anchor = AnchorStyles.Right,
+            TabStop = false
+        };
         _toggleOverlay.CheckedChanged += (s, e) =>
+        {
             OnOverlayToggled?.Invoke(_toggleOverlay.Checked);
+            ClearFocus();
+        };
 
         toggleRow.Controls.Add(_toggleOverlay, 1, 0);
         layout.Controls.Add(toggleRow);
@@ -417,6 +424,11 @@ public partial class SettingsForm : Form
     }
     // ...) Логер подій
 
+    private void ClearFocus()
+    {
+        ActiveControl = null;
+    }
+
     // Make* хелпери — базові елементи UI (...
     private Label MakeTitle(string text) => new Label
     {
@@ -552,7 +564,11 @@ public partial class SettingsForm : Form
         toggleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, S(54)));
         toggleRow.Controls.Add(MakeSubLabel(label, Color.FromArgb(240, 240, 240)), 0, 0);
 
-        var toggle = new ToggleSwitch { Anchor = AnchorStyles.Right };
+        var toggle = new ToggleSwitch
+        {
+            Anchor = AnchorStyles.Right,
+            TabStop = false
+        };
         toggleRow.Controls.Add(toggle, 1, 0);
 
         // Кнопка вибору аудіо пристрою.
@@ -652,6 +668,7 @@ public partial class SettingsForm : Form
                 : Color.FromArgb(28, 28, 30);
 
             InvokeSettingsChanged();
+            ClearFocus();
         };
 
         // Випадаючий список пристроїв
@@ -710,6 +727,7 @@ public partial class SettingsForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
+            TabStop = false,
             ColumnCount = 2,
             Height = S(46),
             AutoSize = false,
