@@ -30,6 +30,12 @@ static class Program
         // Запуск MediaFoundation і головної форми (...
         SharpDX.MediaFoundation.MediaFactory.Startup(
             SharpDX.MediaFoundation.MediaFactory.Version, 0);
+
+        FFMpegCore.GlobalFFOptions.Configure(new FFMpegCore.FFOptions
+        {
+            BinaryFolder = AppContext.BaseDirectory
+        });
+
         Application.Run(new MainForm());
         SharpDX.MediaFoundation.MediaFactory.Shutdown();
         AppLogger.Info("EventCapture завершив роботу.");

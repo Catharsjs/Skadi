@@ -53,7 +53,6 @@ public class VideoEncoder : IDisposable
         using var attributes = new MediaAttributes(2);
 
         attributes.Set(SinkWriterAttributeKeys.ReadwriteEnableHardwareTransforms, 1);
-        attributes.Set(SinkWriterAttributeKeys.DisableThrottling, 1);
 
         _sinkWriter = MediaFactory.CreateSinkWriterFromURL(outputPath, null, attributes);
 

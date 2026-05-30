@@ -1,11 +1,16 @@
 using EventCapture.Core.Capture;
 using EventCapture.Core.Diagnostics;
 using EventCapture.Core.Monitoring;
+using EventCapture.Hardware;
 namespace EventCapture.App;
 
 public partial class MainForm : Form
 {
     private const int WM_HOTKEY = 0x0312;
+
+    // Апаратна частина
+    private HardwareController? _hardwareController;
+    private CancellationTokenSource _hardwareCts = new();
 
     // Налаштування та стан
     private AppSettings _appSettings;
@@ -54,6 +59,7 @@ public partial class MainForm : Form
 
         InitializeTray();
         InitializeHotkeys();
+        InitializeHardwareController();
         InitializeOverlay();
 
         Hide();
@@ -148,6 +154,8 @@ public partial class MainForm : Form
         }
     }
     // ...) Приховування вікна з Alt+Tab
+
+
 
     // Ініціалізація capture pipeline (...
     private async Task InitializeCapture(
@@ -293,6 +301,53 @@ public partial class MainForm : Form
         _audioRecorder = new AudioRecorder();
     }
     // ...) Ініціалізація capture pipeline
+
+    // Ініціалізація контроллера (...
+    private void InitializeHardwareController()
+    {
+        _hardwareController = new HardwareController();
+
+        _hardwareController.LogReceived += message =>
+        {
+            AppLogger.Info(message);
+        };
+
+        _hardwareController.CommandReceived += command =>
+        {
+            BeginInvoke(new Action(() =>
+            {
+                switch (command)
+                {
+                    case HardwareCommand.Screenshot:
+                        TakeScreenshot();
+                        break;
+
+                    case HardwareCommand.SaveVideo:
+                        SaveVideo();
+                        break;
+
+                    case HardwareCommand.Ping:
+                        AppLogger.Debug("Hardware ping");
+                        break;
+
+                    case HardwareCommand.Ready:
+                        AppLogger.Info("Hardware ready");
+                        break;
+
+                    case HardwareCommand.DeviceHandshake:
+                        AppLogger.Info("EventCapture hardware detected");
+                        break;
+
+                    case HardwareCommand.Unknown:
+                        AppLogger.Debug("Unknown hardware command");
+                        break;
+                }
+            }));
+        };
+
+        StartHardwareAutoConnect();
+    }
+    // ...) Ініціалізація контроллера 
 
     private void RecreateScreenshotSaver()
     {
@@ -857,6 +912,7 @@ public partial class MainForm : Form
     // Збереження скріншота (...
     public void TakeScreenshot()
     {
+        if (_screenshotSaver == null) return;
         try
         {
             _screenshotSaver.SaveScreenshot();
@@ -875,6 +931,7 @@ public partial class MainForm : Form
     // Збереження replay-buffer (...    
     public async void SaveVideo()
     {
+        if (_encoder == null) return;
         if (!await _saveSemaphore.WaitAsync(0))
         {
             ShowCustomNotification("Video save is already in progress");
@@ -1009,7 +1066,6 @@ public partial class MainForm : Form
     // ...) Збереження replay-buffer
 
     // Моніторинг системи (...    
-
     private void StartHardwareMonitor()
     {
         _hardwareTimer = new System.Threading.Timer(_ =>
@@ -1046,24 +1102,85 @@ public partial class MainForm : Form
 
         }, null, 0, 1000);
     }
+    // ...) Моніторинг системи
 
     private void StartMemoryMonitor()
     {
         _memoryTimer = new System.Threading.Timer(_ =>
         {
             var process = System.Diagnostics.Process.GetCurrentProcess();
-
             process.Refresh();
 
+            long workingSetMB = process.WorkingSet64 / 1024 / 1024;
+            long privateMB = process.PrivateMemorySize64 / 1024 / 1024;
+            long gcMB = GC.GetTotalMemory(false) / 1024 / 1024;
+
             AppLogger.Debug(
-                $"Memory report | " +
-                $"WorkingSet={process.WorkingSet64 / 1024 / 1024}MB | " +
-                $"Private={process.PrivateMemorySize64 / 1024 / 1024}MB | " +
-                $"GC={GC.GetTotalMemory(false) / 1024 / 1024}MB");
+                $"Memory report | WorkingSet={workingSetMB}MB | " +
+                $"Private={privateMB}MB | GC={gcMB}MB");
+
+            // Watchdog: якщо пам'ять > 1 GB — спочатку GC
+            if (workingSetMB > 1000)
+            {
+                AppLogger.Info($"Memory watchdog: WorkingSet={workingSetMB}MB, forcing GC");
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                // Якщо після GC все одно > 800 MB — перезапустити pipeline
+                process.Refresh();
+                if (process.WorkingSet64 / 1024 / 1024 > 800)
+                {
+                    AppLogger.Info("Memory still high after GC — restarting capture pipeline");
+                    this.BeginInvoke(SaveVideo);
+                }
+            }
 
         }, null, 0, 60_000);
     }
-    // ...) Моніторинг системи
+
+    private void StartHardwareAutoConnect()
+    {
+        _ = Task.Run(() => HardwareConnectLoopAsync(_hardwareCts.Token));
+    }
+
+    private async Task HardwareConnectLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (!_hardwareController.IsConnected)
+            {
+                AppLogger.Info("Searching for ESP32...");
+                var port = await HardwareController.AutoDetectAsync(timeoutMs: 12000);
+
+                if (ct.IsCancellationRequested) break;
+
+                if (port == null)
+                {
+                    await Task.Delay(3000, ct).ContinueWith(_ => { });
+                    continue;
+                }
+
+                AppLogger.Info($"ESP32 detected on {port}");
+                await Task.Delay(300, ct).ContinueWith(_ => { });
+
+                try
+                {
+                    _hardwareController.Start(port);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Info($"Failed to connect to ESP32: {ex.Message}");
+                    await Task.Delay(3000, ct).ContinueWith(_ => { });
+                }
+            }
+            else
+            {
+                // Підключено — перевіряємо кожні 2 секунди
+                await Task.Delay(2000, ct).ContinueWith(_ => { });
+            }
+        }
+    }
 
     // Керування audio devices (...    
     public void SetUserSelectedSystemDevice(string deviceId)
@@ -1096,6 +1213,7 @@ public partial class MainForm : Form
         try { _capturer?.Stop(); } catch { }
         try { _capturer?.Dispose(); } catch { }
         try { _encoder?.Dispose(); } catch { }
+        try { _hardwareController?.Dispose(); } catch {}
     }
     // ...) Завершення програми
 
@@ -1128,7 +1246,7 @@ public partial class MainForm : Form
     }
 
     protected override void OnFormClosing(
-        FormClosingEventArgs e)
+    FormClosingEventArgs e)
     {
         if (e.CloseReason == CloseReason.UserClosing)
         {
@@ -1136,6 +1254,7 @@ public partial class MainForm : Form
             Hide();
             return;
         }
+        _hardwareCts.Cancel();
         base.OnFormClosing(e);
     }
     // ...) Windows messages
