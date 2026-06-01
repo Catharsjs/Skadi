@@ -8,6 +8,7 @@ public partial class OverlayForm : Form
     private const int WS_EX_TRANSPARENT = 0x00000020;
     private const int WS_EX_LAYERED = 0x00080000;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
+
     private static readonly Color TransparentColor = Color.FromArgb(1, 1, 1);
     private static readonly Color AccentColor = Color.FromArgb(0, 196, 160);
 
@@ -19,15 +20,10 @@ public partial class OverlayForm : Form
     private Label _ramInfoLabel = null!;
 
     [DllImport("user32.dll")]
-    private static extern int SetWindowLong(
-        IntPtr hWnd,
-        int nIndex,
-        int dwNewLong);
+    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     [DllImport("user32.dll")]
-    private static extern int GetWindowLong(
-        IntPtr hWnd,
-        int nIndex);
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
     public OverlayForm()
     {
@@ -35,15 +31,15 @@ public partial class OverlayForm : Form
         InitializeOverlayWindow();
         BuildSystemInfoLabels();
     }
-    // Приховування overlay з Alt+Tab (...
 
+    // Приховування overlay з Alt+Tab (...
     protected override CreateParams CreateParams
     {
         get
         {
-            var createParams = base.CreateParams;
-            createParams.ExStyle |= WS_EX_TOOLWINDOW;
-            return createParams;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
         }
     }
     // ...) Приховування overlay з Alt+Tab
@@ -59,47 +55,46 @@ public partial class OverlayForm : Form
         TransparencyKey = TransparentColor;
 
         var screen = Screen.PrimaryScreen!.Bounds;
-
-        Location = new Point(
-            screen.Left + 16,
-            screen.Top + 16);
+        Location = new Point(screen.Left + 16, screen.Top + 16);
     }
 
     private void BuildSystemInfoLabels()
     {
-        int lineHeight = 22;
-        int groupGap = 6;
-        int y = 8;
+        // Масштабування під DPI монітора
+        float dpiScale = DeviceDpi / 96f;
+        float fontSize = 9f;
 
-        _cpuNameLabel = CreateLabel("CPU: --", y, true);
-        y += lineHeight;
-        _cpuInfoLabel = CreateLabel("Load: --%  Freq: -- GHz", y, false);
-        y += lineHeight + groupGap;
-        _gpuNameLabel = CreateLabel("GPU: --", y, true);
-        y += lineHeight;
-        _gpuInfoLabel = CreateLabel("Load: --%  VRAM: -- GB", y, false);
-        y += lineHeight + groupGap;
-        _ramNameLabel = CreateLabel("RAM: --", y, true);
-        y += lineHeight;
-        _ramInfoLabel = CreateLabel("Used: -- / -- GB", y, false);
+        using var measureFont = new Font("Segoe UI", fontSize, FontStyle.Regular);
+        int lineHeight = TextRenderer.MeasureText("Ag", measureFont).Height + 1;
+        int groupGap = 3;
 
-        Controls.AddRange(
-            new Control[]
-            {
-                _cpuNameLabel,
-                _cpuInfoLabel,
-                _gpuNameLabel,
-                _gpuInfoLabel,
-                _ramNameLabel,
-                _ramInfoLabel
-            });
+        int y = 4;
+
+        _cpuNameLabel = MakeLabel("CPU: --", y, true, fontSize);
+        y += lineHeight;
+        _cpuInfoLabel = MakeLabel("Load: --%  Freq: -- GHz", y, false, fontSize);
+        y += lineHeight + groupGap;
+
+        _gpuNameLabel = MakeLabel("GPU: --", y, true, fontSize);
+        y += lineHeight;
+        _gpuInfoLabel = MakeLabel("Load: --%  VRAM: -- GB", y, false, fontSize);
+        y += lineHeight + groupGap;
+
+        _ramNameLabel = MakeLabel("RAM: --", y, true, fontSize);
+        y += lineHeight;
+        _ramInfoLabel = MakeLabel("Used: -- / -- GB", y, false, fontSize);
+
+        Controls.AddRange(new Control[]
+        {
+            _cpuNameLabel, _cpuInfoLabel,
+            _gpuNameLabel, _gpuInfoLabel,
+            _ramNameLabel, _ramInfoLabel
+        });
+
         UpdateOverlaySize();
     }
 
-    private static Label CreateLabel(
-        string text,
-        int y,
-        bool isHeader)
+    private static Label MakeLabel(string text, int y, bool isHeader, float fontSize)
     {
         return new Label
         {
@@ -110,7 +105,7 @@ public partial class OverlayForm : Form
             BackColor = TransparentColor,
             Font = new Font(
                 "Segoe UI",
-                9,
+                fontSize,
                 isHeader ? FontStyle.Bold : FontStyle.Regular)
         };
     }
@@ -119,18 +114,18 @@ public partial class OverlayForm : Form
     // Розмір overlay (...
     private void UpdateOverlaySize()
     {
-        var visibleLabels =
-            Controls
-                .OfType<Label>()
-                .Where(label => label.Visible)
-                .ToList();
+        var visible = Controls
+            .OfType<Label>()
+            .Where(l => l.Visible)
+            .ToList();
 
-        int width = visibleLabels.Count > 0
-            ? visibleLabels.Max(label => label.PreferredWidth) + 24
+        int width = visible.Count > 0
+            ? visible.Max(l => l.PreferredWidth) + 24
             : 200;
 
-        int height = visibleLabels.Count > 0
-            ? visibleLabels.Sum(label => label.Height) + 24
+        // Беремо нижній край останнього лейблу замість суми висот
+        int height = visible.Count > 0
+            ? visible.Max(l => l.Bottom) + 16
             : 1;
 
         Size = new Size(width, height);
@@ -140,14 +135,8 @@ public partial class OverlayForm : Form
     // Click-through режим (...
     private void MakeClickThrough()
     {
-        int style = GetWindowLong(
-            Handle,
-            GWL_EXSTYLE);
-
-        SetWindowLong(
-            Handle,
-            GWL_EXSTYLE,
-            style | WS_EX_TRANSPARENT | WS_EX_LAYERED);
+        int style = GetWindowLong(Handle, GWL_EXSTYLE);
+        SetWindowLong(Handle, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_LAYERED);
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -172,27 +161,19 @@ public partial class OverlayForm : Form
     {
         if (InvokeRequired)
         {
-            Invoke(() =>
-                UpdateSystemInfo(
-                    cpuLoad,
-                    cpuFrequency,
-                    gpuLoad,
-                    gpuVram,
-                    ramUsed,
-                    cpuName,
-                    gpuName,
-                    ramType,
-                    ramFrequency,
-                    totalRam));
-
+            Invoke(() => UpdateSystemInfo(
+                cpuLoad, cpuFrequency, gpuLoad, gpuVram,
+                ramUsed, cpuName, gpuName, ramType, ramFrequency, totalRam));
             return;
         }
+
         _cpuNameLabel.Text = $"CPU: {cpuName}";
         _cpuInfoLabel.Text = $"Load: {cpuLoad:F0}%  Freq: {cpuFrequency:F1} GHz";
         _gpuNameLabel.Text = $"GPU: {gpuName}";
         _gpuInfoLabel.Text = $"Load: {gpuLoad:F0}%  VRAM: {gpuVram:F1} GB";
         _ramNameLabel.Text = $"RAM: {ramType}-{ramFrequency}";
         _ramInfoLabel.Text = $"Used: {ramUsed:F1} / {totalRam:F1} GB";
+
         UpdateOverlaySize();
     }
 
@@ -200,23 +181,20 @@ public partial class OverlayForm : Form
     {
         if (InvokeRequired)
         {
-            Invoke(() =>
-                SetSystemInfoVisible(visible));
+            Invoke(() => SetSystemInfoVisible(visible));
             return;
         }
+
         _cpuNameLabel.Visible = visible;
         _cpuInfoLabel.Visible = visible;
         _gpuNameLabel.Visible = visible;
         _gpuInfoLabel.Visible = visible;
         _ramNameLabel.Visible = visible;
         _ramInfoLabel.Visible = visible;
+
         UpdateOverlaySize();
     }
     // ...) Оновлення системної інформації
 
-    private void OverlayForm_Load(
-        object sender,
-        EventArgs e)
-    {
-    }
+    private void OverlayForm_Load(object sender, EventArgs e) { }
 }

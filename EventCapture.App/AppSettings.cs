@@ -3,7 +3,6 @@ using EventCapture.Core.Diagnostics;
 namespace EventCapture.App;
 
 // Зберігає і завантажує налаштування користувача.
-// Файл: %AppData%\EventCapture\settings.json
 public class AppSettings
 {
     // Відео
@@ -26,17 +25,17 @@ public class AppSettings
     // Загальні налаштування (...
     public string SaveFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-        "EventCapture");
+        "Skadi");
     // ...) Загальні налаштування
 
 
     // Системні шляхи (...
     private static readonly string _settingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "EventCapture",
+        "Skadi",
         "settings.json");
 
-    private static readonly string _appName = "EventCapture";
+    private static readonly string _appName = "Skadi";
     private static readonly string _appPath =
         System.Diagnostics.Process.GetCurrentProcess()
             .MainModule!

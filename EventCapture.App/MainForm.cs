@@ -497,7 +497,7 @@ public partial class MainForm : Form
         _trayMenu = CreateTrayMenu();
         _trayIcon = new NotifyIcon
         {
-            Text = "EventCapture",
+            Text = "Skadi",
             Icon = new Icon(
                 Path.Combine(
                     AppDomain.CurrentDomain.BaseDirectory,

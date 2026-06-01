@@ -23,6 +23,16 @@ public class CustomNotificationForm : Form
         uint dwAffinity);
 
     protected override bool ShowWithoutActivation => true;
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TOOLWINDOW = 0x80;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
     public CustomNotificationForm(string message)
     {
         _notificationIndex = _activeNotifications;
@@ -78,7 +88,6 @@ public class CustomNotificationForm : Form
     }
     // ...) Базові параметри вікна
 
-
     // Елементи сповіщення (...
     private void InitializeControls(string message, float scale)
     {
@@ -119,7 +128,6 @@ public class CustomNotificationForm : Form
         Controls.Add(messageLabel);
     }
     // ...) Елементи сповіщення
-
 
     // Анімація сповіщення (...
     private System.Windows.Forms.Timer CreateLifeTimer()
@@ -205,7 +213,6 @@ public class CustomNotificationForm : Form
             (int)Math.Round(value * scale));
     }
     // ...) Масштабування DPI
-
 
     // Відображення вікна (...
     protected override void OnShown(EventArgs e)

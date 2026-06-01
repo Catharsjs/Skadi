@@ -4,9 +4,20 @@ public static class AppLogger
 {
     private static readonly object _lock = new();
     private static readonly string _logDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-        "EventCapture");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Skadi");
     private static readonly string _logPath = Path.Combine(_logDirectory, "app.log");
+
+    // Очистити лог при старті нового сеансу
+    static AppLogger()
+    {
+        try
+        {
+            Directory.CreateDirectory(_logDirectory);
+            File.WriteAllText(_logPath, string.Empty);
+        }
+        catch { }
+    }
 
     // Інформаційні повідомлення
     public static void Info(string message)

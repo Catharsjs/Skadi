@@ -1,7 +1,6 @@
 using EventCapture.App;
 using EventCapture.Core.Diagnostics;
 
-// Точка входу застосунку EventCapture.
 static class Program
 {
     [STAThread]
@@ -15,7 +14,7 @@ static class Program
         {
             AppLogger.Info("Спроба повторного запуску — застосунок вже працює.");
             MessageBox.Show(
-                "EventCapture вже запущено.", "EventCapture",
+                "Skadi вже запущено.", "Skadi",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -24,7 +23,7 @@ static class Program
         // Ініціалізація застосунку (...
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
-        AppLogger.Info("EventCapture запускається.");
+        AppLogger.Info("Skadi  запускається.");
         // ...) Ініціалізація застосунку
 
         // Запуск MediaFoundation і головної форми (...
@@ -38,7 +37,7 @@ static class Program
 
         Application.Run(new MainForm());
         SharpDX.MediaFoundation.MediaFactory.Shutdown();
-        AppLogger.Info("EventCapture завершив роботу.");
+        AppLogger.Info("Skadi завершив роботу.");
         // ...) Запуск MediaFoundation і головної форми
     }
 }

@@ -161,7 +161,7 @@ public partial class SettingsForm : Form
         // ...) Головний layout
 
         // Заголовок (...
-        layout.Controls.Add(MakeTitle("EventCapture"));
+        layout.Controls.Add(MakeTitleWithLogo("Skadi"));
         layout.Controls.Add(MakeSubLabel("● Buffer Active", Color.FromArgb(0, 196, 160)));
         layout.Controls.Add(MakeSeparator());
         // ...) Заголовок
@@ -440,6 +440,41 @@ public partial class SettingsForm : Form
         BackColor = Color.Transparent,
         Margin = new Padding(0, 0, 0, S(4))
     };
+
+    private Panel MakeTitleWithLogo(string text)
+    {
+        var panel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 0, 0, S(4)),
+            WrapContents = false
+        };
+
+        // Іконка
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "EventCapture.ico");
+        if (File.Exists(iconPath))
+        {
+            var titleLabel = MakeTitle(text);
+            int size = titleLabel.PreferredHeight;
+            using var icon = new Icon(iconPath, size, size);
+            var picture = new PictureBox
+            {
+                Image = icon.ToBitmap(),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Size = new Size(size, size),
+                BackColor = Color.Transparent,
+                Margin = new Padding(0, S(2), S(6), 0)
+            };
+            panel.Controls.Add(picture);
+        }
+
+        // Заголовок
+        panel.Controls.Add(MakeTitle(text));
+
+        return panel;
+    }
 
     private Label MakeSubLabel(string text, Color color) => new Label
     {
