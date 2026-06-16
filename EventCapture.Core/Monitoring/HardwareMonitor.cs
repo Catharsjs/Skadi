@@ -75,8 +75,7 @@ public class HardwareMonitor : IDisposable
     {
         try
         {
-            using var searcher = new ManagementObjectSearcher(
-                    "SELECT Name FROM Win32_VideoController WHERE Name LIKE '%NVIDIA%'");
+            using var searcher = new ManagementObjectSearcher("SELECT Name FROM Win32_VideoController");
 
             foreach (var obj in searcher.Get())
             {
@@ -204,7 +203,9 @@ public class HardwareMonitor : IDisposable
             {
                 hardware.Update();
 
-                if (hardware.HardwareType != HardwareType.GpuNvidia)
+                if (hardware.HardwareType != HardwareType.GpuNvidia &&
+                     hardware.HardwareType != HardwareType.GpuAmd &&
+                     hardware.HardwareType != HardwareType.GpuIntel)
                     continue;
 
                 ReadGpuSensors(hardware);

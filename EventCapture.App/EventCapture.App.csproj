@@ -24,7 +24,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\EventCapture.Core\EventCapture.Core.csproj" />
-    <ProjectReference Include="..\EventCapture.Hardware\EventCapture.Hardware.csproj" />
   </ItemGroup>
 
 </Project>
