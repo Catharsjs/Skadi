@@ -1,0 +1,900 @@
+<Window x:Class="EventCapture.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:infra="clr-namespace:EventCapture.App.Infrastructure"
+        xmlns:controls="clr-namespace:EventCapture.App.Controls"
+        Title="Skadi"
+        Width="560"
+        Height="1400"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Background="Transparent"
+        AllowsTransparency="True"
+        FontFamily="Segoe UI"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
+        HorizontalContentAlignment="Stretch"
+        VerticalContentAlignment="Stretch">
+
+    <Window.Resources>
+        <infra:EqualityConverter x:Key="EqualityConverter"/>
+        <infra:InverseBooleanConverter x:Key="InverseBooleanConverter"/>
+        <infra:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <infra:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter"/>
+
+        <Style x:Key="SettingsLockOverlayStyle"
+               TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Arrow"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Panel.ZIndex" Value="100"/>
+
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Viewbox x:Name="RootVisual"
+             Stretch="Uniform">
+
+        <Grid Width="560"
+              Height="1400"
+              Background="{StaticResource BackgroundBrush}">
+
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <StackPanel Margin="24,16,24,0">
+
+                <StackPanel Orientation="Horizontal"
+                            Height="48">
+                    <Image Source="EventCapture.ico"
+                           Width="42"
+                           Height="42"
+                           Stretch="Uniform"
+                           Margin="0,0,12,0"/>
+
+                    <TextBlock Text="Skadi"
+                               FontSize="30"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource AccentBrush}"/>
+                </StackPanel>
+
+                <Grid Height="34"
+                      Margin="0,8,0,10">
+
+                    <controls:AnimatedStateTextBlock
+                        Text="{Binding BufferStatus}"
+                        IsActive="{Binding BufferEnabled}"
+                        FontFamily="Segoe UI"
+                        FontSize="19"
+                        VerticalAlignment="Center"/>
+
+                    <CheckBox HorizontalAlignment="Right"
+                              Style="{StaticResource ToggleStyle}"
+                              IsChecked="{Binding BufferEnabled}"/>
+                </Grid>
+
+                <Button Style="{StaticResource AccentButtonStyle}"
+                        Height="40"
+                        Command="{Binding SaveScreenshotCommand}"
+                        Content="Save Screenshot"
+                        FontSize="19"/>
+
+                <controls:HotkeyCaptureButton
+                    Hotkey="{Binding ScreenshotHotkey, Mode=TwoWay}"
+                    CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                    CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                    Style="{StaticResource InlineHotkeyStyle}"
+                    HorizontalAlignment="Left"
+                    Margin="0,3,0,6"/>
+
+                <Button Style="{StaticResource AccentButtonStyle}"
+                        Height="40"
+                        Command="{Binding SaveRecordCommand}"
+                        Content="Save Record"
+                        FontSize="19"/>
+
+                <controls:HotkeyCaptureButton
+                    Hotkey="{Binding RecordHotkey, Mode=TwoWay}"
+                    CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                    CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                    Style="{StaticResource InlineHotkeyStyle}"
+                    HorizontalAlignment="Left"
+                    Margin="0,3,0,6"/>
+
+                <Border Height="1"
+                        Background="{StaticResource BorderBrush}"
+                        Margin="0,0,0,8"/>
+
+                <TextBlock Text="Settings"
+                           FontSize="19"
+                           Foreground="{StaticResource SecondaryTextBrush}"
+                           Margin="6,0,0,7"/>
+
+                <!-- Basic / Advanced залишаються доступними -->
+                <UniformGrid Columns="2">
+                    <RadioButton GroupName="SettingsTab"
+                                 Content="Basic"
+                                 FontSize="17"
+                                 Style="{StaticResource SegmentStyle}"
+                                 IsChecked="{Binding IsAdvanced,
+                                                     Converter={StaticResource InverseBooleanConverter},
+                                                     Mode=TwoWay}"/>
+
+                    <RadioButton GroupName="SettingsTab"
+                                 Content="Advanced"
+                                 FontSize="17"
+                                 Style="{StaticResource SegmentStyle}"
+                                 IsChecked="{Binding IsAdvanced, Mode=TwoWay}"/>
+                </UniformGrid>
+
+                <Border Tag="{Binding CanEditSettings}"
+        Style="{StaticResource FadeSectionStyle}">
+
+                    <StackPanel>
+                        <TextBlock Text="Capture Mode"
+                   FontSize="18"
+                   Foreground="{StaticResource SecondaryTextBrush}"
+                   Margin="6,10,0,5"/>
+
+                        <Grid>
+                            <UniformGrid Columns="3"
+                         IsHitTestVisible="{Binding CanEditSettings}">
+
+                                <RadioButton GroupName="CaptureMode"
+                             Content="Combined"
+                             FontSize="17"
+                             Style="{StaticResource SegmentStyle}"
+                             IsChecked="{Binding CaptureMode,
+                                                 Converter={StaticResource EqualityConverter},
+                                                 ConverterParameter=Combined,
+                                                 Mode=TwoWay}"/>
+
+                                <RadioButton GroupName="CaptureMode"
+                             Content="Video"
+                             FontSize="17"
+                             Style="{StaticResource SegmentStyle}"
+                             IsChecked="{Binding CaptureMode,
+                                                 Converter={StaticResource EqualityConverter},
+                                                 ConverterParameter=Video,
+                                                 Mode=TwoWay}"/>
+
+                                <RadioButton GroupName="CaptureMode"
+                             Content="Audio"
+                             FontSize="17"
+                             Style="{StaticResource SegmentStyle}"
+                             IsChecked="{Binding CaptureMode,
+                                                 Converter={StaticResource EqualityConverter},
+                                                 ConverterParameter=Audio,
+                                                 Mode=TwoWay}"/>
+                            </UniformGrid>
+
+                            <Button Style="{StaticResource SettingsLockOverlayStyle}"
+                    Command="{Binding SettingsLockedCommand}"
+                    Visibility="{Binding BufferEnabled,
+                                         Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- Content -->
+            <Grid Grid.Row="1"
+                  Margin="24,10,24,12">
+
+                <!-- Basic -->
+                <StackPanel Visibility="{Binding IsAdvanced,
+                                                 Converter={StaticResource InverseBooleanToVisibilityConverter}}">
+
+                    <!-- Заблокована частина Basic -->
+                    <Grid>
+                        <StackPanel IsHitTestVisible="{Binding CanEditSettings}">
+                            <Border Tag="{Binding CanEditSettings}"
+                                  Style="{StaticResource FadeSectionStyle}">
+                                <StackPanel>
+                                    <TextBlock Text="Capture Target"
+                                       FontSize="18"
+                                       Foreground="{StaticResource SecondaryTextBrush}"
+                                       Margin="6,0,0,5"/>
+
+                                    <UniformGrid Columns="2"
+                                         Margin="0,0,0,6">
+
+                                        <RadioButton GroupName="TargetType"
+                                             Content="Monitors"
+                                             FontSize="17"
+                                             Style="{StaticResource SegmentStyle}"
+                                             IsChecked="{Binding CaptureTargetType,
+                                                                 Converter={StaticResource EqualityConverter},
+                                                                 ConverterParameter=Monitors,
+                                                                 Mode=TwoWay}"/>
+
+                                        <RadioButton GroupName="TargetType"
+                                             Content="Windows"
+                                             FontSize="17"
+                                             Style="{StaticResource SegmentStyle}"
+                                             IsChecked="{Binding CaptureTargetType,
+                                                                 Converter={StaticResource EqualityConverter},
+                                                                 ConverterParameter=Windows,
+                                                                 Mode=TwoWay}"/>
+                                    </UniformGrid>
+
+                                    <ListBox Height="350"
+                                     ItemsSource="{Binding VisiblePreviews}"
+                                     SelectedItem="{Binding SelectedPreview}"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+
+                                        <ListBox.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <UniformGrid Columns="2"
+                                                     Rows="2"/>
+                                            </ItemsPanelTemplate>
+                                        </ListBox.ItemsPanel>
+
+                                        <ListBox.ItemContainerStyle>
+                                            <Style TargetType="ListBoxItem">
+                                                <Setter Property="Margin" Value="4"/>
+                                                <Setter Property="Padding" Value="0"/>
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                                <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Setter Property="BorderThickness" Value="0"/>
+
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="ListBoxItem">
+                                                            <Border x:Name="Frame"
+                                                            Background="{StaticResource SurfaceBrush}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="3">
+
+                                                                <Border.BorderBrush>
+                                                                    <SolidColorBrush x:Name="FrameBorder"
+                                                                             Color="{StaticResource BorderColor}"/>
+                                                                </Border.BorderBrush>
+
+                                                                <ContentPresenter/>
+                                                            </Border>
+
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver"
+                                                                 Value="True">
+                                                                    <Setter TargetName="Frame"
+                                                                    Property="Background"
+                                                                    Value="{StaticResource HoverBrush}"/>
+                                                                </Trigger>
+
+                                                                <Trigger Property="IsSelected"
+                                                                 Value="True">
+
+                                                                    <Trigger.EnterActions>
+                                                                        <BeginStoryboard>
+                                                                            <Storyboard>
+                                                                                <ColorAnimation
+                                                                            Storyboard.TargetName="FrameBorder"
+                                                                            Storyboard.TargetProperty="Color"
+                                                                            To="{StaticResource AccentColor}"
+                                                                            Duration="0:0:0.22"
+                                                                            EasingFunction="{StaticResource SmoothEase}"/>
+
+                                                                                <ThicknessAnimation
+                                                                            Storyboard.TargetName="Frame"
+                                                                            Storyboard.TargetProperty="BorderThickness"
+                                                                            To="2"
+                                                                            Duration="0:0:0.22"
+                                                                            EasingFunction="{StaticResource SmoothEase}"/>
+                                                                            </Storyboard>
+                                                                        </BeginStoryboard>
+                                                                    </Trigger.EnterActions>
+
+                                                                    <Trigger.ExitActions>
+                                                                        <BeginStoryboard>
+                                                                            <Storyboard>
+                                                                                <ColorAnimation
+                                                                            Storyboard.TargetName="FrameBorder"
+                                                                            Storyboard.TargetProperty="Color"
+                                                                            To="{StaticResource BorderColor}"
+                                                                            Duration="0:0:0.22"
+                                                                            EasingFunction="{StaticResource SmoothEase}"/>
+
+                                                                                <ThicknessAnimation
+                                                                            Storyboard.TargetName="Frame"
+                                                                            Storyboard.TargetProperty="BorderThickness"
+                                                                            To="1"
+                                                                            Duration="0:0:0.22"
+                                                                            EasingFunction="{StaticResource SmoothEase}"/>
+                                                                            </Storyboard>
+                                                                        </BeginStoryboard>
+                                                                    </Trigger.ExitActions>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </ListBox.ItemContainerStyle>
+
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="7">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="*"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                    </Grid.RowDefinitions>
+
+                                                    <Border Background="{StaticResource BackgroundBrush}"
+                                                    CornerRadius="1"
+                                                    Margin="0,0,0,5">
+
+                                                        <Grid>
+                                                            <TextBlock Text="{Binding Glyph}"
+                                                               FontSize="40"
+                                                               Foreground="{StaticResource DisabledTextBrush}"
+                                                               HorizontalAlignment="Center"/>
+
+                                                            <Image Source="{Binding Preview}"
+                                                           Stretch="UniformToFill"/>
+
+                                                            <Border Height="3"
+                                                            Background="{StaticResource AccentBrush}"
+                                                            VerticalAlignment="Bottom"
+                                                            Opacity=".65"/>
+                                                        </Grid>
+                                                    </Border>
+
+                                                    <StackPanel Grid.Row="1">
+                                                        <TextBlock Text="{Binding Title}"
+                                                           FontSize="12"
+                                                           FontWeight="SemiBold"
+                                                           TextTrimming="CharacterEllipsis"/>
+
+                                                        <TextBlock Text="{Binding Subtitle}"
+                                                           FontSize="10"
+                                                           Foreground="{StaticResource SecondaryTextBrush}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+
+                                    <Button Style="{StaticResource BaseButtonStyle}"
+                                    Height="30"
+                                    Width="84"
+                                    HorizontalAlignment="Center"
+                                    Command="{Binding NextPreviewPageCommand}"
+                                    IsEnabled="{Binding HasNextPreviewPage}"
+                                    Margin="0,4,0,6"
+                                    Background="Transparent"
+                                    BorderThickness="0">
+
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="▼"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontSize="16"
+                                               Margin="0,0,7,0"/>
+
+                                            <TextBlock Text="{Binding PreviewPageLabel}"
+                                               FontSize="12"/>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Border Height="1"
+                                    Background="{StaticResource BorderBrush}"
+                                    Margin="0,0,0,6"/>
+                                </StackPanel>
+                            </Border>
+
+                        </StackPanel>
+
+                        <Button Style="{StaticResource SettingsLockOverlayStyle}"
+                                Command="{Binding SettingsLockedCommand}"
+                                Visibility="{Binding BufferEnabled,
+                                                     Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                    </Grid>
+
+                    <!-- Save Folder залишається доступним -->
+                    <TextBlock Text="Save Folder"
+                       FontSize="18"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       Margin="6,6,0,2"/>
+
+                                <TextBlock Text="{Binding SaveFolder}"
+                       FontSize="18"
+                       Foreground="{StaticResource AccentBrush}"
+                       Margin="6,0,0,5"
+                       TextTrimming="CharacterEllipsis"/>
+
+                                <Button Style="{StaticResource BaseButtonStyle}"
+                    Height="36"
+                    Command="{Binding SelectFolderCommand}"
+                    Content="Browse..."
+                    FontSize="16"/>
+
+                                <Border Height="1"
+                    Background="{StaticResource BorderBrush}"
+                    Margin="0,6,0,0"/>
+
+                    <!-- Hot Keys залишаються доступними -->
+                    <TextBlock Text="Hot Keys"
+                               FontSize="18"
+                               Foreground="{StaticResource SecondaryTextBrush}"
+                               Margin="6,5,0,2"/>
+
+                    <Grid Height="38">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="280"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Save Screenshot"
+                                   Margin="8,0"/>
+
+                        <controls:HotkeyCaptureButton
+                            Grid.Column="1"
+                            Hotkey="{Binding ScreenshotHotkey, Mode=TwoWay}"
+                            CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                            CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                            Style="{StaticResource FieldHotkeyStyle}"/>
+                    </Grid>
+
+                    <Grid Height="38"
+                          Margin="0,4,0,0">
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="280"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Save Record"
+                                   Margin="8,0"/>
+
+                        <controls:HotkeyCaptureButton
+                            Grid.Column="1"
+                            Hotkey="{Binding RecordHotkey, Mode=TwoWay}"
+                            CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                            CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                            Style="{StaticResource FieldHotkeyStyle}"/>
+                    </Grid>
+
+                    <Grid Height="38"
+                          Margin="0,4,0,0">
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="280"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Toggle UI"
+                                   Margin="8,0"/>
+
+                        <controls:HotkeyCaptureButton
+                            Grid.Column="1"
+                            Hotkey="{Binding ToggleUiHotkey, Mode=TwoWay}"
+                            CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                            CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                            Style="{StaticResource FieldHotkeyStyle}"/>
+                    </Grid>
+                </StackPanel>
+
+                <!-- Advanced -->
+                <Grid Visibility="{Binding IsAdvanced,
+                                           Converter={StaticResource BooleanToVisibilityConverter}}"
+                      VerticalAlignment="Top">
+
+                    <StackPanel>
+
+                        <Border Tag="{Binding IsVideoSectionActive}"
+                                IsEnabled="{Binding IsVideoInputEnabled}"
+                                Style="{StaticResource FadeSectionStyle}">
+
+                            <StackPanel>
+                                <TextBlock Text="Video Settings"
+                                           FontSize="18"
+                                           Foreground="{StaticResource SecondaryTextBrush}"
+                                           Margin="6,0,0,5"/>
+
+                                <Grid Height="50"
+                                      Margin="6,3,6,0">
+
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="Resolution"
+                                               FontSize="17"/>
+
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="◀"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="Resolution:-1"/>
+
+                                        <controls:AnimatedTextBlock
+                                            Value="{Binding Resolution}"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
+
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="▶"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="Resolution:1"/>
+                                    </Grid>
+                                </Grid>
+
+                                <Grid Height="50"
+                                      Margin="6,7,6,0">
+
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="Quality"
+                                               FontSize="17"/>
+
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="◀"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="Quality:-1"/>
+
+                                        <controls:AnimatedTextBlock
+                                            Value="{Binding Quality}"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
+
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="▶"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="Quality:1"/>
+                                    </Grid>
+                                </Grid>
+
+                                <Grid Height="50"
+                                      Margin="6,7,6,0">
+
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="Frame Rate"
+                                               FontSize="17"/>
+
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="◀"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="FrameRate:-1"/>
+
+                                        <controls:AnimatedNumberTextBlock
+                                            Value="{Binding FrameRate}"
+                                            Suffix=" fps"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
+
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="▶"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="FrameRate:1"/>
+                                    </Grid>
+                                </Grid>
+
+                                <Grid Height="50"
+                                      Margin="6,7,6,2">
+
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="Buffer Duration"
+                                               FontSize="17"/>
+
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="◀"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="BufferDuration:-1"/>
+
+                                        <controls:AnimatedNumberTextBlock
+                                            Value="{Binding BufferDuration}"
+                                            Suffix=" sec"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
+
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="▶"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="BufferDuration:1"/>
+                                    </Grid>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Height="1"
+                                Background="{StaticResource BorderBrush}"
+                                Margin="0,4"/>
+
+                        <Border Tag="{Binding IsAudioSectionActive}"
+                                IsEnabled="{Binding IsAudioInputEnabled}"
+                                Style="{StaticResource FadeSectionStyle}">
+
+                            <StackPanel>
+                                <TextBlock Text="Audio Settings"
+                                           FontSize="18"
+                                           Foreground="{StaticResource SecondaryTextBrush}"
+                                           Margin="6,0,0,5"/>
+
+                                <Grid Height="36"
+                                      Margin="6,4,6,0">
+                                    <TextBlock Text="System Audio Device"
+                                               FontSize="17"/>
+
+                                    <CheckBox HorizontalAlignment="Right"
+                                              Style="{StaticResource ToggleStyle}"
+                                              IsChecked="{Binding SystemAudioEnabled}"/>
+                                </Grid>
+
+                                <Border Tag="{Binding SystemAudioEnabled}"
+                                        IsEnabled="{Binding IsSystemAudioInputEnabled}"
+                                        Style="{StaticResource FadeSectionStyle}">
+
+                                    <StackPanel>
+                                        <ComboBox Height="36"
+                                                  Margin="0,3,0,0"
+                                                  ItemsSource="{Binding SystemAudioDevices}"
+                                                  SelectedItem="{Binding SystemAudioDevice}"
+                                                  Foreground="{StaticResource AccentBrush}"
+                                                  HorizontalContentAlignment="Center"/>
+
+                                        <Grid Height="34"
+                                              Margin="6,9,6,0">
+                                            <TextBlock Text="System Audio Volume"
+                                                       FontSize="17"/>
+
+                                            <TextBlock HorizontalAlignment="Right"
+                                                       Text="{Binding SystemVolume, StringFormat={}{0:0}%}"
+                                                       Foreground="{StaticResource AccentBrush}"
+                                                       FontSize="17"/>
+                                        </Grid>
+
+                                        <Slider Margin="6,0"
+                                                Minimum="0"
+                                                Maximum="100"
+                                                Value="{Binding SystemVolume}"
+                                                SmallChange="1"
+                                                LargeChange="10"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Grid Height="36"
+                                      Margin="6,15,6,0">
+                                    <TextBlock Text="Microphone Device"
+                                               FontSize="17"/>
+
+                                    <CheckBox HorizontalAlignment="Right"
+                                              Style="{StaticResource ToggleStyle}"
+                                              IsChecked="{Binding MicrophoneEnabled}"/>
+                                </Grid>
+
+                                <Border Tag="{Binding MicrophoneEnabled}"
+                                        IsEnabled="{Binding IsMicrophoneInputEnabled}"
+                                        Style="{StaticResource FadeSectionStyle}">
+
+                                    <StackPanel>
+                                        <ComboBox Height="36"
+                                                  Margin="0,3,0,0"
+                                                  ItemsSource="{Binding MicrophoneDevices}"
+                                                  SelectedItem="{Binding MicrophoneDevice}"
+                                                  Foreground="{StaticResource AccentBrush}"
+                                                  HorizontalContentAlignment="Center"/>
+
+                                        <Grid Height="34"
+                                              Margin="6,9,6,0">
+                                            <TextBlock Text="Microphone Volume"
+                                                       FontSize="17"/>
+
+                                            <TextBlock HorizontalAlignment="Right"
+                                                       Text="{Binding MicrophoneVolume, StringFormat={}{0:0}%}"
+                                                       Foreground="{StaticResource AccentBrush}"
+                                                       FontSize="17"/>
+                                        </Grid>
+
+                                        <Slider Margin="6,0"
+                                                Minimum="0"
+                                                Maximum="100"
+                                                Value="{Binding MicrophoneVolume}"
+                                                SmallChange="1"
+                                                LargeChange="10"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Height="1"
+                        Background="{StaticResource BorderBrush}"
+                        Margin="0,8"/>
+
+                                        <Border Tag="{Binding CanEditSettings}"
+                        IsHitTestVisible="{Binding CanEditSettings}"
+                        Style="{StaticResource FadeSectionStyle}">
+
+                                            <Grid Height="42"
+                          Margin="6,2,6,0">
+
+                                                <TextBlock Text="Show System Info"
+                                   FontSize="17"
+                                   VerticalAlignment="Center"/>
+
+                                                <CheckBox HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Style="{StaticResource ToggleStyle}"
+                                  IsChecked="{Binding ShowSystemInfo}"/>
+                            </Grid>
+                        </Border>
+
+                    </StackPanel>
+
+                    <Button Style="{StaticResource SettingsLockOverlayStyle}"
+                            Command="{Binding SettingsLockedCommand}"
+                            Visibility="{Binding BufferEnabled,
+                                                 Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                </Grid>
+            </Grid>
+
+            <!-- Logger + Hide -->
+            <StackPanel Grid.Row="2"
+                        Margin="30,0,30,26">
+
+                <Border Height="44"
+                        Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="3"
+                        Margin="0,0,0,12">
+
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Opacity" Value="0"/>
+
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsEventVisible}"
+                                             Value="True">
+
+                                    <DataTrigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation
+                                                    Storyboard.TargetProperty="Opacity"
+                                                    To="1"
+                                                    Duration="0:0:0.22">
+
+                                                    <DoubleAnimation.EasingFunction>
+                                                        <CubicEase EasingMode="EaseInOut"/>
+                                                    </DoubleAnimation.EasingFunction>
+                                                </DoubleAnimation>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </DataTrigger.EnterActions>
+
+                                    <DataTrigger.ExitActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation
+                                                    Storyboard.TargetProperty="Opacity"
+                                                    To="0"
+                                                    Duration="0:0:0.22">
+
+                                                    <DoubleAnimation.EasingFunction>
+                                                        <CubicEase EasingMode="EaseInOut"/>
+                                                    </DoubleAnimation.EasingFunction>
+                                                </DoubleAnimation>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </DataTrigger.ExitActions>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+
+                    <StackPanel Orientation="Horizontal"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Margin="13,0">
+
+                        <Ellipse Width="7"
+                 Height="7"
+                 VerticalAlignment="Center"
+                 Margin="0,0,10,0">
+
+                            <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                    <Setter Property="Fill"
+                            Value="{StaticResource AccentBrush}"/>
+
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding EventIsWarning}"
+                                     Value="True">
+                                            <Setter Property="Fill"
+                                    Value="{StaticResource DangerBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Ellipse.Style>
+                        </Ellipse>
+
+                        <TextBlock Text="{Binding EventMessage}"
+                   FontSize="18"
+                   MaxWidth="430"
+                   VerticalAlignment="Center"
+                   TextAlignment="Center"
+                   TextTrimming="CharacterEllipsis">
+
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground"
+                            Value="{StaticResource SecondaryTextBrush}"/>
+
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding EventIsWarning}"
+                                     Value="True">
+                                            <Setter Property="Foreground"
+                                    Value="{StaticResource DangerBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </StackPanel>
+                </Border>
+
+                <Button Style="{StaticResource BaseButtonStyle}"
+                Command="{Binding ExitCommand}"
+                Foreground="{StaticResource DangerBrush}"
+                BorderBrush="{StaticResource DangerBrush}"
+                Content="Hide"
+                FontSize="18"/>
+            </StackPanel>
+        </Grid>
+    </Viewbox>
+</Window>

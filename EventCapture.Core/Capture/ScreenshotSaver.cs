@@ -1,63 +1,178 @@
-﻿using System.Drawing.Drawing2D;
+﻿using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Windows.Forms;
+
 namespace EventCapture.Core.Capture;
 
-// Зберігає скріншоти у роздільній здатності відеопотоку
-public class ScreenshotSaver
+public sealed class ScreenshotSaver
 {
     private readonly string _outputFolder;
     private readonly int _width;
     private readonly int _height;
+    private readonly string _captureTarget;
 
-    public ScreenshotSaver(string outputFolder, int width = 0, int height = 0)
+    public ScreenshotSaver(
+        string outputFolder,
+        int width = 0,
+        int height = 0,
+        string captureTarget = "PrimaryMonitor")
     {
         _outputFolder = outputFolder;
         _width = width;
         _height = height;
+        _captureTarget = captureTarget;
+
         Directory.CreateDirectory(outputFolder);
     }
 
-    // Збереження скріншота (...    
     public string SaveScreenshot()
     {
-        string fileName = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".jpg";
-        string filePath = Path.Combine(_outputFolder, fileName);
-        var screenBounds = Screen.PrimaryScreen!.Bounds;
+        string fileName =
+            DateTime.Now.ToString(
+                "yyyy-MM-dd_HH-mm-ss-fff") +
+            ".jpg";
 
-        using var sourceBitmap = new Bitmap(screenBounds.Width, screenBounds.Height);
-        using var graphics = Graphics.FromImage(sourceBitmap);
+        string filePath =
+            Path.Combine(
+                _outputFolder,
+                fileName);
 
-        graphics.CopyFromScreen(screenBounds.Location, Point.Empty, screenBounds.Size);
+        Bitmap? sourceBitmap =
+            _captureTarget.StartsWith(
+                "Window|",
+                StringComparison.Ordinal)
+                ? ScreenCapturer.CaptureScreenshot(
+                    _captureTarget)
+                : CaptureMonitor(
+                    _captureTarget);
 
-        if (NeedsResize(screenBounds))
+        if (sourceBitmap is null)
         {
-            SaveScaledScreenshot(sourceBitmap, filePath);
+            return string.Empty;
         }
-        else
+
+        using (sourceBitmap)
         {
-            sourceBitmap.Save(filePath, ImageFormat.Jpeg);
+            SaveBitmap(
+                sourceBitmap,
+                filePath);
         }
+
         return filePath;
     }
-    // ...) Збереження скріншота
 
-    // Масштабування зображення (...
-    private bool NeedsResize(Rectangle bounds)
+    private static Bitmap CaptureMonitor(
+        string captureTarget)
     {
-        return _width > 0 &&
-               _height > 0 &&
-               (_width != bounds.Width ||
-                _height != bounds.Height);
+        Rectangle bounds =
+            ResolveMonitorBounds(
+                captureTarget);
+
+        var bitmap =
+            new Bitmap(
+                bounds.Width,
+                bounds.Height,
+                PixelFormat.Format32bppArgb);
+
+        using Graphics graphics =
+            Graphics.FromImage(bitmap);
+
+        graphics.CopyFromScreen(
+            bounds.Location,
+            Point.Empty,
+            bounds.Size);
+
+        return bitmap;
     }
 
-    private void SaveScaledScreenshot(Bitmap sourceBitmap, string outputPath)
+    private static Rectangle ResolveMonitorBounds(
+        string captureTarget)
     {
-        using var scaledBitmap = new Bitmap(_width, _height);
-        using var graphics = Graphics.FromImage(scaledBitmap);
+        if (captureTarget.StartsWith(
+                "Monitor|",
+                StringComparison.Ordinal))
+        {
+            string deviceName =
+                captureTarget["Monitor|".Length..];
 
-        graphics.InterpolationMode = InterpolationMode.Bilinear;
-        graphics.DrawImage(sourceBitmap, 0, 0, _width, _height);
-        scaledBitmap.Save(outputPath, ImageFormat.Jpeg);
+            Screen? selectedScreen =
+                Screen.AllScreens.FirstOrDefault(
+                    screen => string.Equals(
+                        screen.DeviceName,
+                        deviceName,
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (selectedScreen is not null)
+            {
+                return selectedScreen.Bounds;
+            }
+
+            throw new InvalidOperationException(
+                "The selected monitor is no longer available.");
+        }
+
+        return Screen.PrimaryScreen?.Bounds
+            ?? Screen.AllScreens.First().Bounds;
     }
-    // ...) Масштабування зображення
+
+    private void SaveBitmap(
+        Bitmap sourceBitmap,
+        string outputPath)
+    {
+        if (_width <= 0 ||
+            _height <= 0 ||
+            (_width == sourceBitmap.Width &&
+             _height == sourceBitmap.Height))
+        {
+            sourceBitmap.Save(
+                outputPath,
+                ImageFormat.Jpeg);
+
+            return;
+        }
+
+        using var scaledBitmap =
+            new Bitmap(
+                _width,
+                _height,
+                PixelFormat.Format24bppRgb);
+
+        using Graphics graphics =
+            Graphics.FromImage(scaledBitmap);
+
+        graphics.Clear(Color.Black);
+
+        graphics.InterpolationMode =
+            InterpolationMode.HighQualityBicubic;
+
+        double scale = Math.Min(
+            (double)_width / sourceBitmap.Width,
+            (double)_height / sourceBitmap.Height);
+
+        int scaledWidth =
+            (int)Math.Round(
+                sourceBitmap.Width * scale);
+
+        int scaledHeight =
+            (int)Math.Round(
+                sourceBitmap.Height * scale);
+
+        int offsetX =
+            (_width - scaledWidth) / 2;
+
+        int offsetY =
+            (_height - scaledHeight) / 2;
+
+        graphics.DrawImage(
+            sourceBitmap,
+            offsetX,
+            offsetY,
+            scaledWidth,
+            scaledHeight);
+
+        scaledBitmap.Save(
+            outputPath,
+            ImageFormat.Jpeg);
+    }
 }

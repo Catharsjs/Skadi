@@ -1,12 +1,15 @@
-﻿using SharpDX.Direct3D11;
+﻿using EventCapture.Core.Diagnostics;
+using SharpDX;
+using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
 using WinRT;
-using EventCapture.Core.Diagnostics;
 namespace EventCapture.Core.Capture;
 
 // COM-interop для створення GraphicsCaptureItem
@@ -41,9 +44,11 @@ public class ScreenCapturer : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
     private const uint MONITOR_DEFAULTTONEAREST = 2;
+    private const int DwmwaExtendedFrameBounds = 9;
     private static readonly Guid GraphicsCaptureItemGuid = new("79C3F95B-31F7-4EC2-A464-632EF5D30760");
     private readonly VideoEncoder _encoder;
     private readonly int _fps;
+    private readonly string _captureTarget;
     private readonly object _captureLock = new();
     private volatile bool _isRunning;
     private SharpDX.Direct3D11.Device? _d3dDevice;
@@ -59,10 +64,16 @@ public class ScreenCapturer : IDisposable
 
     public bool IsRunning => _isRunning;
     public bool HasFirstFrame { get; private set; }
-    public ScreenCapturer(VideoEncoder encoder, int fps = 15)
+    private long _framesCaptured;
+    public long FramesCaptured => Interlocked.Read(ref _framesCaptured);
+    public ScreenCapturer(
+        VideoEncoder encoder,
+        int fps = 15,
+        string captureTarget = "PrimaryMonitor")
     {
         _encoder = encoder;
         _fps = fps;
+        _captureTarget = captureTarget;
     }
 
     // Запуск capture pipeline (...    
@@ -75,7 +86,7 @@ public class ScreenCapturer : IDisposable
 
         InitializeDevices();
 
-        var captureItem = CreateCaptureItem();
+        var captureItem = CreateCaptureItem(_captureTarget);
 
         _framePool =
             Direct3D11CaptureFramePool.CreateFreeThreaded(
@@ -186,7 +197,8 @@ public class ScreenCapturer : IDisposable
                     return;
 
                 if (!HasFirstFrame)
-                    HasFirstFrame = true;
+        HasFirstFrame = true;
+        Interlocked.Increment(ref _framesCaptured);
 
                 using var texture = GetFrameTexture(frame);
                 var description = texture.Description;
@@ -194,7 +206,10 @@ public class ScreenCapturer : IDisposable
                 EnsureStagingTexture(description.Width, description.Height);
                 _d3dDevice.ImmediateContext.CopyResource(texture, _stagingTexture!);
                 CopyFrameToManagedBuffer(description);
-                _encoder.WriteFrame(_frameBuffer!);
+                _encoder.WriteFrame(
+                    _frameBuffer!,
+                    description.Width,
+                    description.Height);
             }
             catch (Exception ex)
             {
@@ -203,12 +218,46 @@ public class ScreenCapturer : IDisposable
         }
     }
 
-    private SharpDX.Direct3D11.Texture2D GetFrameTexture(Direct3D11CaptureFrame frame)
+    private static SharpDX.Direct3D11.Texture2D GetFrameTexture(
+     Direct3D11CaptureFrame frame)
     {
-        var textureGuid = typeof(SharpDX.Direct3D11.Texture2D).GUID;
-        var surface = frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
-        var texturePointer = surface.GetInterface(ref textureGuid);
-        return new SharpDX.Direct3D11.Texture2D(texturePointer);
+        IDirect3DDxgiInterfaceAccess? surfaceAccess = null;
+
+        try
+        {
+            surfaceAccess =
+                frame.Surface.As<IDirect3DDxgiInterfaceAccess>();
+
+            var textureGuid =
+                typeof(SharpDX.Direct3D11.Texture2D).GUID;
+
+            IntPtr texturePointer =
+                surfaceAccess.GetInterface(ref textureGuid);
+
+            if (texturePointer == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "Failed to obtain DXGI texture from capture frame.");
+            }
+
+            // Texture2D приймає володіння COM-посиланням.
+            // Його звільнить using var texture у CaptureFrame().
+            return new SharpDX.Direct3D11.Texture2D(
+                texturePointer);
+        }
+        finally
+        {
+            if (surfaceAccess is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
+            else if (surfaceAccess != null &&
+                     Marshal.IsComObject(surfaceAccess))
+            {
+                Marshal.FinalReleaseComObject(
+                    surfaceAccess);
+            }
+        }
     }
 
     private void CopyFrameToManagedBuffer(Texture2DDescription description)
@@ -307,7 +356,7 @@ public class ScreenCapturer : IDisposable
 
             Marshal.QueryInterface(
                 sessionAbi,
-                ref session3Guid,
+                in session3Guid,
                 out var session3Pointer);
 
             if (session3Pointer == IntPtr.Zero)
@@ -351,16 +400,12 @@ public class ScreenCapturer : IDisposable
     // ...) Створення WinRT device
 
     // Створення GraphicsCaptureItem (...
-    private static GraphicsCaptureItem CreateCaptureItem()
+    private static GraphicsCaptureItem CreateCaptureItem(string captureTarget)
     {
-        var monitor = Screen.PrimaryScreen!;
-        var monitorHandle = MonitorFromPoint(
-                new POINT
-                {
-                    x = monitor.Bounds.Left + 1,
-                    y = monitor.Bounds.Top + 1
-                },
-                MONITOR_DEFAULTTONEAREST);
+        bool captureWindow = TryResolveWindowHandle(captureTarget, out var windowHandle);
+        var monitorHandle = captureWindow
+            ? IntPtr.Zero
+            : ResolveMonitorHandle(captureTarget);
 
         string className = "Windows.Graphics.Capture.GraphicsCaptureItem";
 
@@ -383,7 +428,9 @@ public class ScreenCapturer : IDisposable
             {
                 var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPointer);
                 var itemGuid = GraphicsCaptureItemGuid;
-                var itemPointer = interop.CreateForMonitor(monitorHandle, ref itemGuid);
+                var itemPointer = captureWindow
+                    ? interop.CreateForWindow(windowHandle, ref itemGuid)
+                    : interop.CreateForMonitor(monitorHandle, ref itemGuid);
 
                 try
                 {
@@ -408,7 +455,495 @@ public class ScreenCapturer : IDisposable
             WindowsDeleteString(hstring);
         }
     }
+
+    public static (int Width, int Height) GetTargetSize(string captureTarget)
+    {
+        if (TryResolveWindowHandle(captureTarget, out var windowHandle) &&
+            GetWindowRect(windowHandle, out var windowRect))
+        {
+            int width = Math.Max(1, windowRect.Right - windowRect.Left);
+            int height = Math.Max(1, windowRect.Bottom - windowRect.Top);
+            return (width, height);
+        }
+
+        var screen = ResolveScreen(captureTarget);
+        return (screen.Bounds.Width, screen.Bounds.Height);
+    }
+
+    private static IntPtr ResolveMonitorHandle(string captureTarget)
+    {
+        var monitor = ResolveScreen(captureTarget);
+        return MonitorFromPoint(
+            new POINT
+            {
+                x = monitor.Bounds.Left + 1,
+                y = monitor.Bounds.Top + 1
+            },
+            MONITOR_DEFAULTTONEAREST);
+    }
+
+    private static Screen ResolveScreen(string captureTarget)
+    {
+        if (captureTarget.StartsWith("Monitor|", StringComparison.Ordinal))
+        {
+            string deviceName = captureTarget["Monitor|".Length..];
+            var selected = Screen.AllScreens.FirstOrDefault(
+                screen => string.Equals(
+                    screen.DeviceName,
+                    deviceName,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (selected != null)
+                return selected;
+        }
+
+        return Screen.PrimaryScreen
+            ?? Screen.AllScreens.First();
+    }
+
+    private static bool TryResolveWindowHandle(
+        string captureTarget,
+        out IntPtr windowHandle)
+    {
+        windowHandle = IntPtr.Zero;
+        if (!captureTarget.StartsWith("Window|", StringComparison.Ordinal))
+            return false;
+
+        string[] parts = captureTarget.Split('|', 3);
+        if (parts.Length < 2 ||
+            !long.TryParse(
+                parts[1],
+                System.Globalization.NumberStyles.HexNumber,
+                null,
+                out long handleValue))
+        {
+            return false;
+        }
+
+        windowHandle = new IntPtr(handleValue);
+        return IsWindow(windowHandle);
+    }
     // ...) Створення GraphicsCaptureItem
+
+    public static Bitmap? CaptureScreenshot(
+    string captureTarget,
+    int timeoutMilliseconds = 2000)
+    {
+        SharpDX.Direct3D11.Device? d3dDevice = null;
+        IDirect3DDevice? winRtDevice = null;
+        GraphicsCaptureItem? captureItem = null;
+        Direct3D11CaptureFramePool? framePool = null;
+        GraphicsCaptureSession? session = null;
+
+        try
+        {
+            d3dDevice =
+                new SharpDX.Direct3D11.Device(
+                    SharpDX.Direct3D.DriverType.Hardware,
+                    DeviceCreationFlags.BgraSupport);
+
+            winRtDevice =
+                CreateDirect3DDevice(d3dDevice);
+
+            captureItem =
+                CreateCaptureItem(captureTarget);
+
+            if (captureItem.Size.Width <= 0 ||
+                captureItem.Size.Height <= 0)
+            {
+                return null;
+            }
+
+            framePool =
+                Direct3D11CaptureFramePool.CreateFreeThreaded(
+                    winRtDevice,
+                    DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                    1,
+                    captureItem.Size);
+
+            session =
+                framePool.CreateCaptureSession(
+                    captureItem);
+
+            session.IsCursorCaptureEnabled = false;
+
+            TryDisableYellowBorder(session);
+
+            session.StartCapture();
+
+            var stopwatch =
+                Stopwatch.StartNew();
+
+            while (stopwatch.ElapsedMilliseconds <
+                   timeoutMilliseconds)
+            {
+                using Direct3D11CaptureFrame? frame =
+                    framePool.TryGetNextFrame();
+
+                if (frame is null)
+                {
+                    Thread.Sleep(10);
+                    continue;
+                }
+
+                using SharpDX.Direct3D11.Texture2D texture =
+                    GetFrameTexture(frame);
+
+                int width = Math.Min(
+                    frame.ContentSize.Width,
+                    texture.Description.Width);
+
+                int height = Math.Min(
+                    frame.ContentSize.Height,
+                    texture.Description.Height);
+
+                if (width <= 0 || height <= 0)
+                {
+                    return null;
+                }
+
+                Bitmap bitmap = CopyTextureToBitmap(
+                    d3dDevice,
+                    texture,
+                    width,
+                    height);
+
+                return CropWindowToVisibleBounds(
+                 bitmap,
+                 captureTarget);
+            }
+
+            AppLogger.Error(
+                nameof(ScreenCapturer),
+                $"Screenshot capture timed out: {captureTarget}");
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(ScreenCapturer),
+                $"WGC screenshot failed: {ex}");
+
+            return null;
+        }
+        finally
+        {
+            try
+            {
+                session?.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                framePool?.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                winRtDevice?.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                d3dDevice?.Dispose();
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static Bitmap CropWindowToVisibleBounds(
+    Bitmap bitmap,
+    string captureTarget)
+    {
+        if (!TryResolveWindowHandle(
+                captureTarget,
+                out IntPtr windowHandle))
+        {
+            return bitmap;
+        }
+
+        if (!GetWindowRect(
+                windowHandle,
+                out RECT windowRectangle))
+        {
+            return bitmap;
+        }
+
+        RECT visibleRectangle =
+            windowRectangle;
+
+        DwmGetWindowAttribute(
+            windowHandle,
+            DwmwaExtendedFrameBounds,
+            out visibleRectangle,
+            Marshal.SizeOf<RECT>());
+
+        if (IsZoomed(windowHandle))
+        {
+            IntPtr monitorHandle =
+                MonitorFromWindow(
+                    windowHandle,
+                    MONITOR_DEFAULTTONEAREST);
+
+            var monitorInfo =
+                new MONITORINFO
+                {
+                    Size = Marshal.SizeOf<MONITORINFO>()
+                };
+
+            if (GetMonitorInfo(
+                    monitorHandle,
+                    ref monitorInfo))
+            {
+                visibleRectangle.Left = Math.Max(
+                    visibleRectangle.Left,
+                    monitorInfo.Monitor.Left);
+
+                visibleRectangle.Top = Math.Max(
+                    visibleRectangle.Top,
+                    monitorInfo.Monitor.Top);
+
+                visibleRectangle.Right = Math.Min(
+                    visibleRectangle.Right,
+                    monitorInfo.Monitor.Right);
+
+                visibleRectangle.Bottom = Math.Min(
+                    visibleRectangle.Bottom,
+                    monitorInfo.Monitor.Bottom);
+            }
+        }
+
+        int windowWidth =
+            windowRectangle.Right -
+            windowRectangle.Left;
+
+        int windowHeight =
+            windowRectangle.Bottom -
+            windowRectangle.Top;
+
+        int visibleWidth =
+            visibleRectangle.Right -
+            visibleRectangle.Left;
+
+        int visibleHeight =
+            visibleRectangle.Bottom -
+            visibleRectangle.Top;
+
+        if (windowWidth <= 0 ||
+            windowHeight <= 0 ||
+            visibleWidth <= 0 ||
+            visibleHeight <= 0)
+        {
+            return bitmap;
+        }
+
+        bool bitmapAlreadyVisible =
+            Math.Abs(bitmap.Width - visibleWidth) <= 2 &&
+            Math.Abs(bitmap.Height - visibleHeight) <= 2;
+
+        if (bitmapAlreadyVisible)
+        {
+            return bitmap;
+        }
+
+        bool bitmapMatchesWindow =
+            Math.Abs(bitmap.Width - windowWidth) <= 2 &&
+            Math.Abs(bitmap.Height - windowHeight) <= 2;
+
+        if (!bitmapMatchesWindow)
+        {
+            return bitmap;
+        }
+
+        double scaleX =
+            (double)bitmap.Width /
+            windowWidth;
+
+        double scaleY =
+            (double)bitmap.Height /
+            windowHeight;
+
+        int cropLeft =
+            (int)Math.Round(
+                (visibleRectangle.Left -
+                 windowRectangle.Left) *
+                scaleX);
+
+        int cropTop =
+            (int)Math.Round(
+                (visibleRectangle.Top -
+                 windowRectangle.Top) *
+                scaleY);
+
+        int cropWidth =
+            (int)Math.Round(
+                visibleWidth *
+                scaleX);
+
+        int cropHeight =
+            (int)Math.Round(
+                visibleHeight *
+                scaleY);
+
+        cropLeft = Math.Clamp(
+            cropLeft,
+            0,
+            bitmap.Width - 1);
+
+        cropTop = Math.Clamp(
+            cropTop,
+            0,
+            bitmap.Height - 1);
+
+        cropWidth = Math.Clamp(
+            cropWidth,
+            1,
+            bitmap.Width - cropLeft);
+
+        cropHeight = Math.Clamp(
+            cropHeight,
+            1,
+            bitmap.Height - cropTop);
+
+        if (cropLeft == 0 &&
+            cropTop == 0 &&
+            cropWidth == bitmap.Width &&
+            cropHeight == bitmap.Height)
+        {
+            return bitmap;
+        }
+
+        Bitmap croppedBitmap =
+            bitmap.Clone(
+                new Rectangle(
+                    cropLeft,
+                    cropTop,
+                    cropWidth,
+                    cropHeight),
+                PixelFormat.Format32bppArgb);
+
+        bitmap.Dispose();
+
+        return croppedBitmap;
+    }
+
+    private static Bitmap CopyTextureToBitmap(
+        SharpDX.Direct3D11.Device d3dDevice,
+        SharpDX.Direct3D11.Texture2D sourceTexture,
+        int width,
+        int height)
+    {
+        Texture2DDescription sourceDescription =
+            sourceTexture.Description;
+
+        using var stagingTexture =
+            new SharpDX.Direct3D11.Texture2D(
+                d3dDevice,
+                new Texture2DDescription
+                {
+                    Width = sourceDescription.Width,
+                    Height = sourceDescription.Height,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm,
+                    SampleDescription =
+                        new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    CpuAccessFlags = CpuAccessFlags.Read,
+                    BindFlags = BindFlags.None,
+                    OptionFlags = ResourceOptionFlags.None
+                });
+
+        d3dDevice.ImmediateContext.CopyResource(
+            sourceTexture,
+            stagingTexture);
+
+        DataBox mappedTexture =
+            d3dDevice.ImmediateContext.MapSubresource(
+                stagingTexture,
+                0,
+                MapMode.Read,
+                SharpDX.Direct3D11.MapFlags.None);
+
+        var bitmap =
+            new Bitmap(
+                width,
+                height,
+                PixelFormat.Format32bppArgb);
+
+        BitmapData? bitmapData = null;
+
+        try
+        {
+            bitmapData =
+                bitmap.LockBits(
+                    new Rectangle(
+                        0,
+                        0,
+                        width,
+                        height),
+                    ImageLockMode.WriteOnly,
+                    PixelFormat.Format32bppArgb);
+
+            int rowBytes = width * 4;
+            var rowBuffer = new byte[rowBytes];
+
+            for (int y = 0; y < height; y++)
+            {
+                IntPtr sourceRow =
+                    IntPtr.Add(
+                        mappedTexture.DataPointer,
+                        y * mappedTexture.RowPitch);
+
+                IntPtr destinationRow =
+                    IntPtr.Add(
+                        bitmapData.Scan0,
+                        y * bitmapData.Stride);
+
+                Marshal.Copy(
+                    sourceRow,
+                    rowBuffer,
+                    0,
+                    rowBytes);
+
+                Marshal.Copy(
+                    rowBuffer,
+                    0,
+                    destinationRow,
+                    rowBytes);
+            }
+
+            return bitmap;
+        }
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (bitmapData is not null)
+            {
+                bitmap.UnlockBits(bitmapData);
+            }
+
+            d3dDevice.ImmediateContext.UnmapSubresource(
+                stagingTexture,
+                0);
+        }
+    }
 
     // Завершення capture (...    
     public void Stop()
@@ -508,11 +1043,58 @@ public class ScreenCapturer : IDisposable
         POINT point,
         uint flags);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(
+        IntPtr windowHandle,
+        out RECT rectangle);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(
+    IntPtr windowHandle,
+    int attribute,
+    out RECT attributeValue,
+    int attributeSize);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(
+        IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(
+        IntPtr windowHandle,
+        uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(
+        IntPtr monitorHandle,
+        ref MONITORINFO monitorInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int Size;
+        public RECT Monitor;
+        public RECT WorkArea;
+        public uint Flags;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
     {
         public int x;
         public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
     }
     // ...) WinAPI
 }

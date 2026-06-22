@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using EventCapture.Core.Diagnostics;
+using System.IO;
 namespace EventCapture.App;
 
 // Зберігає і завантажує налаштування користувача.
@@ -9,12 +10,19 @@ public class AppSettings
     public int Fps { get; set; } = 60;
     public int BufferSeconds { get; set; } = 60;
     public string Resolution { get; set; } = "Native";
+    public bool BufferEnabled { get; set; } = true;
+    public string CaptureMode { get; set; } = "VideoAudio";
+    public string CaptureTarget { get; set; } = "PrimaryMonitor";
+    public int VideoQuality { get; set; } = 70;
 
     // Аудіо
     public bool RecordSystemAudio { get; set; }
     public bool RecordMicrophone { get; set; }
     public string? SystemAudioDeviceId { get; set; }
     public string? MicDeviceId { get; set; }
+    public int SystemAudioVolume { get; set; } = 100;
+    public int MicVolume { get; set; } = 100;
+    public bool ShowSystemInfo { get; set; }
 
     // Гарячі клавіші
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
@@ -30,10 +38,12 @@ public class AppSettings
 
 
     // Системні шляхи (...
-    private static readonly string _settingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Skadi",
-        "settings.json");
+    private static readonly string _settingsPath =
+        Environment.GetEnvironmentVariable("SKADI_SETTINGS_PATH") ??
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Skadi",
+            "settings.json");
 
     private static readonly string _appName = "Skadi";
     private static readonly string _appPath =
@@ -53,8 +63,10 @@ public class AppSettings
 
             var json = File.ReadAllText(_settingsPath);
 
-            return JsonSerializer.Deserialize<AppSettings>(json)
-                   ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(json)
+                           ?? new AppSettings();
+            settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
+            return settings;
         }
         catch (Exception ex)
         {
@@ -65,6 +77,15 @@ public class AppSettings
             return new AppSettings();
         }
     }
+
+    private static int NormalizeVideoQuality(int value)
+    {
+        int[] presets = { 50, 70, 90 };
+        return presets
+            .OrderBy(preset => Math.Abs(preset - value))
+            .First();
+    }
+
     public void Save()
     {
         try

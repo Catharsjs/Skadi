@@ -25,6 +25,8 @@ public class AudioRecorder : IDisposable
     private string _micTempPath = string.Empty;
     private readonly List<AudioSegment> _loopbackSegments = new();
     private readonly List<AudioSegment> _micSegments = new();
+    private double _systemGain = 1.0;
+    private double _microphoneGain = 1.0;
 
     public readonly List<string> LoopbackTempPaths = new();
     public event Action<string>? DefaultDeviceChanged;
@@ -32,6 +34,12 @@ public class AudioRecorder : IDisposable
     public bool IsRecordingMic { get; private set; }
     public bool UseDefaultSystemDevice { get; set; } = true;
     public bool UseDefaultMicDevice { get; set; } = true;
+
+    public void SetSystemVolume(double percent) =>
+        Volatile.Write(ref _systemGain, Math.Clamp(percent, 0, 100) / 100.0);
+
+    public void SetMicrophoneVolume(double percent) =>
+        Volatile.Write(ref _microphoneGain, Math.Clamp(percent, 0, 100) / 100.0);
 
     private sealed class AudioSegment
     {
@@ -41,6 +49,9 @@ public class AudioRecorder : IDisposable
         public long FirstFrameTimestamp { get; set; }
         public long FirstBufferDurationMs { get; set; }
         public string DeviceName { get; set; } = string.Empty;
+        public long TimelineStartTimestamp { get; set; }
+        public long LastPacketEndTimestamp { get; set; }
+        public long WrittenBytes { get; set; }
     }
 
     // Аудіо пристрої (...
@@ -171,24 +182,40 @@ public class AudioRecorder : IDisposable
 
             capture.DataAvailable += (_, e) =>
             {
+                if (e.BytesRecorded <= 0)
+                {
+                    return;
+                }
+
+                ApplyGain(
+                    e.Buffer,
+                    e.BytesRecorded,
+                    capture.WaveFormat,
+                    Volatile.Read(ref _systemGain));
+
                 lock (_loopbackLock)
                 {
-                    _loopbackWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+                    if (_loopbackWriter is null)
+                    {
+                        return;
+                    }
+
+                    WriteTimelineAudioPacket(
+                        _loopbackWriter,
+                        segment,
+                        capture.WaveFormat,
+                        e.Buffer,
+                        e.BytesRecorded,
+                        "System");
                 }
 
                 frameCount++;
 
-                if (frameCount == 1)
+                if (frameCount % 100 == 0)
                 {
-                    RegisterFirstAudioFrame(
-                        segment,
-                        capture.WaveFormat,
-                        e.BytesRecorded,
-                        "System");
-                }
-                else if (frameCount % 100 == 0)
-                {
-                    AppLogger.Debug($"System audio frame | Device={segment.DeviceName} | Frame={frameCount} | Bytes={e.BytesRecorded}");
+                    AppLogger.Debug(
+                        $"System audio frame | Device={segment.DeviceName} | " +
+                        $"Frame={frameCount} | Bytes={e.BytesRecorded}");
                 }
             };
 
@@ -226,11 +253,29 @@ public class AudioRecorder : IDisposable
             _loopbackCapture = null;
         }
 
+        AudioSegment? activeSegment;
+
+        lock (_segmentsLock)
+        {
+            activeSegment =
+                _loopbackSegments.LastOrDefault();
+        }
+
         lock (_loopbackLock)
         {
-            _loopbackWriter?.Flush();
-            _loopbackWriter?.Dispose();
-            _loopbackWriter = null;
+            if (_loopbackWriter is not null)
+            {
+                if (activeSegment is not null)
+                {
+                    AppendTrailingSilence(
+                        _loopbackWriter,
+                        activeSegment);
+                }
+
+                _loopbackWriter.Flush();
+                _loopbackWriter.Dispose();
+                _loopbackWriter = null;
+            }
         }
     }
     // ...) Захоплення системного аудіо
@@ -277,21 +322,34 @@ public class AudioRecorder : IDisposable
 
             capture.DataAvailable += (_, e) =>
             {
-                lock (_micLock)
+                if (e.BytesRecorded <= 0)
                 {
-                    _micWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+                    return;
                 }
 
-                frameCount++;
+                ApplyGain(
+                    e.Buffer,
+                    e.BytesRecorded,
+                    capture.WaveFormat,
+                    Volatile.Read(ref _microphoneGain));
 
-                if (frameCount == 1)
+                lock (_micLock)
                 {
-                    RegisterFirstAudioFrame(
+                    if (_micWriter is null)
+                    {
+                        return;
+                    }
+
+                    WriteTimelineAudioPacket(
+                        _micWriter,
                         segment,
                         capture.WaveFormat,
+                        e.Buffer,
                         e.BytesRecorded,
                         "Microphone");
                 }
+
+                frameCount++;
             };
 
             capture.StartRecording();
@@ -328,11 +386,29 @@ public class AudioRecorder : IDisposable
             _micCapture = null;
         }
 
+        AudioSegment? activeSegment;
+
+        lock (_segmentsLock)
+        {
+            activeSegment =
+                _micSegments.LastOrDefault();
+        }
+
         lock (_micLock)
         {
-            _micWriter?.Flush();
-            _micWriter?.Dispose();
-            _micWriter = null;
+            if (_micWriter is not null)
+            {
+                if (activeSegment is not null)
+                {
+                    AppendTrailingSilence(
+                        _micWriter,
+                        activeSegment);
+                }
+
+                _micWriter.Flush();
+                _micWriter.Dispose();
+                _micWriter = null;
+            }
         }
     }
     // ...) Захоплення мікрофона
@@ -375,6 +451,183 @@ public class AudioRecorder : IDisposable
             bytesRecorded *
             1000.0 /
             bytesPerSecond);
+    }
+
+    private void WriteTimelineAudioPacket(
+    WaveFileWriter writer,
+    AudioSegment segment,
+    WaveFormat format,
+    byte[] buffer,
+    int count,
+    string sourceName)
+    {
+        long packetEndTimestamp =
+            Environment.TickCount64;
+
+        long packetDurationMs =
+            CalculateBufferDurationMs(
+                format,
+                count);
+
+        long packetStartTimestamp =
+            packetEndTimestamp -
+            packetDurationMs;
+
+        if (segment.FirstFrameTimestamp == 0)
+        {
+            segment.TimelineStartTimestamp =
+                packetStartTimestamp;
+
+            RegisterFirstAudioFrame(
+                segment,
+                format,
+                count,
+                sourceName);
+        }
+        else
+        {
+            long expectedStartMs =
+                packetStartTimestamp -
+                segment.TimelineStartTimestamp;
+
+            long writtenDurationMs =
+                CalculateWrittenDurationMs(
+                    segment,
+                    format);
+
+            long missingDurationMs =
+                expectedStartMs -
+                writtenDurationMs;
+
+            if (missingDurationMs >= 100)
+            {
+                segment.WrittenBytes +=
+                    WriteSilence(
+                        writer,
+                        format,
+                        missingDurationMs);
+            }
+        }
+
+        writer.Write(
+            buffer,
+            0,
+            count);
+
+        segment.WrittenBytes += count;
+        segment.LastPacketEndTimestamp =
+            packetEndTimestamp;
+    }
+
+    private static long CalculateWrittenDurationMs(
+        AudioSegment segment,
+        WaveFormat format)
+    {
+        if (format.AverageBytesPerSecond <= 0)
+        {
+            return 0;
+        }
+
+        return segment.WrittenBytes *
+               1000 /
+               format.AverageBytesPerSecond;
+    }
+
+    private static long WriteSilence(
+        WaveFileWriter writer,
+        WaveFormat format,
+        long durationMilliseconds)
+    {
+        if (durationMilliseconds <= 0 ||
+            format.AverageBytesPerSecond <= 0)
+        {
+            return 0;
+        }
+
+        long byteCount =
+            durationMilliseconds *
+            format.AverageBytesPerSecond /
+            1000;
+
+        int blockAlign =
+            Math.Max(
+                1,
+                format.BlockAlign);
+
+        byteCount -=
+            byteCount % blockAlign;
+
+        if (byteCount <= 0)
+        {
+            return 0;
+        }
+
+        long writtenBytes = 0;
+
+        var silenceBuffer =
+            new byte[64 * 1024];
+
+        while (byteCount > 0)
+        {
+            int count =
+                (int)Math.Min(
+                    byteCount,
+                    silenceBuffer.Length);
+
+            count -= count % blockAlign;
+
+            if (count <= 0)
+            {
+                break;
+            }
+
+            writer.Write(
+                silenceBuffer,
+                0,
+                count);
+
+            byteCount -= count;
+            writtenBytes += count;
+        }
+
+        return writtenBytes;
+    }
+
+    private static void AppendTrailingSilence(
+        WaveFileWriter writer,
+        AudioSegment segment)
+    {
+        if (segment.TimelineStartTimestamp <= 0)
+        {
+            return;
+        }
+
+        WaveFormat format =
+            writer.WaveFormat;
+
+        long expectedDurationMs =
+            Environment.TickCount64 -
+            segment.TimelineStartTimestamp;
+
+        long writtenDurationMs =
+            CalculateWrittenDurationMs(
+                segment,
+                format);
+
+        long missingDurationMs =
+            expectedDurationMs -
+            writtenDurationMs;
+
+        if (missingDurationMs < 100)
+        {
+            return;
+        }
+
+        segment.WrittenBytes +=
+            WriteSilence(
+                writer,
+                format,
+                missingDurationMs);
     }
 
     private static long CalculateAudioFileStartRelativeToVideoMs(
@@ -433,12 +686,12 @@ public class AudioRecorder : IDisposable
         long videoElapsedMs,
         long videoStartTimestamp)
     {
-        var existingSystemSegments = GetValidSystemSegmentsSnapshot();
-        var existingMicSegments = GetValidMicSegmentsSnapshot();
-
         StopCapture();
 
         await Task.Delay(300);
+
+        var existingSystemSegments = GetValidSystemSegmentsSnapshot();
+        var existingMicSegments = GetValidMicSegmentsSnapshot();
 
         if (existingSystemSegments.Count == 0 &&
             existingMicSegments.Count == 0)
@@ -471,19 +724,24 @@ public class AudioRecorder : IDisposable
             trimmedAudio);
 
         if (trimmedAudio.Count == 0)
+        {
+            CleanupAfterSave(existingSystemSegments, existingMicSegments, trimmedAudio);
             return null;
+        }
 
-        string outputPath =
-            await MergeAudioWithVideoAsync(
+        string outputPath;
+        try
+        {
+            outputPath = await MergeAudioWithVideoAsync(
                 ffmpegPath,
                 outputFolder,
                 videoPath,
                 trimmedAudio);
-
-        CleanupAfterSave(
-            existingSystemSegments,
-            existingMicSegments,
-            trimmedAudio);
+        }
+        finally
+        {
+            CleanupAfterSave(existingSystemSegments, existingMicSegments, trimmedAudio);
+        }
 
         if (!File.Exists(outputPath) ||
             new FileInfo(outputPath).Length == 0)
@@ -492,6 +750,70 @@ public class AudioRecorder : IDisposable
         }
 
         return outputPath;
+    }
+
+    public async Task<string?> SaveAudioLastSecondsAsMp3Async(
+        string outputFolder,
+        int seconds)
+    {
+        long endTimestamp = Environment.TickCount64;
+        long elapsedMs = Math.Max(
+            1,
+            endTimestamp - _sharedStartTimestamp);
+
+        long durationMs = Math.Min(
+            elapsedMs,
+            Math.Max(1, seconds) * 1000L);
+
+        double durationSeconds =
+            durationMs / 1000.0;
+
+        long segmentStartOffsetMs = Math.Max(
+            0,
+            elapsedMs - durationMs);
+
+        StopCapture();
+
+        await Task.Delay(300);
+
+        var existingSystemSegments =
+            GetValidSystemSegmentsSnapshot();
+
+        var existingMicSegments =
+            GetValidMicSegmentsSnapshot();
+
+        if (existingSystemSegments.Count == 0 && existingMicSegments.Count == 0)
+            return null;
+
+        var ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
+        var trimmedAudio = new List<string>();
+
+        await TrimSegmentsAsync(
+            ffmpegPath, existingSystemSegments, _sharedStartTimestamp,
+            durationSeconds, durationMs, segmentStartOffsetMs, trimmedAudio);
+        await TrimSegmentsAsync(
+            ffmpegPath, existingMicSegments, _sharedStartTimestamp,
+            durationSeconds, durationMs, segmentStartOffsetMs, trimmedAudio);
+
+        if (trimmedAudio.Count == 0)
+        {
+            CleanupAfterSave(existingSystemSegments, existingMicSegments, trimmedAudio);
+            return null;
+        }
+
+        string outputPath;
+        try
+        {
+            outputPath = await MergeAudioToMp3Async(
+                ffmpegPath, outputFolder, trimmedAudio);
+        }
+        finally
+        {
+            CleanupAfterSave(existingSystemSegments, existingMicSegments, trimmedAudio);
+        }
+        return File.Exists(outputPath) && new FileInfo(outputPath).Length > 0
+            ? outputPath
+            : null;
     }
 
     private List<AudioSegment> GetValidSystemSegmentsSnapshot()
@@ -589,6 +911,84 @@ public class AudioRecorder : IDisposable
             AppLogger.Error(nameof(AudioRecorder), $"FFmpeg merge failed: {error}");
         }
         return outputPath;
+    }
+
+    private static async Task<string> MergeAudioToMp3Async(
+        string ffmpegPath,
+        string outputFolder,
+        IReadOnlyList<string> trimmedAudio)
+    {
+        Directory.CreateDirectory(outputFolder);
+        string outputPath = Path.Combine(
+            outputFolder,
+            DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + "_" +
+            Guid.NewGuid().ToString("N")[..8] + "_audio.mp3");
+
+        string inputs = string.Join(" ", trimmedAudio.Select(path => $"-i \"{path}\""));
+        string filter = trimmedAudio.Count > 1
+            ? $"-filter_complex \"amix=inputs={trimmedAudio.Count}:duration=longest:dropout_transition=0\" "
+            : string.Empty;
+        string arguments =
+            $"-y {inputs} {filter}-c:a libmp3lame -b:a 192k \"{outputPath}\"";
+
+        using var process = CreateFFmpegProcess(ffmpegPath, arguments, redirectOutput: false);
+        process.Start();
+        string error = await process.StandardError.ReadToEndAsync();
+        await Task.Run(() => process.WaitForExit(30000));
+
+        if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
+            AppLogger.Error(nameof(AudioRecorder), $"MP3 export failed: {error}");
+        return outputPath;
+    }
+
+    private static void ApplyGain(byte[] buffer, int count, WaveFormat format, double gain)
+    {
+        if (gain >= 0.9999) return;
+
+        if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+        {
+            for (int offset = 0; offset + 4 <= count; offset += 4)
+            {
+                float sample = BitConverter.ToSingle(buffer, offset);
+                BitConverter.TryWriteBytes(buffer.AsSpan(offset, 4), (float)Math.Clamp(sample * gain, -1.0, 1.0));
+            }
+            return;
+        }
+
+        if (format.BitsPerSample == 16)
+        {
+            for (int offset = 0; offset + 2 <= count; offset += 2)
+            {
+                short sample = BitConverter.ToInt16(buffer, offset);
+                short scaled = (short)Math.Clamp((int)Math.Round(sample * gain), short.MinValue, short.MaxValue);
+                BitConverter.TryWriteBytes(buffer.AsSpan(offset, 2), scaled);
+            }
+            return;
+        }
+
+        if (format.BitsPerSample == 24)
+        {
+            for (int offset = 0; offset + 3 <= count; offset += 3)
+            {
+                int sample = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+                if ((sample & 0x800000) != 0) sample |= unchecked((int)0xFF000000);
+                int scaled = Math.Clamp((int)Math.Round(sample * gain), -8_388_608, 8_388_607);
+                buffer[offset] = (byte)scaled;
+                buffer[offset + 1] = (byte)(scaled >> 8);
+                buffer[offset + 2] = (byte)(scaled >> 16);
+            }
+            return;
+        }
+
+        if (format.BitsPerSample == 32)
+        {
+            for (int offset = 0; offset + 4 <= count; offset += 4)
+            {
+                int sample = BitConverter.ToInt32(buffer, offset);
+                int scaled = (int)Math.Clamp(Math.Round(sample * gain), int.MinValue, int.MaxValue);
+                BitConverter.TryWriteBytes(buffer.AsSpan(offset, 4), scaled);
+            }
+        }
     }
 
     private void CleanupAfterSave(

@@ -66,7 +66,9 @@ public class VideoEncoder : IDisposable
         StartTimestamp = Environment.TickCount64;
         RecordingStartTime = DateTime.Now;
         _isRunning = true;
-        AppLogger.Info($"Video encoder started {_width}x{_height} {_fps}fps");
+        AppLogger.Info(
+            $"Video encoder started {_width}x{_height} {_fps}fps " +
+            $"{_bitrate / 1000}kbps");
     }
 
     private void ConfigureOutputMediaType()
@@ -137,7 +139,10 @@ public class VideoEncoder : IDisposable
     // ...) Ініціалізація Media Foundation encoder
 
     // Запис кадрів (...    
-    public void WriteFrame(byte[] bgraData)
+    public void WriteFrame(
+        byte[] bgraData,
+        int sourceWidth,
+        int sourceHeight)
     {
         if (!_isRunning || _sinkWriter == null)
             return;
@@ -146,7 +151,10 @@ public class VideoEncoder : IDisposable
         {
             try
             {
-                byte[] frameData = EnsureFrameMatchesEncoderSize(bgraData);
+                byte[] frameData = EnsureFrameMatchesEncoderSize(
+                    bgraData,
+                    sourceWidth,
+                    sourceHeight);
 
                 using var buffer = MediaFactory.CreateMemoryBuffer(frameData.Length);
                 var dataPointer = buffer.Lock(out _, out _);
@@ -171,23 +179,33 @@ public class VideoEncoder : IDisposable
         }
     }
 
-    private byte[] EnsureFrameMatchesEncoderSize(byte[] source)
+    private byte[] EnsureFrameMatchesEncoderSize(
+        byte[] source,
+        int sourceWidth,
+        int sourceHeight)
     {
         int expectedSize = _width * _height * 4;
 
-        if (source.Length == expectedSize)
+        if (sourceWidth == _width &&
+            sourceHeight == _height &&
+            source.Length == expectedSize)
             return source;
 
-        int nativeWidth = Screen.PrimaryScreen!.Bounds.Width;
-        int nativeHeight = Screen.PrimaryScreen!.Bounds.Height;
+        int sourceSize = sourceWidth * sourceHeight * 4;
+        if (source.Length != sourceSize)
+        {
+            throw new ArgumentException(
+                $"Unexpected frame size. Expected {sourceSize} bytes, got {source.Length}.",
+                nameof(source));
+        }
 
         using var sourceBitmap = new Bitmap(
-            nativeWidth,
-            nativeHeight,
+            sourceWidth,
+            sourceHeight,
             PixelFormat.Format32bppArgb);
 
         var sourceData = sourceBitmap.LockBits(
-            new Rectangle(0, 0, nativeWidth, nativeHeight),
+            new Rectangle(0, 0, sourceWidth, sourceHeight),
             ImageLockMode.WriteOnly,
             PixelFormat.Format32bppArgb);
 
@@ -212,7 +230,7 @@ public class VideoEncoder : IDisposable
             graphics.DrawImage(
                 sourceBitmap,
                 new Rectangle(0, 0, _width, _height),
-                new Rectangle(0, 0, nativeWidth, nativeHeight),
+                new Rectangle(0, 0, sourceWidth, sourceHeight),
                 GraphicsUnit.Pixel);
         }
 
