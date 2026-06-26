@@ -205,6 +205,11 @@ In progress / planned:
 - automated UI tests;
 - optional overlay refinements.
 
+## Screenshots
+
+![Skadi Basic Settings](docs/screenshots/basicsettings.png)
+![Skadi Advanced Settings](docs/screenshots/advancedsettings.png)
+
 ## Notes
 
 Some windows may not be capturable because of OS-level protection, DRM, elevated-process isolation, or application-specific rendering behavior. Skadi handles unavailable targets as gracefully as possible, but capture availability ultimately depends on Windows Graphics Capture and the target application.
