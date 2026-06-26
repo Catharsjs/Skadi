@@ -240,20 +240,23 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         bool wantsVideo = _settings.CaptureMode != "Audio";
         bool wantsAudio = _settings.CaptureMode != "Video";
         long sharedTimestamp = Environment.TickCount64;
+        int effectiveFps = _settings.Fps;
+        int videoBitrate = 0;
 
         if (wantsVideo)
         {
             var (width, height) = ResolveResolution(_settings);
-            int bitrate = CalculateVideoBitrateKbps(
+            effectiveFps = ResolveEffectiveFrameRate(_settings);
+            videoBitrate = CalculateVideoBitrateKbps(
                 width,
                 height,
-                _settings.Fps,
+                effectiveFps,
                 _settings.VideoQuality);
             _videoPipeline = new GpuCapturePipeline(
-                _settings.Fps,
+                effectiveFps,
                 width,
                 height,
-                bitrate,
+                videoBitrate,
                 _settings.BufferSeconds,
                 _settings.CaptureTarget);
             _videoPipeline.Start();
@@ -275,7 +278,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
         AppLogger.Info(
             $"Native GPU pipeline started | Mode={_settings.CaptureMode} | " +
-            $"Target={_settings.CaptureTarget} | FPS={_settings.Fps}");
+            $"Target={_settings.CaptureTarget} | FPS={effectiveFps} | Bitrate={videoBitrate}kbps");
     }
 
     private ScreenshotSaver CreateScreenshotSaver(AppSettings settings)
@@ -298,16 +301,52 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         };
     }
 
+    private static int ResolveEffectiveFrameRate(AppSettings settings)
+    {
+        int requestedFps = Math.Clamp(settings.Fps, 1, 240);
+        int refreshRate = Math.Clamp(
+            ScreenCapturer.GetTargetRefreshRate(settings.CaptureTarget),
+            1,
+            240);
+
+        int effectiveFps = Math.Min(requestedFps, refreshRate);
+
+        if (effectiveFps != requestedFps)
+        {
+            AppLogger.Info(
+                $"Frame rate clamped | Requested={requestedFps} | " +
+                $"RefreshRate={refreshRate} | Effective={effectiveFps}");
+        }
+
+        return effectiveFps;
+    }
+
     private static int CalculateVideoBitrateKbps(
         int width,
         int height,
         int fps,
         int quality)
     {
-        long pixelRate = (long)width * height * fps;
-        int baseRate = (int)Math.Clamp(pixelRate * 0.10 / 1000.0, 4_000, 50_000);
-        double multiplier = quality switch { <= 50 => .50, <= 70 => .70, _ => .90 };
-        return Math.Max(1_500, (int)Math.Round(baseRate * multiplier));
+        const double referencePixels = 1920.0 * 1080.0;
+        double resolutionScale = Math.Max(0.5, (width * height) / referencePixels);
+        double fpsScale = Math.Sqrt(Math.Clamp(fps, 1, 240) / 60.0);
+
+        int referenceKbps = quality switch
+        {
+            <= 50 => 8_000,
+            <= 70 => 14_000,
+            _ => 22_000
+        };
+
+        int bitrate = (int)Math.Round(referenceKbps * resolutionScale * fpsScale);
+        int cap = quality switch
+        {
+            <= 50 => 45_000,
+            <= 70 => 70_000,
+            _ => 95_000
+        };
+
+        return Math.Clamp(bitrate, 4_000, cap);
     }
 
     private void StopPipelineCore()

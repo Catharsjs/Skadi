@@ -442,13 +442,20 @@ public sealed class AudioRecorder : IDisposable
             $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_recording.mp4");
         long offsetMilliseconds = audioStartTimestamp - videoStartTimestamp;
         double duration = Math.Max(0.001, (videoEndTimestamp - videoStartTimestamp) / 1000.0);
-        string audioInput = offsetMilliseconds >= 0
-            ? $"-itsoffset {FormatSeconds(offsetMilliseconds / 1000.0)} -i \"{audioPath}\""
-            : $"-ss {FormatSeconds(-offsetMilliseconds / 1000.0)} -i \"{audioPath}\"";
+        string audioFilter = offsetMilliseconds >= 0
+            ? $"[1:a]adelay={offsetMilliseconds}:all=1,apad[a]"
+            : $"[1:a]atrim=start={FormatSeconds(-offsetMilliseconds / 1000.0)},asetpts=PTS-STARTPTS,apad[a]";
         string arguments =
-            $"-y -i \"{videoPath}\" {audioInput} " +
-            "-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k " +
-            $"-af apad -t {FormatSeconds(duration)} -movflags +faststart \"{outputPath}\"";
+            $"-y -i \"{videoPath}\" -i \"{audioPath}\" " +
+            $"-filter_complex \"{audioFilter}\" " +
+            "-map 0:v:0 -map \"[a]\" -c:v copy -c:a aac -b:a 192k " +
+            $"-t {FormatSeconds(duration)} -movflags +faststart \"{outputPath}\"";
+
+        AppLogger.Info(
+            $"Continuous merge diagnostics | VideoStart={videoStartTimestamp} | " +
+            $"VideoEnd={videoEndTimestamp} | AudioStart={audioStartTimestamp} | " +
+            $"OffsetMs={offsetMilliseconds} | DurationSec={FormatSeconds(duration)}");
+
         await RunFfmpegAsync(arguments, "Continuous audio/video merge");
         return outputPath;
     }

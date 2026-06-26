@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using EventCapture.Core.Diagnostics;
 using Microsoft.Win32.SafeHandles;
 
 namespace EventCapture.Core.Capture;
@@ -71,9 +72,10 @@ public sealed class GpuCapturePipeline : IDisposable
         string outputPath = Path.Combine(
             outputFolder,
             $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}.mp4");
+        double exportFps = CalculateExportFps(export);
         try
         {
-            await RemuxH264Async(rawPath, outputPath, _fps);
+            await RemuxH264Async(rawPath, outputPath, exportFps);
         }
         finally
         {
@@ -84,6 +86,13 @@ public sealed class GpuCapturePipeline : IDisposable
         long elapsedMilliseconds = Math.Max(
             1,
             (export.EndTimestamp100ns - export.StartTimestamp100ns) / 10_000);
+
+        LogExportDiagnostics(
+            "Replay",
+            export,
+            exportFps,
+            outputPath);
+
         return (outputPath, elapsedMilliseconds, _startTimestamp + startMilliseconds);
     }
 
@@ -111,14 +120,21 @@ public sealed class GpuCapturePipeline : IDisposable
         string outputPath = Path.Combine(
             outputFolder,
             $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_video.mp4");
+        double exportFps = CalculateExportFps(export);
         try
         {
-            await RemuxH264Async(rawPath, outputPath, _fps);
+            await RemuxH264Async(rawPath, outputPath, exportFps);
         }
         finally
         {
             TryDelete(rawPath);
         }
+
+        LogExportDiagnostics(
+            "Continuous",
+            export,
+            exportFps,
+            outputPath);
 
         return new ContinuousVideoResult(
             outputPath,
@@ -159,11 +175,52 @@ public sealed class GpuCapturePipeline : IDisposable
         TryDeleteDirectory(_sessionDirectory);
     }
 
-    private static async Task RemuxH264Async(string inputPath, string outputPath, int fps)
+    private double CalculateExportFps(NativeExportResult export)
+    {
+        long elapsed100ns = export.EndTimestamp100ns - export.StartTimestamp100ns;
+        if (elapsed100ns <= 0 || export.FrameCount == 0)
+            return _fps;
+
+        double elapsedSeconds = elapsed100ns / 10_000_000.0;
+        double actualFps = export.FrameCount / elapsedSeconds;
+        return Math.Clamp(actualFps, 1.0, _fps);
+    }
+
+    private void LogExportDiagnostics(
+        string exportKind,
+        NativeExportResult export,
+        double remuxFps,
+        string outputPath)
+    {
+        long elapsed100ns = export.EndTimestamp100ns - export.StartTimestamp100ns;
+        double elapsedSeconds = Math.Max(0, elapsed100ns / 10_000_000.0);
+        double actualFps = elapsedSeconds > 0 ? export.FrameCount / elapsedSeconds : 0;
+        long outputBytes = 0;
+
+        try
+        {
+            if (File.Exists(outputPath))
+                outputBytes = new FileInfo(outputPath).Length;
+        }
+        catch
+        {
+        }
+
+        AppLogger.Info(
+            $"Video export diagnostics | Kind={exportKind} | " +
+            $"ConfiguredFps={_fps} | RemuxFps={remuxFps.ToString("0.###", CultureInfo.InvariantCulture)} | " +
+            $"FrameCount={export.FrameCount} | DurationSec={elapsedSeconds.ToString("0.###", CultureInfo.InvariantCulture)} | " +
+            $"ActualFps={actualFps.ToString("0.###", CultureInfo.InvariantCulture)} | " +
+            $"Start100ns={export.StartTimestamp100ns} | End100ns={export.EndTimestamp100ns} | " +
+            $"OutputBytes={outputBytes}");
+    }
+
+    private static async Task RemuxH264Async(string inputPath, string outputPath, double fps)
     {
         string ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
+        string fpsText = fps.ToString("0.###", CultureInfo.InvariantCulture);
         string arguments =
-            $"-y -hide_banner -loglevel error -fflags +genpts -r {fps} " +
+            $"-y -hide_banner -loglevel error -fflags +genpts -r {fpsText} " +
             $"-i \"{inputPath}\" -c:v copy -movflags +faststart \"{outputPath}\"";
         using var process = new Process
         {

@@ -222,6 +222,9 @@ namespace EventCaptureNative
                 CreateCapture();
                 startupStage_ = L"H.264 encoder creation";
                 CreateEncoder();
+                encodeClockStart_ = std::chrono::steady_clock::now();
+                lastPacketTimestamp100ns_ = -1;
+                submittedFrames_.store(0);
                 running_ = true;
                 captureSession_.StartCapture();
                 encoderThread_ = std::thread([this] { EncodeLoop(); });
@@ -740,6 +743,14 @@ namespace EventCaptureNative
         void AddPacket(EncodedFrame frame)
         {
             std::scoped_lock lock(packetMutex_);
+            int64_t timestamp = CurrentTimestamp100ns();
+            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_) timestamp = lastPacketTimestamp100ns_ + 1;
+            frame.duration100ns = lastPacketTimestamp100ns_ >= 0
+                ? std::max<int64_t>(1, timestamp - lastPacketTimestamp100ns_)
+                : TicksPerSecond / config_.framesPerSecond;
+            frame.timestamp100ns = timestamp;
+            lastPacketTimestamp100ns_ = timestamp;
+
             const uint64_t size = frame.bytes.size();
             if (activeSpool_ == nullptr || (frame.keyFrame && activeSpoolFrameCount_ > 0)) RotateSpoolFile();
             const std::streampos position = activeSpoolStream_.tellp();
@@ -787,6 +798,12 @@ namespace EventCaptureNative
             }
             packets_.back().bytes.clear();
             packets_.back().bytes.shrink_to_fit();
+        }
+
+        int64_t CurrentTimestamp100ns() const
+        {
+            const auto elapsed = std::chrono::steady_clock::now() - encodeClockStart_;
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 100;
         }
 
         void RotateSpoolFile()
@@ -952,7 +969,9 @@ namespace EventCaptureNative
         bool recording_{ false };
         int64_t recordingStart100ns_{};
         int64_t recordingEnd100ns_{};
+        int64_t lastPacketTimestamp100ns_{ -1 };
         uint64_t recordingFrameCount_{};
+        std::chrono::steady_clock::time_point encodeClockStart_{};
 
         std::atomic_uint64_t capturedFrames_{};
         std::atomic_uint64_t submittedFrames_{};

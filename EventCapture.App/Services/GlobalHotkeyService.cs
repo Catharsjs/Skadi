@@ -31,7 +31,7 @@ public sealed class GlobalHotkeyService : IDisposable
         _source.AddHook(WndProc);
     }
 
-    public void RegisterAll(
+    public IReadOnlyList<int> RegisterAll(
         string screenshot,
         string record,
         string startStopRecord,
@@ -39,12 +39,19 @@ public sealed class GlobalHotkeyService : IDisposable
     {
         UnregisterAll();
 
-        Register(ScreenshotId, screenshot);
-        Register(SaveRecordId, record);
-        Register(StartStopRecordId, startStopRecord);
-        Register(ToggleUiId, toggleUi);
+        List<int> rejected = [];
+
+        if (!Register(ScreenshotId, screenshot))
+            rejected.Add(ScreenshotId);
+        if (!Register(SaveRecordId, record))
+            rejected.Add(SaveRecordId);
+        if (!Register(StartStopRecordId, startStopRecord))
+            rejected.Add(StartStopRecordId);
+        if (!Register(ToggleUiId, toggleUi))
+            rejected.Add(ToggleUiId);
 
         _registered = true;
+        return rejected;
     }
 
     public void UnregisterAll()
@@ -60,18 +67,26 @@ public sealed class GlobalHotkeyService : IDisposable
         _registered = false;
     }
 
-    private void Register(int id, string hotkey)
+    private bool Register(int id, string hotkey)
     {
         if (string.IsNullOrWhiteSpace(hotkey))
-            return;
+            return true;
 
-        var (modifiers, virtualKey) = Parse(hotkey);
-
-        if (!RegisterHotKey(_handle, id, modifiers, virtualKey))
+        try
         {
-            AppLogger.Error(
-                nameof(GlobalHotkeyService),
-                $"Could not register hotkey: {hotkey}");
+            var (modifiers, virtualKey) = Parse(hotkey);
+
+            if (RegisterHotKey(_handle, id, modifiers, virtualKey))
+                return true;
+
+            int error = Marshal.GetLastWin32Error();
+            AppLogger.Error(nameof(GlobalHotkeyService), $"Could not register hotkey: {hotkey} | Win32={error}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(GlobalHotkeyService), $"Invalid hotkey: {hotkey} | {ex.Message}");
+            return false;
         }
     }
 
@@ -122,18 +137,13 @@ public sealed class GlobalHotkeyService : IDisposable
                     break;
 
                 default:
-                    if (!Enum.TryParse(rawPart, true, out key))
+                    if (rawPart.Length == 1 && char.IsDigit(rawPart[0]))
                     {
-                        if (rawPart.Length == 1 &&
-                            char.IsDigit(rawPart[0]))
-                        {
-                            key = (Key)((int)Key.D0 + (rawPart[0] - '0'));
-                        }
-                        else
-                        {
-                            throw new FormatException(
-                                $"Unsupported hotkey: {hotkey}");
-                        }
+                        key = (Key)((int)Key.D0 + (rawPart[0] - '0'));
+                    }
+                    else if (!Enum.TryParse(rawPart, true, out key))
+                    {
+                        throw new FormatException($"Unsupported hotkey: {hotkey}");
                     }
 
                     break;

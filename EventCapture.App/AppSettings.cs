@@ -10,7 +10,7 @@ public class AppSettings
     public int Fps { get; set; } = 60;
     public int BufferSeconds { get; set; } = 60;
     public string Resolution { get; set; } = "Native";
-    public bool BufferEnabled { get; set; } = true;
+    public bool BufferEnabled { get; set; }
     public string CaptureMode { get; set; } = "VideoAudio";
     public string CaptureTarget { get; set; } = "PrimaryMonitor";
     public int VideoQuality { get; set; } = 70;
@@ -26,8 +26,8 @@ public class AppSettings
 
     // Гарячі клавіші
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
-    public string HotkeySaveVideo { get; set; } = "Alt+F2";
-    public string HotkeyStartStopRecord { get; set; } = "Alt+F3";
+    public string HotkeySaveVideo { get; set; } = "Alt+F3";
+    public string HotkeyStartStopRecord { get; set; } = "Alt+F2";
     public string HotkeyToggleUI { get; set; } = "Alt+Z";
 
 
@@ -90,6 +90,13 @@ public class AppSettings
 
     private void NormalizeHotkeys()
     {
+        if (string.Equals(HotkeySaveVideo, "Alt+F2", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(HotkeyStartStopRecord, "Alt+F3", StringComparison.OrdinalIgnoreCase))
+        {
+            HotkeySaveVideo = "Alt+F3";
+            HotkeyStartStopRecord = "Alt+F2";
+        }
+
         if (string.Equals(HotkeyToggleUI, "Alt+F3", StringComparison.OrdinalIgnoreCase))
         {
             HotkeyToggleUI = "Alt+Z";

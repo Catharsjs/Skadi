@@ -140,6 +140,101 @@
         </Setter>
     </Style>
 
+    <Style x:Key="BufferToggleButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource TextOnAccentBrush}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Border"
+                            Background="{StaticResource AccentBrush}"
+                            BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                        <TextBlock x:Name="ButtonText"
+                                   Text="{TemplateBinding Content}"
+                                   Foreground="{StaticResource TextOnAccentBrush}"
+                                   FontFamily="{TemplateBinding FontFamily}"
+                                   FontSize="{TemplateBinding FontSize}"
+                                   FontWeight="{TemplateBinding FontWeight}"
+                                   HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                   VerticalAlignment="Center"
+                                   Margin="{TemplateBinding Padding}"/>
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <DataTrigger Binding="{Binding BufferEnabled}" Value="True">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DangerBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource DangerBrush}"/>
+                            <Setter TargetName="ButtonText" Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+                        </DataTrigger>
+
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.88"/>
+                        </Trigger>
+
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.72"/>
+                        </Trigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="ButtonText" Property="Foreground" Value="{StaticResource DisabledTextBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ReplayButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource TextOnAccentBrush}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Border"
+                            Background="{StaticResource AccentBrush}"
+                            BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                        <TextBlock x:Name="ButtonText"
+                                   Text="{TemplateBinding Content}"
+                                   Foreground="{StaticResource TextOnAccentBrush}"
+                                   FontFamily="{TemplateBinding FontFamily}"
+                                   FontSize="{TemplateBinding FontSize}"
+                                   FontWeight="{TemplateBinding FontWeight}"
+                                   HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                   VerticalAlignment="Center"
+                                   Margin="{TemplateBinding Padding}"/>
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.88"/>
+                        </Trigger>
+
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.72"/>
+                        </Trigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource SurfaceBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="ButtonText" Property="Foreground" Value="{StaticResource DisabledTextBrush}"/>
+                            <Setter TargetName="ButtonText" Property="FontWeight" Value="SemiBold"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style x:Key="ArrowButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
         <Setter Property="Width" Value="38" />
         <Setter Property="Height" Value="32" />
@@ -475,6 +570,34 @@
                                 <RepeatButton Height="6" Background="{StaticResource DisabledSurfaceBrush}" BorderThickness="0" Command="Slider.IncreaseLarge" />
                             </Track.IncreaseRepeatButton>
                         </Track>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="AudioLevelMeterStyle" TargetType="ProgressBar">
+        <Setter Property="Height" Value="5" />
+        <Setter Property="Minimum" Value="0" />
+        <Setter Property="Maximum" Value="100" />
+        <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Background" Value="{StaticResource DisabledSurfaceBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ProgressBar">
+                    <Grid Height="{TemplateBinding Height}"
+                          Background="Transparent"
+                          ClipToBounds="True">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="2"/>
+
+                        <Grid x:Name="PART_Track">
+                            <Border x:Name="PART_Indicator"
+                                    HorizontalAlignment="Left"
+                                    Background="{TemplateBinding Foreground}"
+                                    CornerRadius="2"/>
+                        </Grid>
                     </Grid>
                 </ControlTemplate>
             </Setter.Value>

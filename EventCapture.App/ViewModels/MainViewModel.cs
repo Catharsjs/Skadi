@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows.Input;
+using System.Windows.Threading;
 using EventCapture.App.Infrastructure;
 using EventCapture.App.Models;
 using EventCapture.App.Services;
@@ -32,6 +34,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _audioDeviceRefreshCts;
     private MMDeviceEnumerator? _audioDeviceEnumerator;
     private AudioDeviceNotificationClient? _audioDeviceNotificationClient;
+    private DispatcherTimer? _audioLevelTimer;
+    private DispatcherTimer? _recordingTimer;
+    private MMDevice? _systemAudioMeterDevice;
+    private MMDevice? _microphoneMeterDevice;
     private bool _restartPending;
     private bool _eventIsWarning;
     private int _captureSectionTransitionVersion;
@@ -55,6 +61,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string _microphoneDevice = string.Empty;
     private double _systemVolume;
     private double _microphoneVolume;
+    private double _systemAudioLevel;
+    private double _microphoneLevel;
     private double _lastSystemVolume;
     private double _lastMicrophoneVolume;
     private bool _systemAudioEnabled;
@@ -69,6 +77,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string _toggleUiHotkey;
     private bool _isContinuousRecording;
     private bool _isRecordStateChanging;
+    private DateTimeOffset _recordingStartedAt;
+    private TimeSpan _recordingElapsed;
     private string _eventMessage = "Initializing capture…";
     private bool _isEventVisible = true;
 
@@ -124,10 +134,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _toggleUiHotkey = settings.HotkeyToggleUI;
         UpdateCaptureSectionState(_captureMode, immediate: true);
 
+        OpenSaveFolderCommand = new RelayCommand(_ => OpenSaveFolder());
         SelectFolderCommand = new AsyncRelayCommand(SelectFolderAsync);
         SaveScreenshotCommand = new AsyncRelayCommand(SaveScreenshotAsync);
         SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync);
         StartStopRecordCommand = new RelayCommand(_ => _ = ToggleContinuousRecordingAsync());
+        ToggleBufferCommand = new RelayCommand(_ => BufferEnabled = !BufferEnabled);
         NextPreviewPageCommand = new RelayCommand(_ => NextPreviewPage());
         CycleVideoSettingCommand = new RelayCommand(parameter => CycleVideoSetting(parameter?.ToString()));
         HotkeyCaptureStartedCommand = new RelayCommand(_ => _hotkeys.UnregisterAll());
@@ -139,14 +151,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<CapturePreview> VisiblePreviews { get; } = [];
     public ObservableCollection<string> SystemAudioDevices { get; } = [];
     public ObservableCollection<string> MicrophoneDevices { get; } = [];
-    public string[] Resolutions { get; } = ["1280 × 720", "1920 × 1080", "Native (2560 × 1440)"];
+    public string NativeResolutionLabel
+    {
+        get
+        {
+            try
+            {
+                var (width, height) = ScreenCapturer.GetTargetSize(_selectedTargetValue);
+                return $"Native ({width} × {height})";
+            }
+            catch
+            {
+                return "Native";
+            }
+        }
+    }
+
+    public string[] Resolutions => ["1280 × 720", "1920 × 1080", NativeResolutionLabel];
     public int[] FrameRates { get; } = [30, 60, 120];
     public int[] BufferDurations { get; } = [15, 30, 60, 120];
 
+    public ICommand OpenSaveFolderCommand { get; }
     public ICommand SelectFolderCommand { get; }
     public ICommand SaveScreenshotCommand { get; }
     public ICommand SaveRecordCommand { get; }
     public ICommand StartStopRecordCommand { get; }
+    public ICommand ToggleBufferCommand { get; }
     public ICommand NextPreviewPageCommand { get; }
     public ICommand CycleVideoSettingCommand { get; }
     public ICommand HotkeyCaptureStartedCommand { get; }
@@ -158,6 +188,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         StartAudioDeviceMonitoring();
         LoadAudioDevices();
+        StartAudioLevelMonitoring();
         await Task.WhenAll(
         RefreshTargetsAsync("Monitors"),
         RefreshTargetsAsync("Windows"));
@@ -193,6 +224,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             }
 
             OnPropertyChanged(nameof(BufferStatus));
+            OnPropertyChanged(nameof(BufferToggleText));
             OnPropertyChanged(nameof(CanEditSettings));
             OnPropertyChanged(nameof(IsSettingsLocked));
 
@@ -218,6 +250,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
     public string BufferStatus => BufferEnabled ? "Buffer Enabled" : "Buffer Disabled";
+    public string BufferToggleText => BufferEnabled ? "Disable Buffer" : "Enable Buffer";
     public bool IsAdvanced { get => _isAdvanced; set { if (SetProperty(ref _isAdvanced, value)) LogEvent(value ? "Advanced settings" : "Basic settings"); } }
 
     public string CaptureMode
@@ -278,6 +311,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _selectedTargetValue =
                 value.TargetValue;
 
+            RefreshNativeResolutionLabel();
+
             LogEvent(
                 $"Selected · {value.Title}");
 
@@ -297,8 +332,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public string QualityBitrate => Quality switch { "Low" => "50% bitrate", "High" => "90% bitrate", _ => "70% bitrate" };
     public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate · {value} FPS"); QueueSettingsUpdate(true); } } }
     public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration · {value} sec"); QueueSettingsUpdate(false); } } }
-    public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } }
-    public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } }
+    public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { RefreshAudioMeterDevices(); LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } }
+    public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { RefreshAudioMeterDevices(); LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } }
 
     public double SystemVolume
     {
@@ -310,6 +345,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         get => _microphoneVolume;
         set { if (SetProperty(ref _microphoneVolume, value)) { if (MicrophoneEnabled) _lastMicrophoneVolume = value; QueueSettingsUpdate(false); } }
     }
+    public double SystemAudioLevel { get => _systemAudioLevel; private set => SetProperty(ref _systemAudioLevel, value); }
+    public double MicrophoneLevel { get => _microphoneLevel; private set => SetProperty(ref _microphoneLevel, value); }
 
     public bool SystemAudioEnabled
     {
@@ -364,13 +401,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (!SetProperty(ref _isContinuousRecording, value))
                 return;
 
+            if (value)
+                StartRecordingTimer();
+            else
+                StopRecordingTimer();
+
             OnPropertyChanged(nameof(StartStopRecordText));
             OnPropertyChanged(nameof(CanEditSettings));
             OnPropertyChanged(nameof(IsSettingsLocked));
             UpdateCaptureSectionState(_captureMode, immediate: false);
         }
     }
-    public string StartStopRecordText => IsContinuousRecording ? "Stop Recording" : "Start Recording";
+    public string StartStopRecordText =>
+        IsContinuousRecording
+            ? $"Stop Recording - {_recordingElapsed:hh\\:mm\\:ss}"
+            : "Start Recording";
     public string EventMessage { get => _eventMessage; private set => SetProperty(ref _eventMessage, value); }
     public bool IsEventVisible { get => _isEventVisible; private set => SetProperty(ref _isEventVisible, value); }
     public bool CanEditSettings => !BufferEnabled && !IsContinuousRecording;
@@ -425,6 +470,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _selectedPreview =
             selection;
 
+        RefreshNativeResolutionLabel();
+
         OnPropertyChanged(
             nameof(SelectedPreview));
 
@@ -433,6 +480,29 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         OnPropertyChanged(
             nameof(PreviewPageLabel));
+    }
+
+    private void RefreshNativeResolutionLabel()
+    {
+        bool usesNative =
+            Resolution.StartsWith(
+                "Native",
+                StringComparison.Ordinal);
+
+        OnPropertyChanged(
+            nameof(NativeResolutionLabel));
+
+        OnPropertyChanged(
+            nameof(Resolutions));
+
+        if (!usesNative)
+            return;
+
+        _resolution =
+            NativeResolutionLabel;
+
+        OnPropertyChanged(
+            nameof(Resolution));
     }
 
     private void NextPreviewPage()
@@ -567,6 +637,146 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         OnPropertyChanged(
             nameof(MicrophoneDevice));
+
+        RefreshAudioMeterDevices();
+    }
+
+    private void StartAudioLevelMonitoring()
+    {
+        if (_audioLevelTimer is not null)
+            return;
+
+        RefreshAudioMeterDevices();
+
+        _audioLevelTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(80)
+        };
+
+        _audioLevelTimer.Tick += (_, _) => UpdateAudioLevels();
+        _audioLevelTimer.Start();
+    }
+
+    private void RefreshAudioMeterDevices()
+    {
+        DisposeAudioMeterDevices();
+
+        try
+        {
+            _audioDeviceEnumerator ??= new MMDeviceEnumerator();
+
+            _systemAudioMeterDevice = ResolveAudioMeterDevice(
+                DataFlow.Render,
+                _systemDeviceIds.GetValueOrDefault(SystemAudioDevice));
+
+            _microphoneMeterDevice = ResolveAudioMeterDevice(
+                DataFlow.Capture,
+                _microphoneDeviceIds.GetValueOrDefault(MicrophoneDevice));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(MainViewModel),
+                $"Audio meter refresh failed: {ex}");
+        }
+    }
+
+    private MMDevice? ResolveAudioMeterDevice(
+        DataFlow flow,
+        string? deviceId)
+    {
+        if (_audioDeviceEnumerator is null)
+            return null;
+
+        try
+        {
+            return string.IsNullOrWhiteSpace(deviceId)
+                ? _audioDeviceEnumerator.GetDefaultAudioEndpoint(flow, Role.Multimedia)
+                : _audioDeviceEnumerator.GetDevice(deviceId);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void UpdateAudioLevels()
+    {
+        SystemAudioLevel = SmoothAudioLevel(
+            SystemAudioLevel,
+            ReadAudioPeak(_systemAudioMeterDevice));
+
+        MicrophoneLevel = SmoothAudioLevel(
+            MicrophoneLevel,
+            ReadAudioPeak(_microphoneMeterDevice));
+    }
+
+    private static double ReadAudioPeak(
+        MMDevice? device)
+    {
+        try
+        {
+            return Math.Clamp(
+                (device?.AudioMeterInformation.MasterPeakValue ?? 0f) * 100.0,
+                0,
+                100);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static double SmoothAudioLevel(
+        double current,
+        double target)
+    {
+        if (target >= current)
+            return target;
+
+        return Math.Max(
+            0,
+            current * 0.72);
+    }
+
+    private void DisposeAudioMeterDevices()
+    {
+        try { _systemAudioMeterDevice?.Dispose(); } catch { }
+        try { _microphoneMeterDevice?.Dispose(); } catch { }
+        _systemAudioMeterDevice = null;
+        _microphoneMeterDevice = null;
+    }
+
+    private void StartRecordingTimer()
+    {
+        _recordingStartedAt = DateTimeOffset.Now;
+        _recordingElapsed = TimeSpan.Zero;
+
+        _recordingTimer ??= new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+
+        _recordingTimer.Tick -= OnRecordingTimerTick;
+        _recordingTimer.Tick += OnRecordingTimerTick;
+        _recordingTimer.Start();
+
+        OnPropertyChanged(nameof(StartStopRecordText));
+    }
+
+    private void StopRecordingTimer()
+    {
+        if (_recordingTimer is not null)
+            _recordingTimer.Stop();
+
+        _recordingElapsed = TimeSpan.Zero;
+        OnPropertyChanged(nameof(StartStopRecordText));
+    }
+
+    private void OnRecordingTimerTick(object? sender, EventArgs e)
+    {
+        _recordingElapsed = DateTimeOffset.Now - _recordingStartedAt;
+        OnPropertyChanged(nameof(StartStopRecordText));
     }
 
     private void StartAudioDeviceMonitoring()
@@ -651,6 +861,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void StopAudioDeviceMonitoring()
     {
+        if (_audioLevelTimer is not null)
+        {
+            _audioLevelTimer.Stop();
+            _audioLevelTimer = null;
+        }
+
+        DisposeAudioMeterDevices();
+
         _audioDeviceRefreshCts?.Cancel();
         _audioDeviceRefreshCts?.Dispose();
         _audioDeviceRefreshCts = null;
@@ -700,6 +918,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             LogEvent($"Save folder · {Path.GetFileName(SaveFolder)}");
         }
         await Task.CompletedTask;
+    }
+
+    private void OpenSaveFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(SaveFolder);
+
+            Process.Start(
+                new ProcessStartInfo
+                {
+                    FileName = SaveFolder,
+                    UseShellExecute = true
+                });
+
+            LogEvent($"Opened folder В· {Path.GetFileName(SaveFolder)}");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainViewModel), ex.ToString());
+            LogEvent("Could not open save folder", warning: true);
+        }
     }
 
     private async Task SaveScreenshotAsync()
@@ -808,7 +1048,33 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            _hotkeys.RegisterAll(ScreenshotHotkey, RecordHotkey, StartStopRecordHotkey, ToggleUiHotkey);
+            var rejected =
+                _hotkeys.RegisterAll(
+                    ScreenshotHotkey,
+                    RecordHotkey,
+                    StartStopRecordHotkey,
+                    ToggleUiHotkey);
+
+            if (rejected.Count > 0)
+            {
+                if (rejected.Contains(GlobalHotkeyService.ScreenshotId))
+                    ScreenshotHotkey = string.Empty;
+                if (rejected.Contains(GlobalHotkeyService.SaveRecordId))
+                    RecordHotkey = string.Empty;
+                if (rejected.Contains(GlobalHotkeyService.StartStopRecordId))
+                    StartStopRecordHotkey = string.Empty;
+                if (rejected.Contains(GlobalHotkeyService.ToggleUiId))
+                    ToggleUiHotkey = string.Empty;
+
+                _hotkeys.RegisterAll(
+                    ScreenshotHotkey,
+                    RecordHotkey,
+                    StartStopRecordHotkey,
+                    ToggleUiHotkey);
+
+                LogEvent("Hotkey is unavailable", warning: true);
+            }
+
             _updateTrayHotkeys(ScreenshotHotkey, RecordHotkey);
             QueueSettingsUpdate(false);
         }
@@ -1038,11 +1304,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private static string FromStoredMode(string mode) => mode == "VideoAudio" ? "Combined" : mode;
     private static string ToStoredMode(string mode) => mode == "Combined" ? "VideoAudio" : mode;
-    private static string FromStoredResolution(string resolution) => resolution switch
+    private string FromStoredResolution(string resolution) => resolution switch
     {
         "720p" => "1280 × 720",
         "1080p" => "1920 × 1080",
-        _ => "Native (2560 × 1440)"
+        _ => NativeResolutionLabel
     };
     private static string ToStoredResolution(string resolution) => resolution switch
     {
@@ -1140,6 +1406,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        if (_recordingTimer is not null)
+        {
+            _recordingTimer.Stop();
+            _recordingTimer.Tick -= OnRecordingTimerTick;
+            _recordingTimer = null;
+        }
+
         StopAudioDeviceMonitoring();
 
         _settingsCts?.Cancel();
