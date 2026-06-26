@@ -53,4 +53,10 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <Target Name="CopyNativeCaptureEngineToPublish" AfterTargets="Publish">
+    <Copy SourceFiles="..\EventCapture.Native\x64\$(Configuration)\EventCapture.Native.dll"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>
