@@ -43,6 +43,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\EventCapture.Core\EventCapture.Core.csproj" />
+    <ProjectReference Include="..\EventCapture.Native\EventCapture.Native.vcxproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyNativeCaptureEngine" AfterTargets="Build">
+    <Copy SourceFiles="..\EventCapture.Native\x64\$(Configuration)\EventCapture.Native.dll"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

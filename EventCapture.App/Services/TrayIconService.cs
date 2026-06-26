@@ -277,7 +277,7 @@ public sealed class TrayIconService : IDisposable
             }
 
             string[] parts =
-                e.Text.Split('\t', 2);
+                (e.Text ?? string.Empty).Split('\t', 2);
 
             const int leftPadding = 12;
             const int rightPadding = 34;
@@ -360,7 +360,7 @@ public sealed class TrayIconService : IDisposable
             const int gapAfterText = 12;
 
             string visibleText =
-                item.Text.Split('\t', 2)[0];
+                (item.Text ?? string.Empty).Split('\t', 2)[0];
 
             Size textSize =
                 TextRenderer.MeasureText(

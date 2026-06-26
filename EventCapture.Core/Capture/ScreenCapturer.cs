@@ -92,7 +92,7 @@ public class ScreenCapturer : IDisposable
             Direct3D11CaptureFramePool.CreateFreeThreaded(
                 _wrtDevice!,
                 DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                2,
+                1,
                 captureItem.Size);
 
         _session = _framePool.CreateCaptureSession(captureItem);
@@ -123,27 +123,34 @@ public class ScreenCapturer : IDisposable
     private async Task CaptureLoopAsync(CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
-        long frameNumber = 0;
-        double frameIntervalMs = 1000.0 / _fps;
+        long frameIntervalTicks = Math.Max(1, Stopwatch.Frequency / _fps);
+        long nextFrameTicks = stopwatch.ElapsedTicks;
 
         while (_isRunning &&
                !cancellationToken.IsCancellationRequested)
         {
-            double targetMs = frameNumber * frameIntervalMs;
-            double currentMs = stopwatch.Elapsed.TotalMilliseconds;
-            double waitMs = targetMs - currentMs;
+            long nowTicks = stopwatch.ElapsedTicks;
+            long waitTicks = nextFrameTicks - nowTicks;
 
-            await WaitForNextFrame(
-                waitMs,
-                stopwatch,
-                cancellationToken);
+            if (waitTicks > 0)
+            {
+                double waitMilliseconds = waitTicks * 1000.0 / Stopwatch.Frequency;
+                await WaitForNextFrame(waitMilliseconds, stopwatch, cancellationToken);
+            }
 
             if (_isRunning &&
                 !cancellationToken.IsCancellationRequested)
             {
                 CaptureFrame();
             }
-            frameNumber++;
+
+            nextFrameTicks += frameIntervalTicks;
+            nowTicks = stopwatch.ElapsedTicks;
+
+            if (nextFrameTicks < nowTicks - frameIntervalTicks)
+            {
+                nextFrameTicks = nowTicks + frameIntervalTicks;
+            }
         }
     }
 

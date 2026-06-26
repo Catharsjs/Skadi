@@ -16,7 +16,6 @@ public partial class App : System.Windows.Application
     private TrayIconService? _tray;
     private OverlayWindow? _overlay;
     private OverlayViewModel? _overlayViewModel;
-    private bool _mediaFoundationStarted;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -32,10 +31,6 @@ public partial class App : System.Windows.Application
 
         try
         {
-            SharpDX.MediaFoundation.MediaFactory.Startup(
-                SharpDX.MediaFoundation.MediaFactory.Version, 0);
-            _mediaFoundationStarted = true;
-
             string baseDirectory = AppContext.BaseDirectory;
             if (File.Exists(Path.Combine(baseDirectory, "ffmpeg.exe")))
             {
@@ -87,6 +82,7 @@ public partial class App : System.Windows.Application
             {
                 case GlobalHotkeyService.ScreenshotId: _viewModel.ExecuteScreenshot(); break;
                 case GlobalHotkeyService.SaveRecordId: _viewModel.ExecuteRecord(); break;
+                case GlobalHotkeyService.StartStopRecordId: _viewModel.ExecuteStartStopRecord(); break;
                 case GlobalHotkeyService.ToggleUiId: _ = ToggleUiAsync(); break;
             }
         });
@@ -114,10 +110,6 @@ public partial class App : System.Windows.Application
         try { _hotkeys?.Dispose(); } catch { }
         try { _tray?.Dispose(); } catch { }
         try { _capture?.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { }
-        if (_mediaFoundationStarted)
-        {
-            try { SharpDX.MediaFoundation.MediaFactory.Shutdown(); } catch { }
-        }
         _singleInstanceMutex?.Dispose();
         AppLogger.Info("Skadi stopped.");
         base.OnExit(e);

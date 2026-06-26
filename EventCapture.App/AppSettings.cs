@@ -27,7 +27,8 @@ public class AppSettings
     // Гарячі клавіші
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
     public string HotkeySaveVideo { get; set; } = "Alt+F2";
-    public string HotkeyToggleUI { get; set; } = "Alt+F3";
+    public string HotkeyStartStopRecord { get; set; } = "Alt+F3";
+    public string HotkeyToggleUI { get; set; } = "Alt+Z";
 
 
     // Загальні налаштування (...
@@ -66,6 +67,7 @@ public class AppSettings
             var settings = JsonSerializer.Deserialize<AppSettings>(json)
                            ?? new AppSettings();
             settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
+            settings.NormalizeHotkeys();
             return settings;
         }
         catch (Exception ex)
@@ -84,6 +86,14 @@ public class AppSettings
         return presets
             .OrderBy(preset => Math.Abs(preset - value))
             .First();
+    }
+
+    private void NormalizeHotkeys()
+    {
+        if (string.Equals(HotkeyToggleUI, "Alt+F3", StringComparison.OrdinalIgnoreCase))
+        {
+            HotkeyToggleUI = "Alt+Z";
+        }
     }
 
     public void Save()

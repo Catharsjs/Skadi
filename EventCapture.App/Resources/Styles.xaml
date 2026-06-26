@@ -41,9 +41,16 @@
                                           VerticalAlignment="Center" Margin="{TemplateBinding Padding}" />
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Border" Property="Background" Value="{StaticResource HoverBrush}" /></Trigger>
-                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource AccentBrush}" /></Trigger>
-                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" /><Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}" /></Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource HoverBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}" />
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -66,9 +73,67 @@
                                    VerticalAlignment="Center" Margin="{TemplateBinding Padding}" />
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Border" Property="Opacity" Value="0.88" /></Trigger>
-                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Border" Property="Opacity" Value="0.72" /></Trigger>
-                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" /><Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}" /><Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}" /></Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.88" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.72" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource DisabledTextBrush}" />
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}" />
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="RecordToggleButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource TextOnAccentBrush}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Border"
+                            Background="{StaticResource AccentBrush}"
+                            BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="3">
+                        <TextBlock x:Name="ButtonText"
+                                   Text="{TemplateBinding Content}"
+                                   Foreground="{StaticResource TextOnAccentBrush}"
+                                   FontFamily="{TemplateBinding FontFamily}"
+                                   FontSize="{TemplateBinding FontSize}"
+                                   FontWeight="{TemplateBinding FontWeight}"
+                                   HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                   VerticalAlignment="Center"
+                                   Margin="{TemplateBinding Padding}"/>
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <DataTrigger Binding="{Binding IsContinuousRecording}" Value="True">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DangerBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource DangerBrush}"/>
+                            <Setter TargetName="ButtonText" Property="Foreground" Value="{StaticResource PrimaryTextBrush}"/>
+                        </DataTrigger>
+
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.88"/>
+                        </Trigger>
+
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.72"/>
+                        </Trigger>
+
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Border" Property="Background" Value="{StaticResource DisabledSurfaceBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="ButtonText" Property="Foreground" Value="{StaticResource DisabledTextBrush}"/>
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
@@ -87,53 +152,135 @@
     </Style>
 
     <Style x:Key="InlineHotkeyStyle" TargetType="controls:HotkeyCaptureButton">
-        <Setter Property="Height" Value="30" /><Setter Property="Padding" Value="6,0" />
-        <Setter Property="Foreground" Value="{StaticResource AccentBrush}" /><Setter Property="FontFamily" Value="Segoe UI" />
-        <Setter Property="FontSize" Value="17" /><Setter Property="Cursor" Value="Hand" /><Setter Property="HorizontalContentAlignment" Value="Left" />
-        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="controls:HotkeyCaptureButton">
-            <Border x:Name="HotkeyBorder" BorderThickness="1" CornerRadius="3">
-                <Border.Background><SolidColorBrush x:Name="HotkeyBackground" Color="{StaticResource BackgroundColor}" /></Border.Background>
-                <Border.BorderBrush><SolidColorBrush x:Name="HotkeyBorderBrush" Color="{StaticResource BackgroundColor}" /></Border.BorderBrush>
-                <TextBlock Text="{TemplateBinding Content}" FontFamily="Segoe UI" FontSize="{TemplateBinding FontSize}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"><TextBlock.Foreground><SolidColorBrush x:Name="HotkeyText" Color="{StaticResource AccentColor}" /></TextBlock.Foreground></TextBlock>
-            </Border>
-            <ControlTemplate.Triggers><Trigger Property="IsCapturing" Value="True">
-                <Trigger.EnterActions><BeginStoryboard><Storyboard>
-                    <ColorAnimation Storyboard.TargetName="HotkeyBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="HotkeyBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                </Storyboard></BeginStoryboard></Trigger.EnterActions>
-                <Trigger.ExitActions><BeginStoryboard><Storyboard>
-                    <ColorAnimation Storyboard.TargetName="HotkeyBackground" Storyboard.TargetProperty="Color" To="{StaticResource BackgroundColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="HotkeyBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource BackgroundColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                </Storyboard></BeginStoryboard></Trigger.ExitActions>
-            </Trigger></ControlTemplate.Triggers>
-        </ControlTemplate></Setter.Value></Setter>
+        <Setter Property="Height" Value="30" />
+        <Setter Property="Padding" Value="6,0" />
+        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        <Setter Property="FontFamily" Value="Segoe UI" />
+        <Setter Property="FontSize" Value="17" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="controls:HotkeyCaptureButton">
+                    <Border x:Name="HotkeyBorder" BorderThickness="1" CornerRadius="3">
+                        <Border.Background>
+                            <SolidColorBrush x:Name="HotkeyBackground" Color="{StaticResource BackgroundColor}" />
+                        </Border.Background>
+                        <Border.BorderBrush>
+                            <SolidColorBrush x:Name="HotkeyBorderBrush" Color="{StaticResource BackgroundColor}" />
+                        </Border.BorderBrush>
+                        <TextBlock Text="{TemplateBinding Content}" FontFamily="Segoe UI" FontSize="{TemplateBinding FontSize}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center">
+                            <TextBlock.Foreground>
+                                <SolidColorBrush x:Name="HotkeyText" Color="{StaticResource PrimaryTextColor}" />
+                            </TextBlock.Foreground></TextBlock>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Content" Value="Not assigned">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource DangerColor}" Duration="0:0:0.12" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource PrimaryTextColor}" Duration="0:0:0.12" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <Trigger Property="IsCapturing" Value="True">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="HotkeyBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="HotkeyBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="HotkeyBackground" Storyboard.TargetProperty="Color" To="{StaticResource BackgroundColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="HotkeyBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource BackgroundColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="HotkeyText" Storyboard.TargetProperty="Color" To="{StaticResource PrimaryTextColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="FieldHotkeyStyle" TargetType="controls:HotkeyCaptureButton">
-        <Setter Property="Height" Value="38" /><Setter Property="Padding" Value="10,0" />
-        <Setter Property="Foreground" Value="{StaticResource AccentBrush}" /><Setter Property="FontFamily" Value="Segoe UI" />
-        <Setter Property="FontSize" Value="15" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="controls:HotkeyCaptureButton">
-            <Border BorderThickness="1" CornerRadius="3">
-                <Border.Background><SolidColorBrush x:Name="FieldBackground" Color="{StaticResource SurfaceColor}" /></Border.Background>
-                <Border.BorderBrush><SolidColorBrush x:Name="FieldBorder" Color="{StaticResource BorderColor}" /></Border.BorderBrush>
-                <TextBlock Text="{TemplateBinding Content}" FontFamily="Segoe UI" FontSize="{TemplateBinding FontSize}" FontWeight="{TemplateBinding FontWeight}" HorizontalAlignment="Center" VerticalAlignment="Center"><TextBlock.Foreground><SolidColorBrush x:Name="FieldText" Color="{StaticResource AccentColor}" /></TextBlock.Foreground></TextBlock>
-            </Border>
-            <ControlTemplate.Triggers><Trigger Property="IsCapturing" Value="True">
-                <Trigger.EnterActions><BeginStoryboard><Storyboard>
-                    <ColorAnimation Storyboard.TargetName="FieldBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="FieldBorder" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                </Storyboard></BeginStoryboard></Trigger.EnterActions>
-                <Trigger.ExitActions><BeginStoryboard><Storyboard>
-                    <ColorAnimation Storyboard.TargetName="FieldBackground" Storyboard.TargetProperty="Color" To="{StaticResource SurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="FieldBorder" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                    <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                </Storyboard></BeginStoryboard></Trigger.ExitActions>
-            </Trigger></ControlTemplate.Triggers>
-        </ControlTemplate></Setter.Value></Setter>
+        <Setter Property="Height" Value="38" />
+        <Setter Property="Padding" Value="10,0" />
+        <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+        <Setter Property="FontFamily" Value="Segoe UI" />
+        <Setter Property="FontSize" Value="15" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="controls:HotkeyCaptureButton">
+                    <Border BorderThickness="1" CornerRadius="3">
+                        <Border.Background>
+                            <SolidColorBrush x:Name="FieldBackground" Color="{StaticResource SurfaceColor}" />
+                        </Border.Background>
+                        <Border.BorderBrush>
+                            <SolidColorBrush x:Name="FieldBorder" Color="{StaticResource BorderColor}" />
+                        </Border.BorderBrush>
+                        <TextBlock Text="{TemplateBinding Content}" FontFamily="Segoe UI" FontSize="{TemplateBinding FontSize}" FontWeight="{TemplateBinding FontWeight}" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock.Foreground>
+                                <SolidColorBrush x:Name="FieldText" Color="{StaticResource AccentColor}" />
+                            </TextBlock.Foreground></TextBlock>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Content" Value="Not assigned">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource DangerColor}" Duration="0:0:0.12" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.12" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <Trigger Property="IsCapturing" Value="True">
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="FieldBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="FieldBorder" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="FieldBackground" Storyboard.TargetProperty="Color" To="{StaticResource SurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="FieldBorder" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="FieldText" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="SegmentStyle" TargetType="RadioButton">
@@ -149,27 +296,43 @@
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
                     <Border x:Name="Border" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3">
-                        <Border.Background><SolidColorBrush x:Name="SegmentBackground" Color="{StaticResource SurfaceColor}" /></Border.Background>
-                        <Border.BorderBrush><SolidColorBrush x:Name="SegmentBorder" Color="{StaticResource BorderColor}" /></Border.BorderBrush>
+                        <Border.Background>
+                            <SolidColorBrush x:Name="SegmentBackground" Color="{StaticResource SurfaceColor}" />
+                        </Border.Background>
+                        <Border.BorderBrush>
+                            <SolidColorBrush x:Name="SegmentBorder" Color="{StaticResource BorderColor}" />
+                        </Border.BorderBrush>
                         <TextBlock Text="{TemplateBinding Content}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
                                    FontWeight="{TemplateBinding FontWeight}" HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <TextBlock.Foreground><SolidColorBrush x:Name="SegmentText" Color="{StaticResource PrimaryTextColor}" /></TextBlock.Foreground>
+                            <TextBlock.Foreground>
+                                <SolidColorBrush x:Name="SegmentText" Color="{StaticResource PrimaryTextColor}" />
+                            </TextBlock.Foreground>
                         </TextBlock>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Border" Property="Opacity" Value="0.9" /></Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Border" Property="Opacity" Value="0.9" />
+                        </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter Property="FontWeight" Value="SemiBold" />
-                            <Trigger.EnterActions><BeginStoryboard><Storyboard>
-                                <ColorAnimation Storyboard.TargetName="SegmentBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                <ColorAnimation Storyboard.TargetName="SegmentBorder" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                <ColorAnimation Storyboard.TargetName="SegmentText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                            </Storyboard></BeginStoryboard></Trigger.EnterActions>
-                            <Trigger.ExitActions><BeginStoryboard><Storyboard>
-                                <ColorAnimation Storyboard.TargetName="SegmentBackground" Storyboard.TargetProperty="Color" To="{StaticResource SurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                <ColorAnimation Storyboard.TargetName="SegmentBorder" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                <ColorAnimation Storyboard.TargetName="SegmentText" Storyboard.TargetProperty="Color" To="{StaticResource PrimaryTextColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                            </Storyboard></BeginStoryboard></Trigger.ExitActions>
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="SegmentBackground" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="SegmentBorder" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="SegmentText" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="SegmentBackground" Storyboard.TargetProperty="Color" To="{StaticResource SurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="SegmentBorder" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="SegmentText" Storyboard.TargetProperty="Color" To="{StaticResource PrimaryTextColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -178,37 +341,51 @@
     </Style>
 
     <Style x:Key="ToggleStyle" TargetType="CheckBox">
-        <Setter Property="Width" Value="52" /><Setter Property="Height" Value="28" /><Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Width" Value="52" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
                     <Grid>
                         <Border x:Name="Track" CornerRadius="14" BorderThickness="1">
-                            <Border.Background><SolidColorBrush x:Name="TrackBrush" Color="{StaticResource DisabledSurfaceColor}" /></Border.Background>
-                            <Border.BorderBrush><SolidColorBrush x:Name="TrackBorderBrush" Color="{StaticResource BorderColor}" /></Border.BorderBrush>
+                            <Border.Background>
+                                <SolidColorBrush x:Name="TrackBrush" Color="{StaticResource DisabledSurfaceColor}" />
+                            </Border.Background>
+                            <Border.BorderBrush>
+                                <SolidColorBrush x:Name="TrackBorderBrush" Color="{StaticResource BorderColor}" />
+                            </Border.BorderBrush>
                         </Border>
                         <Ellipse x:Name="Thumb" Width="20" Height="20" HorizontalAlignment="Left" Margin="4,0">
-                            <Ellipse.Fill><SolidColorBrush x:Name="ThumbBrush" Color="{StaticResource SecondaryTextColor}" /></Ellipse.Fill>
-                            <Ellipse.RenderTransform><TranslateTransform x:Name="ThumbTransform" X="0" /></Ellipse.RenderTransform>
+                            <Ellipse.Fill>
+                                <SolidColorBrush x:Name="ThumbBrush" Color="{StaticResource SecondaryTextColor}" />
+                            </Ellipse.Fill>
+                            <Ellipse.RenderTransform>
+                                <TranslateTransform x:Name="ThumbTransform" X="0" />
+                            </Ellipse.RenderTransform>
                         </Ellipse>
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsChecked" Value="True">
                             <Trigger.EnterActions>
-                                <BeginStoryboard><Storyboard>
-                                    <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="24" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="TrackBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="TrackBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="ThumbBrush" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                </Storyboard></BeginStoryboard>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="24" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="TrackBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="TrackBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource AccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="ThumbBrush" Storyboard.TargetProperty="Color" To="{StaticResource TextOnAccentColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
                             </Trigger.EnterActions>
                             <Trigger.ExitActions>
-                                <BeginStoryboard><Storyboard>
-                                    <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="TrackBrush" Storyboard.TargetProperty="Color" To="{StaticResource DisabledSurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="TrackBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                    <ColorAnimation Storyboard.TargetName="ThumbBrush" Storyboard.TargetProperty="Color" To="{StaticResource SecondaryTextColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
-                                </Storyboard></BeginStoryboard>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="TrackBrush" Storyboard.TargetProperty="Color" To="{StaticResource DisabledSurfaceColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="TrackBorderBrush" Storyboard.TargetProperty="Color" To="{StaticResource BorderColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                        <ColorAnimation Storyboard.TargetName="ThumbBrush" Storyboard.TargetProperty="Color" To="{StaticResource SecondaryTextColor}" Duration="0:0:0.22" EasingFunction="{StaticResource SmoothEase}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
                             </Trigger.ExitActions>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -218,25 +395,39 @@
     </Style>
 
     <Style TargetType="ComboBox">
-        <Setter Property="Height" Value="44" /><Setter Property="Padding" Value="12,0" />
-        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" /><Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" /><Setter Property="BorderThickness" Value="1" />
-        <Setter Property="FontFamily" Value="Segoe UI" /><Setter Property="FontSize" Value="14" />
+        <Setter Property="Height" Value="44" />
+        <Setter Property="Padding" Value="12,0" />
+        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="FontFamily" Value="Segoe UI" />
+        <Setter Property="FontSize" Value="14" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBox">
                     <Grid>
                         <Border x:Name="Outer" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3" />
-                        <Grid Margin="12,0,10,0"><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="24" /></Grid.ColumnDefinitions>
+                        <Grid Margin="12,0,10,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition />
+                                <ColumnDefinition Width="24" />
+                            </Grid.ColumnDefinitions>
                             <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" Content="{TemplateBinding SelectionBoxItem}" />
                             <TextBlock Grid.Column="1" Text="⌄" Foreground="{StaticResource SecondaryTextBrush}" HorizontalAlignment="Center" />
                         </Grid>
                         <ToggleButton Background="Transparent" BorderThickness="0" Focusable="False" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
-                            <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="Transparent" /></ControlTemplate></ToggleButton.Template>
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border Background="Transparent" />
+                                </ControlTemplate>
+                            </ToggleButton.Template>
                         </ToggleButton>
                         <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False">
                             <Border MinWidth="{TemplateBinding ActualWidth}" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="3">
-                                <ScrollViewer MaxHeight="240"><ItemsPresenter /></ScrollViewer>
+                                <ScrollViewer MaxHeight="240">
+                                    <ItemsPresenter />
+                                </ScrollViewer>
                             </Border>
                         </Popup>
                     </Grid>
@@ -246,21 +437,43 @@
     </Style>
 
     <Style TargetType="ComboBoxItem">
-        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" /><Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
-        <Setter Property="Padding" Value="10,8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" />
-        <Style.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter Property="Background" Value="{StaticResource HoverBrush}" /></Trigger><Trigger Property="IsSelected" Value="True"><Setter Property="Foreground" Value="{StaticResource AccentBrush}" /></Trigger></Style.Triggers>
+        <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+        <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+        <Setter Property="Padding" Value="10,8" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Style.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+                <Setter Property="Background" Value="{StaticResource HoverBrush}" />
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <Style TargetType="Slider">
-        <Setter Property="Height" Value="28" /><Setter Property="IsMoveToPointEnabled" Value="True" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="IsMoveToPointEnabled" Value="True" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Slider">
                     <Grid Background="Transparent">
                         <Track x:Name="PART_Track" VerticalAlignment="Center">
-                            <Track.DecreaseRepeatButton><RepeatButton Height="6" Background="{StaticResource AccentBrush}" BorderThickness="0" Command="Slider.DecreaseLarge" /></Track.DecreaseRepeatButton>
-                            <Track.Thumb><Thumb Width="18" Height="18" Background="{StaticResource AccentBrush}" BorderBrush="{StaticResource TextOnAccentBrush}" BorderThickness="2"><Thumb.Template><ControlTemplate TargetType="Thumb"><Ellipse Fill="{TemplateBinding Background}" Stroke="{TemplateBinding BorderBrush}" StrokeThickness="{TemplateBinding BorderThickness}" /></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
-                            <Track.IncreaseRepeatButton><RepeatButton Height="6" Background="{StaticResource DisabledSurfaceBrush}" BorderThickness="0" Command="Slider.IncreaseLarge" /></Track.IncreaseRepeatButton>
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Height="6" Background="{StaticResource AccentBrush}" BorderThickness="0" Command="Slider.DecreaseLarge" />
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Width="18" Height="18" Background="{StaticResource AccentBrush}" BorderBrush="{StaticResource TextOnAccentBrush}" BorderThickness="2">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Ellipse Fill="{TemplateBinding Background}" Stroke="{TemplateBinding BorderBrush}" StrokeThickness="{TemplateBinding BorderThickness}" />
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Height="6" Background="{StaticResource DisabledSurfaceBrush}" BorderThickness="0" Command="Slider.IncreaseLarge" />
+                            </Track.IncreaseRepeatButton>
                         </Track>
                     </Grid>
                 </ControlTemplate>
@@ -272,8 +485,28 @@
         <Setter Property="Opacity" Value="1" />
         <Style.Triggers>
             <DataTrigger Binding="{Binding Path=Tag, RelativeSource={RelativeSource Self}}" Value="False">
-                <DataTrigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.34" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseInOut" /></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></DataTrigger.EnterActions>
-                <DataTrigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseInOut" /></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></DataTrigger.ExitActions>
+                <DataTrigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.34" Duration="0:0:0.22">
+                                <DoubleAnimation.EasingFunction>
+                                    <CubicEase EasingMode="EaseInOut" />
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.EnterActions>
+                <DataTrigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22">
+                                <DoubleAnimation.EasingFunction>
+                                    <CubicEase EasingMode="EaseInOut" />
+                                </DoubleAnimation.EasingFunction>
+                            </DoubleAnimation>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </DataTrigger.ExitActions>
             </DataTrigger>
         </Style.Triggers>
     </Style>

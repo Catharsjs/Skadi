@@ -88,33 +88,74 @@
                               IsChecked="{Binding BufferEnabled}"/>
                 </Grid>
 
-                <Button Style="{StaticResource AccentButtonStyle}"
-                        Height="40"
-                        Command="{Binding SaveScreenshotCommand}"
-                        Content="Save Screenshot"
-                        FontSize="19"/>
+                <Grid Height="40"
+                      Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="82"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-                <controls:HotkeyCaptureButton
-                    Hotkey="{Binding ScreenshotHotkey, Mode=TwoWay}"
-                    CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
-                    CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
-                    Style="{StaticResource InlineHotkeyStyle}"
-                    HorizontalAlignment="Left"
-                    Margin="0,3,0,6"/>
+                    <controls:HotkeyCaptureButton
+                        Hotkey="{Binding ScreenshotHotkey, Mode=TwoWay}"
+                        CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                        CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                        Style="{StaticResource InlineHotkeyStyle}"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Left"/>
 
-                <Button Style="{StaticResource AccentButtonStyle}"
-                        Height="40"
-                        Command="{Binding SaveRecordCommand}"
-                        Content="Save Record"
-                        FontSize="19"/>
+                    <Button Grid.Column="1"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Height="40"
+                            Command="{Binding SaveScreenshotCommand}"
+                            Content="Save Screenshot"
+                            FontSize="19"/>
+                </Grid>
 
-                <controls:HotkeyCaptureButton
-                    Hotkey="{Binding RecordHotkey, Mode=TwoWay}"
-                    CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
-                    CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
-                    Style="{StaticResource InlineHotkeyStyle}"
-                    HorizontalAlignment="Left"
-                    Margin="0,3,0,6"/>
+                <Grid Height="40"
+                      Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="82"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <controls:HotkeyCaptureButton
+                        Hotkey="{Binding RecordHotkey, Mode=TwoWay}"
+                        CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                        CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                        Style="{StaticResource InlineHotkeyStyle}"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Left"/>
+
+                    <Button Grid.Column="1"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Height="40"
+                            Command="{Binding SaveRecordCommand}"
+                            Content="Save Replay"
+                            FontSize="19"/>
+                </Grid>
+
+                <Grid Height="40"
+                      Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="82"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <controls:HotkeyCaptureButton
+                        Hotkey="{Binding StartStopRecordHotkey, Mode=TwoWay}"
+                        CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                        CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                        Style="{StaticResource InlineHotkeyStyle}"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Left"/>
+
+                    <Button Grid.Column="1"
+                            Style="{StaticResource RecordToggleButtonStyle}"
+                            Height="40"
+                            Command="{Binding StartStopRecordCommand}"
+                            Content="{Binding StartStopRecordText}"
+                            FontSize="19"/>
+                </Grid>
 
                 <Border Height="1"
                         Background="{StaticResource BorderBrush}"
@@ -416,19 +457,19 @@
                        Foreground="{StaticResource SecondaryTextBrush}"
                        Margin="6,6,0,2"/>
 
-                                <TextBlock Text="{Binding SaveFolder}"
+                    <TextBlock Text="{Binding SaveFolder}"
                        FontSize="18"
                        Foreground="{StaticResource AccentBrush}"
                        Margin="6,0,0,5"
                        TextTrimming="CharacterEllipsis"/>
 
-                                <Button Style="{StaticResource BaseButtonStyle}"
+                    <Button Style="{StaticResource BaseButtonStyle}"
                     Height="36"
                     Command="{Binding SelectFolderCommand}"
                     Content="Browse..."
                     FontSize="16"/>
 
-                                <Border Height="1"
+                    <Border Height="1"
                     Background="{StaticResource BorderBrush}"
                     Margin="0,6,0,0"/>
 
@@ -445,7 +486,8 @@
                         </Grid.ColumnDefinitions>
 
                         <TextBlock Text="Save Screenshot"
-                                   Margin="8,0"/>
+                                   Margin="8,0"
+                                   VerticalAlignment="Center"/>
 
                         <controls:HotkeyCaptureButton
                             Grid.Column="1"
@@ -456,15 +498,16 @@
                     </Grid>
 
                     <Grid Height="38"
-                          Margin="0,4,0,0">
+                          Margin="0,8,0,0">
 
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition/>
                             <ColumnDefinition Width="280"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock Text="Save Record"
-                                   Margin="8,0"/>
+                        <TextBlock Text="Save Replay"
+                                   Margin="8,0"
+                                   VerticalAlignment="Center"/>
 
                         <controls:HotkeyCaptureButton
                             Grid.Column="1"
@@ -475,7 +518,27 @@
                     </Grid>
 
                     <Grid Height="38"
-                          Margin="0,4,0,0">
+                          Margin="0,8,0,0">
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="280"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Text="Start/Stop Recording"
+                                   Margin="8,0"
+                                   VerticalAlignment="Center"/>
+
+                        <controls:HotkeyCaptureButton
+                            Grid.Column="1"
+                            Hotkey="{Binding StartStopRecordHotkey, Mode=TwoWay}"
+                            CaptureStartedCommand="{Binding HotkeyCaptureStartedCommand}"
+                            CaptureCompletedCommand="{Binding HotkeyCaptureCompletedCommand}"
+                            Style="{StaticResource FieldHotkeyStyle}"/>
+                    </Grid>
+
+                    <Grid Height="38"
+                          Margin="0,8,0,0">
 
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition/>
@@ -483,7 +546,8 @@
                         </Grid.ColumnDefinitions>
 
                         <TextBlock Text="Toggle UI"
-                                   Margin="8,0"/>
+                                   Margin="8,0"
+                                   VerticalAlignment="Center"/>
 
                         <controls:HotkeyCaptureButton
                             Grid.Column="1"
@@ -755,18 +819,18 @@
                         Background="{StaticResource BorderBrush}"
                         Margin="0,8"/>
 
-                                        <Border Tag="{Binding CanEditSettings}"
+                        <Border Tag="{Binding CanEditSettings}"
                         IsHitTestVisible="{Binding CanEditSettings}"
                         Style="{StaticResource FadeSectionStyle}">
 
-                                            <Grid Height="42"
+                            <Grid Height="42"
                           Margin="6,2,6,0">
 
-                                                <TextBlock Text="Show System Info"
+                                <TextBlock Text="Show System Info"
                                    FontSize="17"
                                    VerticalAlignment="Center"/>
 
-                                                <CheckBox HorizontalAlignment="Right"
+                                <CheckBox HorizontalAlignment="Right"
                                   VerticalAlignment="Center"
                                   Style="{StaticResource ToggleStyle}"
                                   IsChecked="{Binding ShowSystemInfo}"/>

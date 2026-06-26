@@ -9,4 +9,5 @@
   <Project Path="EventCapture.Core/EventCapture.Core.csproj">
     <Platform Solution="*|x64" Project="x64" />
   </Project>
+  <Project Path="EventCapture.Native/EventCapture.Native.vcxproj" Id="9c6a6b3e-a35e-4f01-a7bd-cb8685d8c291" />
 </Solution>

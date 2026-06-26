@@ -65,7 +65,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _showSystemInfo;
     private string _screenshotHotkey;
     private string _recordHotkey;
+    private string _startStopRecordHotkey;
     private string _toggleUiHotkey;
+    private bool _isContinuousRecording;
+    private bool _isRecordStateChanging;
     private string _eventMessage = "Initializing capture…";
     private bool _isEventVisible = true;
 
@@ -117,12 +120,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _showSystemInfo = settings.ShowSystemInfo;
         _screenshotHotkey = settings.HotkeyScreenshot;
         _recordHotkey = settings.HotkeySaveVideo;
+        _startStopRecordHotkey = settings.HotkeyStartStopRecord;
         _toggleUiHotkey = settings.HotkeyToggleUI;
         UpdateCaptureSectionState(_captureMode, immediate: true);
 
         SelectFolderCommand = new AsyncRelayCommand(SelectFolderAsync);
         SaveScreenshotCommand = new AsyncRelayCommand(SaveScreenshotAsync);
         SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync);
+        StartStopRecordCommand = new AsyncRelayCommand(ToggleContinuousRecordingAsync);
         NextPreviewPageCommand = new RelayCommand(_ => NextPreviewPage());
         CycleVideoSettingCommand = new RelayCommand(parameter => CycleVideoSetting(parameter?.ToString()));
         HotkeyCaptureStartedCommand = new RelayCommand(_ => _hotkeys.UnregisterAll());
@@ -141,6 +146,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public ICommand SelectFolderCommand { get; }
     public ICommand SaveScreenshotCommand { get; }
     public ICommand SaveRecordCommand { get; }
+    public ICommand StartStopRecordCommand { get; }
     public ICommand NextPreviewPageCommand { get; }
     public ICommand CycleVideoSettingCommand { get; }
     public ICommand HotkeyCaptureStartedCommand { get; }
@@ -337,8 +343,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
     public string ScreenshotHotkey { get => _screenshotHotkey; set { if (SetProperty(ref _screenshotHotkey, value)) { LogEvent($"Screenshot hotkey · {value}"); QueueSettingsUpdate(false); } } }
-    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Record hotkey · {value}"); QueueSettingsUpdate(false); } } }
+    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey · {value}"); QueueSettingsUpdate(false); } } }
     public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey · {value}"); QueueSettingsUpdate(false); } } }
+    public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey · {value}"); QueueSettingsUpdate(false); } } }
+    public bool IsContinuousRecording { get => _isContinuousRecording; private set { if (SetProperty(ref _isContinuousRecording, value)) OnPropertyChanged(nameof(StartStopRecordText)); } }
+    public string StartStopRecordText => IsContinuousRecording ? "Stop Recording" : "Start Recording";
     public string EventMessage { get => _eventMessage; private set => SetProperty(ref _eventMessage, value); }
     public bool IsEventVisible { get => _isEventVisible; private set => SetProperty(ref _isEventVisible, value); }
     public bool CanEditSettings => !BufferEnabled;
@@ -720,14 +729,51 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         try
         {
             string path = await _capture.SaveRecordAsync();
-            LogEvent($"Record saved · {Path.GetFileName(path)}");
-            _notifications.Show(_captureMode == "Audio" ? "MP3 saved" : "Record saved");
+            LogEvent($"Replay saved · {Path.GetFileName(path)}");
+            _notifications.Show(_captureMode == "Audio" ? "MP3 saved" : "Replay saved");
         }
         catch (Exception ex)
         {
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
             LogEvent(ex.Message);
-            _notifications.Show("Record save failed");
+            _notifications.Show("Replay save failed");
+        }
+    }
+
+    private async Task ToggleContinuousRecordingAsync()
+    {
+        if (_isRecordStateChanging)
+            return;
+
+        _isRecordStateChanging = true;
+
+        try
+        {
+            if (IsContinuousRecording)
+            {
+                string path = await _capture.StopContinuousRecordingAsync();
+                IsContinuousRecording = false;
+                LogEvent($"Recording saved · {Path.GetFileName(path)}");
+                _notifications.Show("Recording saved");
+                return;
+            }
+
+            ApplyToSettings();
+            _settings.Save();
+            await _capture.StartContinuousRecordingAsync();
+            IsContinuousRecording = true;
+            LogEvent("Recording started");
+            _notifications.Show("Recording started");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainViewModel), ex.ToString());
+            LogEvent(IsContinuousRecording ? "Recording stop failed" : "Recording start failed", warning: true);
+            _notifications.Show(IsContinuousRecording ? "Recording stop failed" : "Recording start failed");
+        }
+        finally
+        {
+            _isRecordStateChanging = false;
         }
     }
 
@@ -735,7 +781,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            _hotkeys.RegisterAll(ScreenshotHotkey, RecordHotkey, ToggleUiHotkey);
+            _hotkeys.RegisterAll(ScreenshotHotkey, RecordHotkey, StartStopRecordHotkey, ToggleUiHotkey);
             _updateTrayHotkeys(ScreenshotHotkey, RecordHotkey);
             QueueSettingsUpdate(false);
         }
@@ -813,6 +859,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.MicVolume = (int)Math.Round(_lastMicrophoneVolume);
         _settings.HotkeyScreenshot = ScreenshotHotkey;
         _settings.HotkeySaveVideo = RecordHotkey;
+        _settings.HotkeyStartStopRecord = StartStopRecordHotkey;
         _settings.HotkeyToggleUI = ToggleUiHotkey;
         _settings.SaveFolder = SaveFolder;
         _settings.ShowSystemInfo = ShowSystemInfo;
@@ -941,16 +988,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private static string ToStoredMode(string mode) => mode == "Combined" ? "VideoAudio" : mode;
     private static string FromStoredResolution(string resolution) => resolution switch
     {
-        "720p" => "1280 × 720", "1080p" => "1920 × 1080", _ => "Native (2560 × 1440)"
+        "720p" => "1280 × 720",
+        "1080p" => "1920 × 1080",
+        _ => "Native (2560 × 1440)"
     };
     private static string ToStoredResolution(string resolution) => resolution switch
     {
-        "1280 × 720" => "720p", "1920 × 1080" => "1080p", _ => "Native"
+        "1280 × 720" => "720p",
+        "1920 × 1080" => "1080p",
+        _ => "Native"
     };
 
     public async Task ToggleUiAsync() => await _toggleUi();
     public void ExecuteScreenshot() => SaveScreenshotCommand.Execute(null);
     public void ExecuteRecord() => SaveRecordCommand.Execute(null);
+    public void ExecuteStartStopRecord() => StartStopRecordCommand.Execute(null);
 
     private void ShowSettingsLockedMessage()
     {

@@ -8,14 +8,16 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 {
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
-    private VideoEncoder? _encoder;
-    private ScreenCapturer? _capturer;
+    private readonly SemaphoreSlim _continuousLock = new(1, 1);
+    private GpuCapturePipeline? _videoPipeline;
     private ScreenshotSaver? _screenshotSaver;
     private AudioRecorder? _audioRecorder;
     private AppSettings? _settings;
 
-    public long CapturedFrames => _capturer?.FramesCaptured ?? 0;
-    public bool IsCapturingWindow => _settings?.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) == true;
+    public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
+    public bool IsCapturingWindow =>
+        _settings?.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) == true;
+    public bool IsContinuousRecording { get; private set; }
 
     public async Task ApplySettingsAsync(AppSettings settings, bool restartPipeline)
     {
@@ -24,13 +26,13 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         _audioRecorder?.SetSystemVolume(settings.SystemAudioVolume);
         _audioRecorder?.SetMicrophoneVolume(settings.MicVolume);
 
-        if (restartPipeline)
-            await RestartPipelineAsync();
+        if (restartPipeline) await RestartPipelineAsync();
     }
 
     public Task<string> SaveScreenshotAsync()
     {
-        if (_settings is null) throw new InvalidOperationException("Capture is not initialized.");
+        if (_settings is null)
+            throw new InvalidOperationException("Capture is not initialized.");
         _screenshotSaver ??= CreateScreenshotSaver(_settings);
         return Task.Run(() => _screenshotSaver.SaveScreenshot());
     }
@@ -40,7 +42,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         if (_settings is null || !_settings.BufferEnabled)
             throw new InvalidOperationException("Replay buffer is disabled.");
         if (!await _saveLock.WaitAsync(0))
-            throw new InvalidOperationException("Record save is already in progress.");
+            throw new InvalidOperationException("Replay export is already in progress.");
 
         try
         {
@@ -52,15 +54,17 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                     throw new InvalidOperationException("No audio source is enabled.");
 
                 result = await _audioRecorder.SaveAudioLastSecondsAsMp3Async(
-                    _settings.SaveFolder, _settings.BufferSeconds);
+                    _settings.SaveFolder,
+                    _settings.BufferSeconds);
             }
             else
             {
-                if (_encoder is null || !_encoder.IsRunning)
-                    throw new InvalidOperationException("Video encoder is not running.");
+                if (_videoPipeline is null || !_videoPipeline.IsRunning)
+                    throw new InvalidOperationException("GPU capture pipeline is not running.");
 
-                var saved = await _encoder.SaveLastSecondsAsync(
-                    _settings.SaveFolder, _settings.BufferSeconds);
+                var saved = await _videoPipeline.SaveLastSecondsAsync(
+                    _settings.SaveFolder,
+                    _settings.BufferSeconds);
                 result = saved.videoPath;
 
                 if (_settings.CaptureMode != "Video" &&
@@ -82,13 +86,128 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             }
 
             if (string.IsNullOrWhiteSpace(result) || !File.Exists(result))
-                throw new InvalidOperationException("The capture could not be exported.");
-            return result!;
+                throw new InvalidOperationException("The replay could not be exported.");
+            return result;
         }
         finally
         {
-            try { await RestartPipelineAsync(); }
-            finally { _saveLock.Release(); }
+            _saveLock.Release();
+        }
+    }
+
+    public async Task StartContinuousRecordingAsync()
+    {
+        if (_settings is null)
+            throw new InvalidOperationException("Capture is not initialized.");
+        if (!await _continuousLock.WaitAsync(0))
+            throw new InvalidOperationException("Recording state is already changing.");
+
+        try
+        {
+            if (IsContinuousRecording)
+                throw new InvalidOperationException("Continuous recording is already active.");
+
+            await _pipelineLock.WaitAsync();
+            try
+            {
+                if (_videoPipeline is null && _audioRecorder is null)
+                    StartPipelineCore(forceStart: true);
+
+                bool wantsVideo = _settings.CaptureMode != "Audio";
+                bool wantsAudio = _settings.CaptureMode != "Video" &&
+                    (_settings.RecordSystemAudio || _settings.RecordMicrophone);
+
+                if (wantsAudio)
+                    (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
+                        .StartContinuousRecording();
+                if (wantsVideo)
+                    (_videoPipeline ?? throw new InvalidOperationException("Video pipeline is unavailable."))
+                        .StartContinuousRecording();
+
+                IsContinuousRecording = true;
+                AppLogger.Info($"Continuous recording started | Mode={_settings.CaptureMode}");
+            }
+            catch
+            {
+                if (!_settings.BufferEnabled) StopPipelineCore();
+                throw;
+            }
+            finally
+            {
+                _pipelineLock.Release();
+            }
+        }
+        finally
+        {
+            _continuousLock.Release();
+        }
+    }
+
+    public async Task<string> StopContinuousRecordingAsync()
+    {
+        if (_settings is null)
+            throw new InvalidOperationException("Capture is not initialized.");
+        if (!await _continuousLock.WaitAsync(0))
+            throw new InvalidOperationException("Recording state is already changing.");
+
+        try
+        {
+            if (!IsContinuousRecording)
+                throw new InvalidOperationException("Continuous recording is not active.");
+
+            ContinuousVideoResult? video = null;
+            (string? AudioPath, long StartTimestamp, long EndTimestamp)? audio = null;
+
+            if (_settings.CaptureMode != "Audio" && _videoPipeline is not null)
+                video = await _videoPipeline.StopContinuousRecordingAsync(_settings.SaveFolder);
+            if (_settings.CaptureMode != "Video" && _audioRecorder is not null &&
+                (_settings.RecordSystemAudio || _settings.RecordMicrophone))
+                audio = await _audioRecorder.StopContinuousRecordingAsync();
+
+            string result;
+            if (video is not null && audio?.AudioPath is not null)
+            {
+                result = await AudioRecorder.MergeContinuousWithVideoAsync(
+                    video.VideoPath,
+                    audio.Value.AudioPath,
+                    _settings.SaveFolder,
+                    video.StartTimestamp,
+                    video.EndTimestamp,
+                    audio.Value.StartTimestamp);
+                TryDelete(video.VideoPath);
+                TryDelete(audio.Value.AudioPath);
+            }
+            else if (video is not null)
+            {
+                result = video.VideoPath;
+            }
+            else if (audio?.AudioPath is not null)
+            {
+                result = await AudioRecorder.EncodeContinuousAudioAsMp3Async(
+                    audio.Value.AudioPath,
+                    _settings.SaveFolder);
+                TryDelete(audio.Value.AudioPath);
+            }
+            else
+            {
+                throw new InvalidOperationException("Continuous recording produced no media.");
+            }
+
+            IsContinuousRecording = false;
+            AppLogger.Info($"Continuous recording saved | Path={result}");
+
+            if (!_settings.BufferEnabled)
+            {
+                await _pipelineLock.WaitAsync();
+                try { StopPipelineCore(); }
+                finally { _pipelineLock.Release(); }
+            }
+
+            return result;
+        }
+        finally
+        {
+            _continuousLock.Release();
         }
     }
 
@@ -98,46 +217,14 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         await _pipelineLock.WaitAsync();
         try
         {
-            StopPipeline();
-            if (!_settings.BufferEnabled) return;
-
-            bool wantsVideo = _settings.CaptureMode != "Audio";
-            bool wantsAudio = _settings.CaptureMode != "Video";
-            long sharedTimestamp = Environment.TickCount64;
-
-            if (wantsVideo)
-            {
-                var (width, height) = ResolveResolution(_settings);
-                int bitrate = CalculateVideoBitrateKbps(
-                    width, height, _settings.Fps, _settings.VideoQuality);
-                _encoder = new VideoEncoder(_settings.Fps, width, height, bitrate);
-                _capturer = new ScreenCapturer(
-                    _encoder, _settings.Fps, _settings.CaptureTarget);
-                _encoder.StartRecording();
-                _capturer.Start();
-                sharedTimestamp = _encoder.StartTimestamp;
-            }
-
-            if (wantsAudio)
-            {
-                _audioRecorder = new AudioRecorder();
-                _audioRecorder.SetSystemVolume(_settings.SystemAudioVolume);
-                _audioRecorder.SetMicrophoneVolume(_settings.MicVolume);
-                _audioRecorder.StartRecording(
-                    _settings.RecordSystemAudio,
-                    _settings.SystemAudioDeviceId,
-                    _settings.RecordMicrophone,
-                    _settings.MicDeviceId,
-                    sharedTimestamp);
-            }
-
-            AppLogger.Info(
-                $"Pipeline started | Mode={_settings.CaptureMode} | " +
-                $"Target={_settings.CaptureTarget} | FPS={_settings.Fps}");
+            if (IsContinuousRecording)
+                throw new InvalidOperationException("Stop recording before changing capture settings.");
+            StopPipelineCore();
+            if (_settings.BufferEnabled) StartPipelineCore(forceStart: false);
         }
         catch (Exception ex)
         {
-            StopPipeline();
+            StopPipelineCore();
             AppLogger.Error(nameof(CaptureCoordinator), $"Pipeline restart failed: {ex}");
             throw;
         }
@@ -147,26 +234,56 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
-    private ScreenshotSaver CreateScreenshotSaver(
-    AppSettings settings)
+    private void StartPipelineCore(bool forceStart)
     {
-        if (settings.Resolution == "Native")
+        if (_settings is null || (!forceStart && !_settings.BufferEnabled)) return;
+        bool wantsVideo = _settings.CaptureMode != "Audio";
+        bool wantsAudio = _settings.CaptureMode != "Video";
+        long sharedTimestamp = Environment.TickCount64;
+
+        if (wantsVideo)
         {
-            return new ScreenshotSaver(
-                settings.SaveFolder,
-                width: 0,
-                height: 0,
-                settings.CaptureTarget);
+            var (width, height) = ResolveResolution(_settings);
+            int bitrate = CalculateVideoBitrateKbps(
+                width,
+                height,
+                _settings.Fps,
+                _settings.VideoQuality);
+            _videoPipeline = new GpuCapturePipeline(
+                _settings.Fps,
+                width,
+                height,
+                bitrate,
+                _settings.BufferSeconds,
+                _settings.CaptureTarget);
+            _videoPipeline.Start();
+            sharedTimestamp = _videoPipeline.StartTimestamp;
         }
 
-        var (width, height) =
-            ResolveResolution(settings);
+        if (wantsAudio)
+        {
+            _audioRecorder = new AudioRecorder(_settings.BufferSeconds);
+            _audioRecorder.SetSystemVolume(_settings.SystemAudioVolume);
+            _audioRecorder.SetMicrophoneVolume(_settings.MicVolume);
+            _audioRecorder.StartRecording(
+                _settings.RecordSystemAudio,
+                _settings.SystemAudioDeviceId,
+                _settings.RecordMicrophone,
+                _settings.MicDeviceId,
+                sharedTimestamp);
+        }
 
-        return new ScreenshotSaver(
-            settings.SaveFolder,
-            width,
-            height,
-            settings.CaptureTarget);
+        AppLogger.Info(
+            $"Native GPU pipeline started | Mode={_settings.CaptureMode} | " +
+            $"Target={_settings.CaptureTarget} | FPS={_settings.Fps}");
+    }
+
+    private ScreenshotSaver CreateScreenshotSaver(AppSettings settings)
+    {
+        if (settings.Resolution == "Native")
+            return new ScreenshotSaver(settings.SaveFolder, 0, 0, settings.CaptureTarget);
+        var (width, height) = ResolveResolution(settings);
+        return new ScreenshotSaver(settings.SaveFolder, width, height, settings.CaptureTarget);
     }
 
     private static (int Width, int Height) ResolveResolution(AppSettings settings)
@@ -182,7 +299,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     }
 
     private static int CalculateVideoBitrateKbps(
-        int width, int height, int fps, int quality)
+        int width,
+        int height,
+        int fps,
+        int quality)
     {
         long pixelRate = (long)width * height * fps;
         int baseRate = (int)Math.Clamp(pixelRate * 0.10 / 1000.0, 4_000, 50_000);
@@ -190,16 +310,13 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         return Math.Max(1_500, (int)Math.Round(baseRate * multiplier));
     }
 
-    private void StopPipeline()
+    private void StopPipelineCore()
     {
         try { _audioRecorder?.Dispose(); } catch { }
-        try { _capturer?.Stop(); } catch { }
-        try { _capturer?.Dispose(); } catch { }
-        try { _encoder?.Stop(); } catch { }
-        try { _encoder?.Dispose(); } catch { }
+        try { _videoPipeline?.Stop(); } catch { }
+        try { _videoPipeline?.Dispose(); } catch { }
         _audioRecorder = null;
-        _capturer = null;
-        _encoder = null;
+        _videoPipeline = null;
     }
 
     private static void TryDelete(string path)
@@ -210,12 +327,13 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _pipelineLock.WaitAsync();
-        try { StopPipeline(); }
+        try { StopPipelineCore(); }
         finally
         {
             _pipelineLock.Release();
             _pipelineLock.Dispose();
             _saveLock.Dispose();
+            _continuousLock.Dispose();
         }
     }
 }
