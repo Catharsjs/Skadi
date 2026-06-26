@@ -211,6 +211,12 @@ Some windows may not be capturable because of OS-level protection, DRM, elevated
 
 ## License
 
-License is not finalized yet.
+Copyright © 2026 Catharsjs. All rights reserved.
 
-If this repository is made public, add a license file before distributing binaries.
+This repository is public for portfolio and source-code review purposes only.
+
+Commercial use, redistribution, modification, sublicensing, or deployment in an organization is prohibited without explicit written permission from the author.
+
+Companies or individuals interested in using Skadi commercially must obtain a separate commercial license.
+
+All third-party components remain subject to their respective licenses.
