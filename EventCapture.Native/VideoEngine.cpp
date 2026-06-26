@@ -140,6 +140,15 @@ namespace EventCaptureNative
             VariantClear(&variant);
         }
 
+        void ConfigureSdrBt709ColorMetadata(IMFMediaType* mediaType)
+        {
+            if (mediaType == nullptr) return;
+            mediaType->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+            mediaType->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+            mediaType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+            mediaType->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+        }
+
         bool HasAnnexBPrefix(const uint8_t* data, size_t size)
         {
             return size >= 4 && data[0] == 0 && data[1] == 0 &&
@@ -459,6 +468,19 @@ namespace EventCaptureNative
             videoContext_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &sourceRect);
             videoContext_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &outputRect);
             videoContext_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &outputRect);
+
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColorSpace{};
+            inputColorSpace.RGB_Range = 0;
+            inputColorSpace.YCbCr_Matrix = 1;
+            inputColorSpace.Nominal_Range = 2;
+
+            D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColorSpace{};
+            outputColorSpace.RGB_Range = 1;
+            outputColorSpace.YCbCr_Matrix = 1;
+            outputColorSpace.Nominal_Range = 1;
+
+            videoContext_->VideoProcessorSetStreamColorSpace(processor_.Get(), 0, &inputColorSpace);
+            videoContext_->VideoProcessorSetOutputColorSpace(processor_.Get(), &outputColorSpace);
         }
 
         void CreateEncoder()
@@ -517,6 +539,7 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, config_.outputWidth, config_.outputHeight));
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
+            ConfigureSdrBt709ColorMetadata(outputType.Get());
             ThrowIfFailed(encoder_->SetOutputType(0, outputType.Get(), 0));
 
             startupStage_ = L"H.264 MFT input media type";
@@ -528,6 +551,7 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeSize(inputType.Get(), MF_MT_FRAME_SIZE, config_.outputWidth, config_.outputHeight));
             ThrowIfFailed(MFSetAttributeRatio(inputType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
             ThrowIfFailed(MFSetAttributeRatio(inputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
+            ConfigureSdrBt709ColorMetadata(inputType.Get());
             ThrowIfFailed(encoder_->SetInputType(0, inputType.Get(), 0));
 
             startupStage_ = L"H.264 MFT codec configuration";

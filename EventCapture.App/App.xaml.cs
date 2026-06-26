@@ -16,6 +16,7 @@ public partial class App : System.Windows.Application
     private TrayIconService? _tray;
     private OverlayWindow? _overlay;
     private OverlayViewModel? _overlayViewModel;
+    private bool _shutdownRequested;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -53,14 +54,14 @@ public partial class App : System.Windows.Application
 
             _viewModel = new MainViewModel(
                 settings, _capture, new CaptureTargetService(), _hotkeys,
-                notifications, _overlay, ToggleUiAsync, Shutdown,
+                notifications, _overlay, ToggleUiAsync, () => _ = ShutdownSkadiAsync(),
                 (screenshot, record) => _tray.UpdateHotkeys(screenshot, record));
             _window.DataContext = _viewModel;
             _window.PrepareHidden();
 
             _hotkeys.HotkeyPressed += HandleHotkey;
             _tray.ToggleUiRequested += () => Dispatcher.InvokeAsync(ShowUiAsync);
-            _tray.ExitRequested += () => Dispatcher.Invoke(Shutdown);
+            _tray.ExitRequested += () => Dispatcher.InvokeAsync(ShutdownSkadiAsync);
 
             _ = _viewModel.InitializeAsync();
             AppLogger.Info("Skadi started in background mode.");
@@ -100,6 +101,40 @@ public partial class App : System.Windows.Application
         if (_window is null) return;
         if (_window.IsPanelVisible) await _window.HidePanelAsync();
         else await _window.ShowPanelAsync();
+    }
+
+    private async Task ShutdownSkadiAsync()
+    {
+        if (_shutdownRequested)
+            return;
+
+        _shutdownRequested = true;
+
+        try
+        {
+            _hotkeys?.Dispose();
+            _hotkeys = null;
+        }
+        catch { }
+
+        try
+        {
+            _tray?.Dispose();
+            _tray = null;
+        }
+        catch { }
+
+        try
+        {
+            if (_capture is not null)
+                await _capture.StopAllAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(App), $"Capture shutdown failed: {ex}");
+        }
+
+        Shutdown();
     }
 
     protected override void OnExit(ExitEventArgs e)

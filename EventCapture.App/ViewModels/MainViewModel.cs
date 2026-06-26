@@ -127,7 +127,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SelectFolderCommand = new AsyncRelayCommand(SelectFolderAsync);
         SaveScreenshotCommand = new AsyncRelayCommand(SaveScreenshotAsync);
         SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync);
-        StartStopRecordCommand = new AsyncRelayCommand(ToggleContinuousRecordingAsync);
+        StartStopRecordCommand = new RelayCommand(_ => _ = ToggleContinuousRecordingAsync());
         NextPreviewPageCommand = new RelayCommand(_ => NextPreviewPage());
         CycleVideoSettingCommand = new RelayCommand(parameter => CycleVideoSetting(parameter?.ToString()));
         HotkeyCaptureStartedCommand = new RelayCommand(_ => _hotkeys.UnregisterAll());
@@ -194,6 +194,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             OnPropertyChanged(nameof(BufferStatus));
             OnPropertyChanged(nameof(CanEditSettings));
+            OnPropertyChanged(nameof(IsSettingsLocked));
 
             UpdateCaptureSectionState(
                 _captureMode,
@@ -204,7 +205,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     ? "Buffer enabled"
                     : "Buffer disabled");
 
-            QueueSettingsUpdate(true);
+            if (value)
+            {
+                QueueSettingsUpdate(true);
+            }
+            else
+            {
+                _settingsCts?.Cancel();
+                _restartPending = false;
+                _ = ApplySettingsImmediatelyAsync(restartCapture: true);
+            }
         }
     }
     public string BufferStatus => BufferEnabled ? "Buffer Enabled" : "Buffer Disabled";
@@ -346,11 +356,25 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey · {value}"); QueueSettingsUpdate(false); } } }
     public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey · {value}"); QueueSettingsUpdate(false); } } }
     public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey · {value}"); QueueSettingsUpdate(false); } } }
-    public bool IsContinuousRecording { get => _isContinuousRecording; private set { if (SetProperty(ref _isContinuousRecording, value)) OnPropertyChanged(nameof(StartStopRecordText)); } }
+    public bool IsContinuousRecording
+    {
+        get => _isContinuousRecording;
+        private set
+        {
+            if (!SetProperty(ref _isContinuousRecording, value))
+                return;
+
+            OnPropertyChanged(nameof(StartStopRecordText));
+            OnPropertyChanged(nameof(CanEditSettings));
+            OnPropertyChanged(nameof(IsSettingsLocked));
+            UpdateCaptureSectionState(_captureMode, immediate: false);
+        }
+    }
     public string StartStopRecordText => IsContinuousRecording ? "Stop Recording" : "Start Recording";
     public string EventMessage { get => _eventMessage; private set => SetProperty(ref _eventMessage, value); }
     public bool IsEventVisible { get => _isEventVisible; private set => SetProperty(ref _isEventVisible, value); }
-    public bool CanEditSettings => !BufferEnabled;
+    public bool CanEditSettings => !BufferEnabled && !IsContinuousRecording;
+    public bool IsSettingsLocked => !CanEditSettings;
 
     public bool EventIsWarning
     {
@@ -746,10 +770,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
 
         _isRecordStateChanging = true;
+        bool wasRecording = IsContinuousRecording;
 
         try
         {
-            if (IsContinuousRecording)
+            if (wasRecording)
             {
                 string path = await _capture.StopContinuousRecordingAsync();
                 IsContinuousRecording = false;
@@ -760,16 +785,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             ApplyToSettings();
             _settings.Save();
-            await _capture.StartContinuousRecordingAsync();
             IsContinuousRecording = true;
+            LogEvent("Recording starting");
+            await _capture.StartContinuousRecordingAsync();
             LogEvent("Recording started");
             _notifications.Show("Recording started");
         }
         catch (Exception ex)
         {
+            IsContinuousRecording = wasRecording;
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
-            LogEvent(IsContinuousRecording ? "Recording stop failed" : "Recording start failed", warning: true);
-            _notifications.Show(IsContinuousRecording ? "Recording stop failed" : "Recording start failed");
+            LogEvent(wasRecording ? "Recording stop failed" : "Recording start failed", warning: true);
+            _notifications.Show(wasRecording ? "Recording stop failed" : "Recording start failed");
         }
         finally
         {
@@ -842,6 +869,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task ApplySettingsImmediatelyAsync(
+        bool restartCapture)
+    {
+        try
+        {
+            ApplyToSettings();
+            _settings.Save();
+
+            await Task.Run(
+                () => _capture.ApplySettingsAsync(
+                    _settings,
+                    restartCapture));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(MainViewModel),
+                ex.ToString());
+
+            LogEvent(
+                "Could not apply settings",
+                warning: true);
+        }
+    }
+
     private void ApplyToSettings()
     {
         _settings.Fps = FrameRate;
@@ -870,7 +922,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     bool immediate)
     {
         bool settingsAvailable =
-            !BufferEnabled;
+            CanEditSettings;
 
         bool video =
             settingsAvailable &&
@@ -1006,6 +1058,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void ShowSettingsLockedMessage()
     {
+        if (IsContinuousRecording)
+        {
+            LogEvent(
+                "Stop recording to change settings",
+                warning: true);
+
+            return;
+        }
+
         LogEvent(
             "Disable Buffer to change settings",
             warning: true);

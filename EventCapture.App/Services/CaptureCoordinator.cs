@@ -315,8 +315,25 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { _audioRecorder?.Dispose(); } catch { }
         try { _videoPipeline?.Stop(); } catch { }
         try { _videoPipeline?.Dispose(); } catch { }
+        IsContinuousRecording = false;
         _audioRecorder = null;
         _videoPipeline = null;
+    }
+
+    public async Task StopAllAsync()
+    {
+        bool lockTaken = false;
+
+        try
+        {
+            lockTaken = await _pipelineLock.WaitAsync(TimeSpan.FromSeconds(3));
+            StopPipelineCore();
+        }
+        finally
+        {
+            if (lockTaken)
+                _pipelineLock.Release();
+        }
     }
 
     private static void TryDelete(string path)
@@ -326,14 +343,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await _pipelineLock.WaitAsync();
-        try { StopPipelineCore(); }
-        finally
-        {
-            _pipelineLock.Release();
-            _pipelineLock.Dispose();
-            _saveLock.Dispose();
-            _continuousLock.Dispose();
-        }
+        await StopAllAsync();
+        _pipelineLock.Dispose();
+        _saveLock.Dispose();
+        _continuousLock.Dispose();
     }
 }

@@ -226,7 +226,7 @@
 
                             <Button Style="{StaticResource SettingsLockOverlayStyle}"
                     Command="{Binding SettingsLockedCommand}"
-                    Visibility="{Binding BufferEnabled,
+                    Visibility="{Binding IsSettingsLocked,
                                          Converter={StaticResource BooleanToVisibilityConverter}}"/>
                         </Grid>
                     </StackPanel>
@@ -447,7 +447,7 @@
 
                         <Button Style="{StaticResource SettingsLockOverlayStyle}"
                                 Command="{Binding SettingsLockedCommand}"
-                                Visibility="{Binding BufferEnabled,
+                                Visibility="{Binding IsSettingsLocked,
                                                      Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     </Grid>
 
@@ -841,8 +841,8 @@
 
                     <Button Style="{StaticResource SettingsLockOverlayStyle}"
                             Command="{Binding SettingsLockedCommand}"
-                            Visibility="{Binding BufferEnabled,
-                                                 Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            Visibility="{Binding IsSettingsLocked,
+                                          Converter={StaticResource BooleanToVisibilityConverter}}"/>
                 </Grid>
             </Grid>
 
