@@ -9,6 +9,10 @@ namespace EventCapture.Core.Capture;
 
 public sealed class GpuCapturePipeline : IDisposable
 {
+    private const int DwmwaExtendedFrameBounds = 9;
+    private const int MonitorIntersectionTolerancePixels = 16;
+    private const int MonitorIntersectionToleranceArea = 4096;
+
     private readonly int _fps;
     private readonly SafeVideoEngineHandle _handle;
     private readonly string _sessionDirectory;
@@ -249,27 +253,120 @@ public sealed class GpuCapturePipeline : IDisposable
                 long.TryParse(parts[1], NumberStyles.HexNumber, null, out long value) &&
                 NativeMethods.IsWindow(new IntPtr(value)))
             {
-                return (true, new IntPtr(value));
+                IntPtr windowHandle =
+                    new(value);
+
+                EnsureWindowIsInsideSingleMonitor(
+                    windowHandle);
+
+                return (true, windowHandle);
             }
             throw new InvalidOperationException("The selected window is no longer available.");
         }
 
-        System.Windows.Forms.Screen screen = System.Windows.Forms.Screen.PrimaryScreen
-            ?? System.Windows.Forms.Screen.AllScreens.First();
-        if (captureTarget.StartsWith("Monitor|", StringComparison.Ordinal))
-        {
-            string deviceName = captureTarget["Monitor|".Length..];
-            screen = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(candidate =>
-                string.Equals(candidate.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase))
-                ?? screen;
-        }
+        DisplayMonitor screen =
+            DisplayMonitorService.Resolve(captureTarget);
 
-        IntPtr monitor = NativeMethods.MonitorFromPoint(
-            new NativePoint(screen.Bounds.Left + 1, screen.Bounds.Top + 1),
-            2);
+        IntPtr monitor =
+            DisplayMonitorService.MonitorFromPoint(
+                screen.Bounds.Left + 1,
+                screen.Bounds.Top + 1);
         if (monitor == IntPtr.Zero)
             throw new InvalidOperationException("The selected monitor is no longer available.");
         return (false, monitor);
+    }
+
+    private static void EnsureWindowIsInsideSingleMonitor(
+        IntPtr windowHandle)
+    {
+        if (!TryGetVisibleWindowBounds(
+                windowHandle,
+                out NativeRect windowRect))
+        {
+            throw new InvalidOperationException(
+                "The selected window is no longer available.");
+        }
+
+        var windowBounds =
+            System.Drawing.Rectangle.FromLTRB(
+                windowRect.Left,
+                windowRect.Top,
+                windowRect.Right,
+                windowRect.Bottom);
+
+        if (windowBounds.Width <= 0 ||
+            windowBounds.Height <= 0)
+        {
+            throw new InvalidOperationException(
+                "The selected window cannot be captured.");
+        }
+
+        int intersectingMonitors =
+            DisplayMonitorService
+                .GetAll()
+                .Count(
+                    monitor =>
+                    {
+                        var intersection =
+                            System.Drawing.Rectangle.Intersect(
+                                monitor.Bounds,
+                                windowBounds);
+
+                        return IsSignificantMonitorIntersection(
+                            intersection);
+                    });
+
+        if (intersectingMonitors != 1)
+        {
+            throw new InvalidOperationException(
+                "Move the selected window fully onto one monitor before recording.");
+        }
+    }
+
+    private static bool TryGetVisibleWindowBounds(
+        IntPtr windowHandle,
+        out NativeRect bounds)
+    {
+        if (NativeMethods.DwmGetWindowAttribute(
+                windowHandle,
+                DwmwaExtendedFrameBounds,
+                out NativeRect visibleBounds,
+                Marshal.SizeOf<NativeRect>()) == 0 &&
+            IsValidRectangle(visibleBounds))
+        {
+            bounds = visibleBounds;
+            return true;
+        }
+
+        return NativeMethods.GetWindowRect(
+            windowHandle,
+            out bounds);
+    }
+
+    private static bool IsValidRectangle(
+        NativeRect rectangle)
+    {
+        return rectangle.Right > rectangle.Left &&
+               rectangle.Bottom > rectangle.Top;
+    }
+
+    private static bool IsSignificantMonitorIntersection(
+        System.Drawing.Rectangle intersection)
+    {
+        if (intersection.Width <= 0 ||
+            intersection.Height <= 0)
+        {
+            return false;
+        }
+
+        if (intersection.Width < MonitorIntersectionTolerancePixels ||
+            intersection.Height < MonitorIntersectionTolerancePixels)
+        {
+            return false;
+        }
+
+        return intersection.Width * intersection.Height >=
+               MonitorIntersectionToleranceArea;
     }
 
     private static void ThrowIfFailed(NativeResult result, SafeVideoEngineHandle? handle)
@@ -356,6 +453,15 @@ internal readonly struct NativePoint(int x, int y)
     public readonly int Y = y;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeRect
+{
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}
+
 internal sealed class SafeVideoEngineHandle : SafeHandleZeroOrMinusOneIsInvalid
 {
     private SafeVideoEngineHandle() : base(true) { }
@@ -392,4 +498,12 @@ internal static class NativeMethods
     internal static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")]
     internal static extern IntPtr MonitorFromPoint(NativePoint point, uint flags);
+    [DllImport("user32.dll")]
+    internal static extern bool GetWindowRect(IntPtr window, out NativeRect rectangle);
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmGetWindowAttribute(
+        IntPtr window,
+        int attribute,
+        out NativeRect attributeValue,
+        int attributeSize);
 }

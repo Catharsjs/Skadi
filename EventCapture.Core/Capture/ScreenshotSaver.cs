@@ -1,7 +1,6 @@
 ﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.Windows.Forms;
 
 namespace EventCapture.Core.Capture;
 
@@ -96,24 +95,14 @@ public sealed class ScreenshotSaver
             string deviceName =
                 captureTarget["Monitor|".Length..];
 
-            Screen? selectedScreen =
-                Screen.AllScreens.FirstOrDefault(
-                    screen => string.Equals(
-                        screen.DeviceName,
-                        deviceName,
-                        StringComparison.OrdinalIgnoreCase));
-
-            if (selectedScreen is not null)
-            {
-                return selectedScreen.Bounds;
-            }
-
-            throw new InvalidOperationException(
-                "The selected monitor is no longer available.");
+            return DisplayMonitorService
+                .Resolve($"Monitor|{deviceName}")
+                .Bounds;
         }
 
-        return Screen.PrimaryScreen?.Bounds
-            ?? Screen.AllScreens.First().Bounds;
+        return DisplayMonitorService
+            .GetPrimary()
+            .Bounds;
     }
 
     private void SaveBitmap(

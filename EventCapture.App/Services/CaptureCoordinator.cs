@@ -111,7 +111,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             try
             {
                 if (_videoPipeline is null && _audioRecorder is null)
-                    StartPipelineCore(forceStart: true);
+                {
+                    await Task.Run(
+                        () => StartPipelineCore(forceStart: true));
+                }
 
                 bool wantsVideo = _settings.CaptureMode != "Audio";
                 bool wantsAudio = _settings.CaptureMode != "Video" &&
@@ -220,7 +223,11 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             if (IsContinuousRecording)
                 throw new InvalidOperationException("Stop recording before changing capture settings.");
             StopPipelineCore();
-            if (_settings.BufferEnabled) StartPipelineCore(forceStart: false);
+            if (_settings.BufferEnabled)
+            {
+                await Task.Run(
+                    () => StartPipelineCore(forceStart: false));
+            }
         }
         catch (Exception ex)
         {
@@ -303,7 +310,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     private static int ResolveEffectiveFrameRate(AppSettings settings)
     {
-        int requestedFps = Math.Clamp(settings.Fps, 1, 240);
+        int requestedFps = Math.Clamp(settings.Fps, 1, 60);
         int refreshRate = Math.Clamp(
             ScreenCapturer.GetTargetRefreshRate(settings.CaptureTarget),
             1,

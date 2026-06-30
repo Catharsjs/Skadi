@@ -4,6 +4,8 @@
 #include <codecapi.h>
 #include <icodecapi.h>
 #include <d3d11_4.h>
+#include <d3dcompiler.h>
+#include <dwmapi.h>
 #include <dxgi1_6.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -20,12 +22,18 @@
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <cmath>
+#include <csignal>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <filesystem>
+#include <iomanip>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 using namespace winrt::Windows::Graphics::Capture;
@@ -42,11 +50,181 @@ namespace EventCaptureNative
 
     namespace
     {
+        struct CompositorVertex
+        {
+            float x;
+            float y;
+            float u;
+            float v;
+        };
+
         constexpr int64_t TicksPerSecond = 10'000'000;
+        std::once_flag diagnosticsInstallFlag;
+
+        std::wstring NativeDiagnosticsPath()
+        {
+            wchar_t temporaryPath[MAX_PATH]{};
+            if (GetTempPathW(MAX_PATH, temporaryPath) == 0) return L"Skadi-Native-Diagnostics.log";
+            return std::filesystem::path(temporaryPath).append(L"Skadi-Native-Diagnostics.log").wstring();
+        }
+
+        std::string ToUtf8(const std::wstring& value)
+        {
+            if (value.empty()) return {};
+            const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+            if (size <= 0) return {};
+            std::string result(static_cast<size_t>(size), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), size, nullptr, nullptr);
+            return result;
+        }
+
+        void AppendNativeLogNoThrow(const std::wstring& message)
+        {
+            try
+            {
+                SYSTEMTIME time{};
+                GetLocalTime(&time);
+
+                std::wstringstream line;
+                line
+                    << L"["
+                    << std::setfill(L'0')
+                    << std::setw(4) << time.wYear << L"-"
+                    << std::setw(2) << time.wMonth << L"-"
+                    << std::setw(2) << time.wDay << L" "
+                    << std::setw(2) << time.wHour << L":"
+                    << std::setw(2) << time.wMinute << L":"
+                    << std::setw(2) << time.wSecond << L"."
+                    << std::setw(3) << time.wMilliseconds
+                    << L"] [T" << GetCurrentThreadId() << L"] "
+                    << message << L"\r\n";
+
+                const std::string utf8 = ToUtf8(line.str());
+                const std::wstring path = NativeDiagnosticsPath();
+                HANDLE file = CreateFileW(
+                    path.c_str(),
+                    FILE_APPEND_DATA,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr,
+                    OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    nullptr);
+
+                if (file == INVALID_HANDLE_VALUE) return;
+
+                DWORD written = 0;
+                WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+                CloseHandle(file);
+            }
+            catch (...) {}
+        }
+
+        std::wstring RectToString(const RECT& rectangle)
+        {
+            std::wstringstream text;
+            text
+                << L"L=" << rectangle.left
+                << L" T=" << rectangle.top
+                << L" R=" << rectangle.right
+                << L" B=" << rectangle.bottom
+                << L" W=" << (rectangle.right - rectangle.left)
+                << L" H=" << (rectangle.bottom - rectangle.top);
+            return text.str();
+        }
+
+        RECT GetExtendedWindowFrameBounds(HWND window)
+        {
+            RECT rectangle{};
+            if (SUCCEEDED(DwmGetWindowAttribute(
+                    window,
+                    DWMWA_EXTENDED_FRAME_BOUNDS,
+                    &rectangle,
+                    sizeof(rectangle))) &&
+                rectangle.right > rectangle.left &&
+                rectangle.bottom > rectangle.top)
+            {
+                return rectangle;
+            }
+
+            GetWindowRect(window, &rectangle);
+            return rectangle;
+        }
+
+        void LogNative(const std::wstring& message)
+        {
+            AppendNativeLogNoThrow(message);
+            OutputDebugStringW((message + L"\n").c_str());
+        }
+
+        void AbortSignalHandler(int signal)
+        {
+            std::wstringstream message;
+            message << L"SIGABRT received | Signal=" << signal;
+            AppendNativeLogNoThrow(message.str());
+            std::_Exit(3);
+        }
+
+        void TerminateHandler()
+        {
+            AppendNativeLogNoThrow(L"std::terminate invoked.");
+
+            if (std::current_exception())
+            {
+                try
+                {
+                    std::rethrow_exception(std::current_exception());
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    AppendNativeLogNoThrow(L"Terminate exception | hresult_error | " + std::wstring(error.message().c_str()));
+                }
+                catch (const std::exception& error)
+                {
+                    AppendNativeLogNoThrow(L"Terminate exception | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                }
+                catch (...)
+                {
+                    AppendNativeLogNoThrow(L"Terminate exception | unknown");
+                }
+            }
+
+            std::_Exit(2);
+        }
+
+        void InstallNativeDiagnostics()
+        {
+            std::call_once(
+                diagnosticsInstallFlag,
+                []
+                {
+                    std::set_terminate(TerminateHandler);
+                    std::signal(SIGABRT, AbortSignalHandler);
+                    LogNative(L"Native diagnostics installed | Log=" + NativeDiagnosticsPath());
+                });
+        }
 
         void ThrowIfFailed(HRESULT result)
         {
             if (FAILED(result)) winrt::throw_hresult(result);
+        }
+
+        HRESULT SafeProcessMessage(
+            IMFTransform* transform,
+            MFT_MESSAGE_TYPE message,
+            ULONG_PTR parameter,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+
+            __try
+            {
+                return transform->ProcessMessage(message, parameter);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
         }
 
         std::wstring HResultMessage(HRESULT result)
@@ -184,6 +362,19 @@ namespace EventCaptureNative
     public:
         explicit Implementation(const EcVideoConfig& config) : config_(config)
         {
+            InstallNativeDiagnostics();
+
+            std::wstringstream configLog;
+            configLog
+                << L"VideoEngine ctor | TargetKind=" << static_cast<int32_t>(config_.targetKind)
+                << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config_.targetHandle)
+                << std::dec
+                << L" | Output=" << config_.outputWidth << L"x" << config_.outputHeight
+                << L" | FPS=" << config_.framesPerSecond
+                << L" | BitrateKbps=" << config_.bitrateKbps
+                << L" | ReplaySeconds=" << config_.replaySeconds;
+            LogNative(configLog.str());
+
             if (config_.outputWidth == 0 || config_.outputHeight == 0 || config_.framesPerSecond == 0 ||
                 config_.bitrateKbps == 0 || config_.replaySeconds == 0 || config_.targetHandle == nullptr)
             {
@@ -209,8 +400,14 @@ namespace EventCaptureNative
             if (running_) return EcResult::Ok;
             try
             {
+                LogNative(L"Start entered.");
                 startupStage_ = L"COM initialization";
                 const HRESULT apartmentResult = RoInitialize(RO_INIT_MULTITHREADED);
+                {
+                    std::wstringstream log;
+                    log << L"RoInitialize result=0x" << std::hex << static_cast<uint32_t>(apartmentResult);
+                    LogNative(log.str());
+                }
                 if (apartmentResult == S_OK || apartmentResult == S_FALSE) apartmentInitialized_ = true;
                 else if (apartmentResult != RPC_E_CHANGED_MODE) ThrowIfFailed(apartmentResult);
                 startupStage_ = L"Media Foundation startup";
@@ -221,13 +418,24 @@ namespace EventCaptureNative
                 startupStage_ = L"Windows Graphics Capture creation";
                 CreateCapture();
                 startupStage_ = L"H.264 encoder creation";
+                LogNative(L"CreateEncoder begin.");
                 CreateEncoder();
+                LogNative(L"CreateEncoder completed.");
                 encodeClockStart_ = std::chrono::steady_clock::now();
                 lastPacketTimestamp100ns_ = -1;
                 submittedFrames_.store(0);
                 running_ = true;
+                LogNative(L"StartCapture begin.");
                 captureSession_.StartCapture();
+                LogNative(L"StartCapture completed.");
+                LogNative(L"Encoder thread creation begin.");
                 encoderThread_ = std::thread([this] { EncodeLoop(); });
+                {
+                    std::wstringstream log;
+                    log << L"Encoder thread created | IdHash=" << std::hash<std::thread::id>{}(encoderThread_.get_id());
+                    LogNative(log.str());
+                }
+                LogNative(L"Start completed.");
                 return EcResult::Ok;
             }
             catch (const winrt::hresult_error& error)
@@ -236,12 +444,21 @@ namespace EventCaptureNative
                 message << startupStage_ << L" failed with HRESULT 0x" << std::hex
                     << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
                 SetError(message.str());
+                LogNative(L"Start failed | " + message.str());
                 StopCore();
                 return EcResult::NativeFailure;
             }
             catch (const std::exception& error)
             {
                 SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"Start failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                StopCore();
+                return EcResult::NativeFailure;
+            }
+            catch (...)
+            {
+                SetError(L"Unknown native start failure.");
+                LogNative(L"Start failed | unknown exception");
                 StopCore();
                 return EcResult::NativeFailure;
             }
@@ -359,9 +576,31 @@ namespace EventCaptureNative
 
         void CreateCapture()
         {
+            LogNative(L"CreateCapture entered.");
             captureItem_ = CreateCaptureItem(config_);
             const auto size = captureItem_.Size();
             if (size.Width <= 0 || size.Height <= 0) throw std::runtime_error("Capture target has an invalid size");
+            {
+                std::wstringstream log;
+                log << L"CaptureItem size=" << size.Width << L"x" << size.Height;
+                LogNative(log.str());
+            }
+            if (config_.targetKind == EcTargetKind::Window)
+            {
+                initialWindowMonitor_ = MonitorFromWindow(
+                    static_cast<HWND>(config_.targetHandle),
+                    MONITOR_DEFAULTTONEAREST);
+
+                RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
+                windowFrameWidth_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.right - windowRect.left));
+                windowFrameHeight_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.bottom - windowRect.top));
+                std::wstringstream log;
+                log
+                    << L"Initial window monitor=0x" << std::hex << reinterpret_cast<uintptr_t>(initialWindowMonitor_)
+                    << std::dec
+                    << L" | WindowRect=" << RectToString(windowRect);
+                LogNative(log.str());
+            }
             CreateLatestTexture(static_cast<uint32_t>(size.Width), static_cast<uint32_t>(size.Height));
             framePool_ = Direct3D11CaptureFramePool::CreateFreeThreaded(
                 winRtDevice_,
@@ -377,21 +616,99 @@ namespace EventCaptureNative
                         const auto texture = GetTexture(frame.Surface());
                         const auto contentSize = frame.ContentSize();
                         if (contentSize.Width <= 0 || contentSize.Height <= 0) return;
-                        std::scoped_lock lock(textureMutex_);
+                        std::unique_lock lock(textureMutex_);
                         D3D11_TEXTURE2D_DESC description{};
                         texture->GetDesc(&description);
-                        if (description.Width != sourceWidth_ || description.Height != sourceHeight_)
+                        const uint32_t contentWidth = static_cast<uint32_t>(contentSize.Width);
+                        const uint32_t contentHeight = static_cast<uint32_t>(contentSize.Height);
+                        if (config_.targetKind == EcTargetKind::Window && !IsWindowOnInitialMonitor())
                         {
-                            CreateLatestTexture(description.Width, description.Height);
+                            std::wstringstream log;
+                            RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
+                            log
+                                << L"Window source invalid | CurrentMonitor=0x" << std::hex
+                                << reinterpret_cast<uintptr_t>(MonitorFromWindow(static_cast<HWND>(config_.targetHandle), MONITOR_DEFAULTTONEAREST))
+                                << L" | InitialMonitor=0x"
+                                << reinterpret_cast<uintptr_t>(initialWindowMonitor_)
+                                << std::dec
+                                << L" | Texture=" << description.Width << L"x" << description.Height
+                                << L" | Source=" << sourceWidth_ << L"x" << sourceHeight_
+                                << L" | Content=" << contentSize.Width << L"x" << contentSize.Height
+                                << L" | WindowRect=" << RectToString(windowRect);
+                            LogNative(log.str());
+
+                            windowSourceInvalid_.store(true);
+                            hasTexture_ = true;
+                            frameCondition_.notify_one();
+                            return;
                         }
+
+                        if (config_.targetKind == EcTargetKind::Window)
+                        {
+                            RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
+                            windowFrameWidth_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.right - windowRect.left));
+                            windowFrameHeight_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.bottom - windowRect.top));
+                        }
+
+                        bool recreateFramePool = false;
+                        if (config_.targetKind == EcTargetKind::Window &&
+                            (contentWidth != sourceContentWidth_ ||
+                             contentHeight != sourceContentHeight_))
+                        {
+                            recreateFramePool = true;
+                        }
+                        else if (config_.targetKind != EcTargetKind::Window &&
+                            (contentWidth != sourceContentWidth_ ||
+                             contentHeight != sourceContentHeight_))
+                        {
+                            recreateFramePool = true;
+                        }
+
+                        if (description.Width != sourceWidth_ ||
+                            description.Height != sourceHeight_)
+                        {
+                            CreateLatestTexture(
+                                description.Width,
+                                description.Height);
+                        }
+
                         context_->CopyResource(latestTexture_.Get(), texture.Get());
+                        sourceContentWidth_ = std::max<uint32_t>(1, std::min<uint32_t>(contentWidth, sourceWidth_));
+                        sourceContentHeight_ = std::max<uint32_t>(1, std::min<uint32_t>(contentHeight, sourceHeight_));
+                        windowSourceInvalid_.store(false);
                         hasTexture_ = true;
                         ++textureVersion_;
                         capturedFrames_.fetch_add(1);
                         frameCondition_.notify_one();
+                        lock.unlock();
+
+                        if (recreateFramePool)
+                        {
+                            framePool_.Recreate(
+                                winRtDevice_,
+                                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                                2,
+                                contentSize);
+                        }
+                    }
+                    catch (const winrt::hresult_error& error)
+                    {
+                        std::wstringstream log;
+                        log
+                            << L"FrameArrived hresult_error | Code=0x" << std::hex
+                            << static_cast<uint32_t>(error.code())
+                            << L" | Message=" << error.message().c_str();
+                        LogNative(log.str());
+                        droppedFrames_.fetch_add(1);
+                    }
+                    catch (const std::exception& error)
+                    {
+                        LogNative(L"FrameArrived std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                        droppedFrames_.fetch_add(1);
                     }
                     catch (...)
                     {
+                        LogNative(L"FrameArrived unknown exception.");
                         droppedFrames_.fetch_add(1);
                     }
                 });
@@ -408,6 +725,7 @@ namespace EventCaptureNative
                 captureSession_.IsBorderRequired(false);
             }
             catch (...) {}
+            LogNative(L"CreateCapture completed.");
         }
 
         void CreateLatestTexture(uint32_t width, uint32_t height)
@@ -421,14 +739,84 @@ namespace EventCaptureNative
             description.SampleDesc.Count = 1;
             description.Usage = D3D11_USAGE_DEFAULT;
             description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-            latestTexture_.Reset();
-            ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &latestTexture_));
+
+            ComPtr<ID3D11Texture2D> nextLatestTexture;
+            ComPtr<ID3D11RenderTargetView> nextLatestRenderTarget;
+            ComPtr<ID3D11ShaderResourceView> nextLatestShaderResource;
+            ComPtr<ID3D11Texture2D> nextEncoderTexture;
+            ComPtr<ID3D11Texture2D> nextBlackTexture;
+            ComPtr<ID3D11VideoProcessorEnumerator> nextProcessorEnumerator;
+            ComPtr<ID3D11VideoProcessor> nextProcessor;
+            ComPtr<ID3D11VideoProcessorInputView> nextProcessorInput;
+            ComPtr<ID3D11VideoProcessorOutputView> nextProcessorOutput;
+
+            ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &nextLatestTexture));
+            ThrowIfFailed(device_->CreateRenderTargetView(nextLatestTexture.Get(), nullptr, &nextLatestRenderTarget));
+
+            if (config_.targetKind == EcTargetKind::Window)
+            {
+                ThrowIfFailed(device_->CreateShaderResourceView(nextLatestTexture.Get(), nullptr, &nextLatestShaderResource));
+                if (canvasTexture_ == nullptr)
+                {
+                    CreateWindowCompositorPipeline();
+                }
+            }
+            else
+            {
+                CreateVideoProcessor(
+                    nextLatestTexture.Get(),
+                    width,
+                    height,
+                    nextEncoderTexture,
+                    nextBlackTexture,
+                    nextProcessorEnumerator,
+                    nextProcessor,
+                    nextProcessorInput,
+                    nextProcessorOutput);
+
+                encoderTexture_ = nextEncoderTexture;
+                blackTexture_ = nextBlackTexture;
+                processorEnumerator_ = nextProcessorEnumerator;
+                processor_ = nextProcessor;
+                processorInput_ = nextProcessorInput;
+                processorOutput_ = nextProcessorOutput;
+            }
+
+            latestTexture_ = nextLatestTexture;
+            latestRenderTarget_ = nextLatestRenderTarget;
+            latestShaderResource_ = nextLatestShaderResource;
             sourceWidth_ = width;
             sourceHeight_ = height;
-            CreateVideoProcessor();
+            if (sourceContentWidth_ == 0) sourceContentWidth_ = width;
+            if (sourceContentHeight_ == 0) sourceContentHeight_ = height;
         }
 
-        void CreateVideoProcessor()
+        bool IsWindowOnInitialMonitor() const
+        {
+            if (config_.targetKind != EcTargetKind::Window) return true;
+
+            const HWND window = static_cast<HWND>(config_.targetHandle);
+            if (!IsWindow(window)) return false;
+
+            const HMONITOR currentMonitor =
+                MonitorFromWindow(
+                    window,
+                    MONITOR_DEFAULTTONEAREST);
+
+            return currentMonitor != nullptr &&
+                currentMonitor == initialWindowMonitor_;
+        }
+
+        void CreateVideoProcessor(
+            ID3D11Texture2D* latestTexture,
+            uint32_t sourceWidth,
+            uint32_t sourceHeight,
+            ComPtr<ID3D11Texture2D>& encoderTexture,
+            ComPtr<ID3D11Texture2D>& blackTexture,
+            ComPtr<ID3D11VideoProcessorEnumerator>& processorEnumerator,
+            ComPtr<ID3D11VideoProcessor>& processor,
+            ComPtr<ID3D11VideoProcessorInputView>& processorInput,
+            ComPtr<ID3D11VideoProcessorOutputView>& processorOutput)
         {
             D3D11_TEXTURE2D_DESC outputDescription{};
             outputDescription.Width = config_.outputWidth;
@@ -439,38 +827,45 @@ namespace EventCaptureNative
             outputDescription.SampleDesc.Count = 1;
             outputDescription.Usage = D3D11_USAGE_DEFAULT;
             outputDescription.BindFlags = D3D11_BIND_RENDER_TARGET;
-            encoderTexture_.Reset();
-            ThrowIfFailed(device_->CreateTexture2D(&outputDescription, nullptr, &encoderTexture_));
+            ThrowIfFailed(device_->CreateTexture2D(&outputDescription, nullptr, &encoderTexture));
+            CreateBlackTexture(outputDescription, blackTexture);
 
             D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
             content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-            content.InputWidth = sourceWidth_;
-            content.InputHeight = sourceHeight_;
+            content.InputWidth = sourceWidth;
+            content.InputHeight = sourceHeight;
             content.OutputWidth = config_.outputWidth;
             content.OutputHeight = config_.outputHeight;
             content.InputFrameRate = { config_.framesPerSecond, 1 };
             content.OutputFrameRate = { config_.framesPerSecond, 1 };
             content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-            processorEnumerator_.Reset();
-            processor_.Reset();
-            processorInput_.Reset();
-            processorOutput_.Reset();
-            ThrowIfFailed(videoDevice_->CreateVideoProcessorEnumerator(&content, &processorEnumerator_));
-            ThrowIfFailed(videoDevice_->CreateVideoProcessor(processorEnumerator_.Get(), 0, &processor_));
+            ThrowIfFailed(videoDevice_->CreateVideoProcessorEnumerator(&content, &processorEnumerator));
+            ThrowIfFailed(videoDevice_->CreateVideoProcessor(processorEnumerator.Get(), 0, &processor));
             D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputView{};
             inputView.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             inputView.Texture2D.MipSlice = 0;
             inputView.Texture2D.ArraySlice = 0;
-            ThrowIfFailed(videoDevice_->CreateVideoProcessorInputView(latestTexture_.Get(), processorEnumerator_.Get(), &inputView, &processorInput_));
+            ThrowIfFailed(videoDevice_->CreateVideoProcessorInputView(latestTexture, processorEnumerator.Get(), &inputView, &processorInput));
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputView{};
             outputView.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
             outputView.Texture2D.MipSlice = 0;
-            ThrowIfFailed(videoDevice_->CreateVideoProcessorOutputView(encoderTexture_.Get(), processorEnumerator_.Get(), &outputView, &processorOutput_));
-            const RECT sourceRect{ 0, 0, static_cast<LONG>(sourceWidth_), static_cast<LONG>(sourceHeight_) };
+            ThrowIfFailed(videoDevice_->CreateVideoProcessorOutputView(encoderTexture.Get(), processorEnumerator.Get(), &outputView, &processorOutput));
+            const RECT sourceRect{ 0, 0, static_cast<LONG>(sourceWidth), static_cast<LONG>(sourceHeight) };
             const RECT outputRect{ 0, 0, static_cast<LONG>(config_.outputWidth), static_cast<LONG>(config_.outputHeight) };
-            videoContext_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &sourceRect);
-            videoContext_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &outputRect);
-            videoContext_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &outputRect);
+            const RECT centeredWindowRect = CalculateCenteredActualSizeRect(sourceWidth, sourceHeight);
+            const RECT& streamDestRect =
+                config_.targetKind == EcTargetKind::Window
+                    ? centeredWindowRect
+                    : outputRect;
+            videoContext_->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &sourceRect);
+            videoContext_->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &streamDestRect);
+            videoContext_->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &outputRect);
+            D3D11_VIDEO_COLOR background{};
+            background.RGBA.R = 0.0f;
+            background.RGBA.G = 0.0f;
+            background.RGBA.B = 0.0f;
+            background.RGBA.A = 1.0f;
+            videoContext_->VideoProcessorSetOutputBackgroundColor(processor.Get(), FALSE, &background);
 
             D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColorSpace{};
             inputColorSpace.RGB_Range = 0;
@@ -482,58 +877,516 @@ namespace EventCaptureNative
             outputColorSpace.YCbCr_Matrix = 1;
             outputColorSpace.Nominal_Range = 1;
 
-            videoContext_->VideoProcessorSetStreamColorSpace(processor_.Get(), 0, &inputColorSpace);
-            videoContext_->VideoProcessorSetOutputColorSpace(processor_.Get(), &outputColorSpace);
+            videoContext_->VideoProcessorSetStreamColorSpace(processor.Get(), 0, &inputColorSpace);
+            videoContext_->VideoProcessorSetOutputColorSpace(processor.Get(), &outputColorSpace);
+        }
+
+        RECT CalculateCenteredActualSizeRect(uint32_t sourceWidth, uint32_t sourceHeight) const
+        {
+            const LONG width = static_cast<LONG>(std::min<uint32_t>(sourceWidth, config_.outputWidth));
+            const LONG height = static_cast<LONG>(std::min<uint32_t>(sourceHeight, config_.outputHeight));
+            const LONG left = (static_cast<LONG>(config_.outputWidth) - width) / 2;
+            const LONG top = (static_cast<LONG>(config_.outputHeight) - height) / 2;
+
+            return RECT
+            {
+                left,
+                top,
+                left + width,
+                top + height
+            };
+        }
+
+        void CreateBlackTexture(
+            const D3D11_TEXTURE2D_DESC& description,
+            ComPtr<ID3D11Texture2D>& blackTexture)
+        {
+            const uint32_t pitch = description.Width;
+            const uint32_t chromaHeight = (description.Height + 1) / 2;
+            std::vector<uint8_t> blackFrame(static_cast<size_t>(pitch) * (description.Height + chromaHeight));
+            std::fill(
+                blackFrame.begin(),
+                blackFrame.begin() + static_cast<size_t>(pitch) * description.Height,
+                static_cast<uint8_t>(16));
+            std::fill(
+                blackFrame.begin() + static_cast<size_t>(pitch) * description.Height,
+                blackFrame.end(),
+                static_cast<uint8_t>(128));
+
+            D3D11_SUBRESOURCE_DATA data{};
+            data.pSysMem = blackFrame.data();
+            data.SysMemPitch = pitch;
+            data.SysMemSlicePitch = pitch * description.Height;
+            ThrowIfFailed(device_->CreateTexture2D(&description, &data, &blackTexture));
+        }
+
+        ComPtr<ID3DBlob> CompileShader(
+            const char* source,
+            const char* entryPoint,
+            const char* target)
+        {
+            ComPtr<ID3DBlob> shader;
+            ComPtr<ID3DBlob> error;
+            const HRESULT result = D3DCompile(
+                source,
+                std::strlen(source),
+                nullptr,
+                nullptr,
+                nullptr,
+                entryPoint,
+                target,
+                D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                0,
+                &shader,
+                &error);
+
+            if (FAILED(result))
+            {
+                if (error != nullptr)
+                {
+                    const char* text = static_cast<const char*>(error->GetBufferPointer());
+                    throw std::runtime_error(text != nullptr ? text : "D3D shader compilation failed");
+                }
+
+                ThrowIfFailed(result);
+            }
+
+            return shader;
+        }
+
+        void CreateWindowCompositorPipeline()
+        {
+            D3D11_TEXTURE2D_DESC canvasDescription{};
+            canvasDescription.Width = config_.outputWidth;
+            canvasDescription.Height = config_.outputHeight;
+            canvasDescription.MipLevels = 1;
+            canvasDescription.ArraySize = 1;
+            canvasDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            canvasDescription.SampleDesc.Count = 1;
+            canvasDescription.Usage = D3D11_USAGE_DEFAULT;
+            canvasDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+            ThrowIfFailed(device_->CreateTexture2D(&canvasDescription, nullptr, &canvasTexture_));
+            ThrowIfFailed(device_->CreateRenderTargetView(canvasTexture_.Get(), nullptr, &canvasRenderTarget_));
+
+            const char shaderSource[] = R"(
+                struct VSIn
+                {
+                    float2 position : POSITION;
+                    float2 uv : TEXCOORD0;
+                };
+
+                struct VSOut
+                {
+                    float4 position : SV_POSITION;
+                    float2 uv : TEXCOORD0;
+                };
+
+                VSOut VSMain(VSIn input)
+                {
+                    VSOut output;
+                    output.position = float4(input.position, 0.0f, 1.0f);
+                    output.uv = input.uv;
+                    return output;
+                }
+
+                Texture2D sourceTexture : register(t0);
+                SamplerState sourceSampler : register(s0);
+
+                float4 PSMain(VSOut input) : SV_TARGET
+                {
+                    float4 color = sourceTexture.Sample(sourceSampler, input.uv);
+                    color.rgb *= saturate(color.a);
+                    color.a = 1.0f;
+                    return color;
+                }
+            )";
+
+            ComPtr<ID3DBlob> vertexBlob = CompileShader(shaderSource, "VSMain", "vs_5_0");
+            ComPtr<ID3DBlob> pixelBlob = CompileShader(shaderSource, "PSMain", "ps_5_0");
+
+            ThrowIfFailed(device_->CreateVertexShader(
+                vertexBlob->GetBufferPointer(),
+                vertexBlob->GetBufferSize(),
+                nullptr,
+                &compositorVertexShader_));
+
+            ThrowIfFailed(device_->CreatePixelShader(
+                pixelBlob->GetBufferPointer(),
+                pixelBlob->GetBufferSize(),
+                nullptr,
+                &compositorPixelShader_));
+
+            D3D11_INPUT_ELEMENT_DESC inputElements[]
+            {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+            };
+
+            ThrowIfFailed(device_->CreateInputLayout(
+                inputElements,
+                static_cast<UINT>(std::size(inputElements)),
+                vertexBlob->GetBufferPointer(),
+                vertexBlob->GetBufferSize(),
+                &compositorInputLayout_));
+
+            D3D11_BUFFER_DESC vertexBufferDescription{};
+            vertexBufferDescription.ByteWidth = sizeof(CompositorVertex) * 6;
+            vertexBufferDescription.Usage = D3D11_USAGE_DYNAMIC;
+            vertexBufferDescription.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            vertexBufferDescription.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            ThrowIfFailed(device_->CreateBuffer(&vertexBufferDescription, nullptr, &compositorVertexBuffer_));
+
+            D3D11_SAMPLER_DESC samplerDescription{};
+            samplerDescription.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            samplerDescription.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDescription.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDescription.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDescription.MaxLOD = D3D11_FLOAT32_MAX;
+            ThrowIfFailed(device_->CreateSamplerState(&samplerDescription, &compositorSampler_));
+
+            ComPtr<ID3D11Texture2D> nextEncoderTexture;
+            ComPtr<ID3D11Texture2D> nextBlackTexture;
+            ComPtr<ID3D11VideoProcessorEnumerator> nextProcessorEnumerator;
+            ComPtr<ID3D11VideoProcessor> nextProcessor;
+            ComPtr<ID3D11VideoProcessorInputView> nextProcessorInput;
+            ComPtr<ID3D11VideoProcessorOutputView> nextProcessorOutput;
+
+            CreateVideoProcessor(
+                canvasTexture_.Get(),
+                config_.outputWidth,
+                config_.outputHeight,
+                nextEncoderTexture,
+                nextBlackTexture,
+                nextProcessorEnumerator,
+                nextProcessor,
+                nextProcessorInput,
+                nextProcessorOutput);
+
+            encoderTexture_ = nextEncoderTexture;
+            blackTexture_ = nextBlackTexture;
+            processorEnumerator_ = nextProcessorEnumerator;
+            processor_ = nextProcessor;
+            processorInput_ = nextProcessorInput;
+            processorOutput_ = nextProcessorOutput;
+        }
+
+        void RenderWindowSourceToCanvas()
+        {
+            const uint32_t contentWidth = std::min<uint32_t>(
+                sourceContentWidth_ > 0 ? sourceContentWidth_ : sourceWidth_,
+                sourceWidth_);
+
+            const uint32_t contentHeight = std::min<uint32_t>(
+                sourceContentHeight_ > 0 ? sourceContentHeight_ : sourceHeight_,
+                sourceHeight_);
+
+            const uint32_t frameWidth = contentWidth;
+            const uint32_t frameHeight = contentHeight;
+
+            constexpr uint32_t windowEdgeGuardPixels = 2;
+            const uint32_t guardX = contentWidth > windowEdgeGuardPixels * 2 + 8
+                ? windowEdgeGuardPixels
+                : 0;
+
+            const uint32_t guardY = contentHeight > windowEdgeGuardPixels * 2 + 8
+                ? windowEdgeGuardPixels
+                : 0;
+
+            const uint32_t guardedContentWidth = contentWidth > guardX * 2
+                ? contentWidth - guardX * 2
+                : contentWidth;
+
+            const uint32_t guardedContentHeight = contentHeight > guardY * 2
+                ? contentHeight - guardY * 2
+                : contentHeight;
+
+            const uint32_t guardedFrameWidth = frameWidth > guardX * 2
+                ? frameWidth - guardX * 2
+                : frameWidth;
+
+            const uint32_t guardedFrameHeight = frameHeight > guardY * 2
+                ? frameHeight - guardY * 2
+                : frameHeight;
+
+            const uint32_t renderWidth = std::max<uint32_t>(
+                1,
+                std::min<uint32_t>(
+                    std::min<uint32_t>(guardedContentWidth, guardedFrameWidth),
+                    config_.outputWidth));
+
+            const uint32_t renderHeight = std::max<uint32_t>(
+                1,
+                std::min<uint32_t>(
+                    std::min<uint32_t>(guardedContentHeight, guardedFrameHeight),
+                    config_.outputHeight));
+
+            const RECT destination = CalculateCenteredActualSizeRect(renderWidth, renderHeight);
+            const uint32_t cropLeft = guardX + (guardedContentWidth > renderWidth ? (guardedContentWidth - renderWidth) / 2 : 0);
+            const uint32_t cropTop = guardY + (guardedContentHeight > renderHeight ? (guardedContentHeight - renderHeight) / 2 : 0);
+            const uint32_t cropRight = std::min<uint32_t>(sourceWidth_, cropLeft + renderWidth);
+            const uint32_t cropBottom = std::min<uint32_t>(sourceHeight_, cropTop + renderHeight);
+            const float u0 = static_cast<float>(cropLeft) / static_cast<float>(sourceWidth_);
+            const float v0 = static_cast<float>(cropTop) / static_cast<float>(sourceHeight_);
+            const float u1 = static_cast<float>(cropRight) / static_cast<float>(sourceWidth_);
+            const float v1 = static_cast<float>(cropBottom) / static_cast<float>(sourceHeight_);
+            const float outputWidth = static_cast<float>(config_.outputWidth);
+            const float outputHeight = static_cast<float>(config_.outputHeight);
+            const float left = (static_cast<float>(destination.left) / outputWidth) * 2.0f - 1.0f;
+            const float right = (static_cast<float>(destination.right) / outputWidth) * 2.0f - 1.0f;
+            const float top = 1.0f - (static_cast<float>(destination.top) / outputHeight) * 2.0f;
+            const float bottom = 1.0f - (static_cast<float>(destination.bottom) / outputHeight) * 2.0f;
+
+            const CompositorVertex vertices[]
+            {
+                { left, top, u0, v0 },
+                { right, top, u1, v0 },
+                { left, bottom, u0, v1 },
+                { left, bottom, u0, v1 },
+                { right, top, u1, v0 },
+                { right, bottom, u1, v1 }
+            };
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            ThrowIfFailed(context_->Map(compositorVertexBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+            std::memcpy(mapped.pData, vertices, sizeof(vertices));
+            context_->Unmap(compositorVertexBuffer_.Get(), 0);
+
+            const FLOAT clearColor[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+            context_->ClearRenderTargetView(canvasRenderTarget_.Get(), clearColor);
+
+            D3D11_VIEWPORT viewport{};
+            viewport.Width = static_cast<float>(config_.outputWidth);
+            viewport.Height = static_cast<float>(config_.outputHeight);
+            viewport.MinDepth = 0.0f;
+            viewport.MaxDepth = 1.0f;
+            context_->RSSetViewports(1, &viewport);
+
+            const UINT stride = sizeof(CompositorVertex);
+            const UINT offset = 0;
+            ID3D11Buffer* vertexBuffers[] { compositorVertexBuffer_.Get() };
+            ID3D11ShaderResourceView* shaderResources[] { latestShaderResource_.Get() };
+            ID3D11SamplerState* samplers[] { compositorSampler_.Get() };
+            ID3D11RenderTargetView* renderTargets[] { canvasRenderTarget_.Get() };
+
+            context_->IASetInputLayout(compositorInputLayout_.Get());
+            context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+            context_->VSSetShader(compositorVertexShader_.Get(), nullptr, 0);
+            context_->PSSetShader(compositorPixelShader_.Get(), nullptr, 0);
+            context_->PSSetShaderResources(0, 1, shaderResources);
+            context_->PSSetSamplers(0, 1, samplers);
+            context_->OMSetRenderTargets(1, renderTargets, nullptr);
+            context_->Draw(6, 0);
+
+            ID3D11ShaderResourceView* nullShaderResources[] { nullptr };
+            context_->PSSetShaderResources(0, 1, nullShaderResources);
         }
 
         void CreateEncoder()
         {
-            startupStage_ = L"H.264 MFT enumeration";
+            startupStage_ = L"H.264 MFT hardware configuration";
+
+            if (TryCreateConfiguredEncoder(
+                    MFT_ENUM_FLAG_HARDWARE |
+                    MFT_ENUM_FLAG_SORTANDFILTER,
+                    L"hardware"))
+            {
+                return;
+            }
+
+            startupStage_ = L"H.264 MFT fallback configuration";
+
+            if (TryCreateConfiguredEncoder(
+                    MFT_ENUM_FLAG_ALL,
+                    L"fallback"))
+            {
+                return;
+            }
+
+            throw std::runtime_error("No compatible H.264 Media Foundation encoder is available");
+        }
+
+        bool TryCreateConfiguredEncoder(
+            UINT32 flags,
+            const wchar_t* label)
+        {
             MFT_REGISTER_TYPE_INFO inputInfo{ MFMediaType_Video, MFVideoFormat_NV12 };
             MFT_REGISTER_TYPE_INFO outputInfo{ MFMediaType_Video, MFVideoFormat_H264 };
             IMFActivate** activates = nullptr;
             UINT32 count = 0;
-            HRESULT result = MFTEnumEx(
+
+            HRESULT result =
+                MFTEnumEx(
                 MFT_CATEGORY_VIDEO_ENCODER,
-                MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                flags,
                 &inputInfo,
                 &outputInfo,
                 &activates,
                 &count);
+
             if (FAILED(result) || count == 0)
             {
-                if (activates != nullptr) CoTaskMemFree(activates);
-                activates = nullptr;
-                count = 0;
-                ThrowIfFailed(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ALL, &inputInfo, &outputInfo, &activates, &count));
+                std::wstringstream log;
+                log
+                    << L"H.264 MFT enumeration failed | Label=" << label
+                    << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(result)
+                    << L" | Count=" << std::dec << count;
+                LogNative(log.str());
+
+                if (activates != nullptr)
+                {
+                    CoTaskMemFree(activates);
+                }
+
+                return false;
             }
-            if (count == 0 || activates == nullptr) throw std::runtime_error("No H.264 Media Foundation encoder is available");
-            startupStage_ = L"H.264 MFT activation";
-            HRESULT activationResult = E_FAIL;
+
+            std::wstringstream countLog;
+            countLog
+                << L"H.264 MFT candidates | Label=" << label
+                << L" | Count=" << count;
+            LogNative(countLog.str());
+
+            bool configured = false;
+
             for (UINT32 index = 0; index < count; ++index)
             {
-                activationResult = activates[index]->ActivateObject(IID_PPV_ARGS(&encoder_));
-                if (SUCCEEDED(activationResult)) break;
-                encoder_.Reset();
-            }
-            for (UINT32 index = 0; index < count; ++index) activates[index]->Release();
-            CoTaskMemFree(activates);
-            ThrowIfFailed(activationResult);
+                try
+                {
+                    {
+                        std::wstringstream log;
+                        log
+                            << L"H.264 MFT try | Label=" << label
+                            << L" | Index=" << index;
+                        LogNative(log.str());
+                    }
 
+                    ComPtr<IMFTransform> candidate;
+                    LogNative(L"H.264 MFT ActivateObject begin");
+                    HRESULT activationResult =
+                        activates[index]->ActivateObject(
+                            IID_PPV_ARGS(&candidate));
+                    LogNative(L"H.264 MFT ActivateObject completed");
+
+                    if (FAILED(activationResult))
+                    {
+                        std::wstringstream log;
+                        log
+                            << L"H.264 MFT activation failed | Label=" << label
+                            << L" | Index=" << index
+                            << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(activationResult);
+                        LogNative(log.str());
+                        continue;
+                    }
+
+                    ComPtr<IMFMediaEventGenerator> candidateEventGenerator;
+                    ComPtr<ICodecAPI> candidateCodecApi;
+                    bool candidateAsync = false;
+
+                    LogNative(L"H.264 MFT ConfigureEncoderTransform begin");
+                    ConfigureEncoderTransform(
+                        candidate.Get(),
+                        candidateEventGenerator,
+                        candidateCodecApi,
+                        candidateAsync);
+                    LogNative(L"H.264 MFT ConfigureEncoderTransform completed");
+
+                    encoder_ = candidate;
+                    eventGenerator_ = candidateEventGenerator;
+                    codecApi_ = candidateCodecApi;
+                    asyncEncoder_ = candidateAsync;
+                    configured = true;
+
+                    std::wstringstream log;
+                    log
+                        << L"H.264 MFT configured | Label=" << label
+                        << L" | Index=" << index
+                        << L" | Async=" << (asyncEncoder_ ? 1 : 0);
+                    LogNative(log.str());
+
+                    break;
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    std::wstringstream log;
+                    log
+                        << L"H.264 MFT rejected | Label=" << label
+                        << L" | Index=" << index
+                        << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(error.code())
+                        << L" | Message=" << error.message().c_str();
+                    LogNative(log.str());
+                }
+                catch (const std::exception& error)
+                {
+                    LogNative(
+                        L"H.264 MFT rejected | Label=" +
+                        std::wstring(label) +
+                        L" | Index=" +
+                        std::to_wstring(index) +
+                        L" | Exception=" +
+                        std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                }
+            }
+
+            for (UINT32 index = 0; index < count; ++index)
+            {
+                activates[index]->Release();
+            }
+
+            CoTaskMemFree(activates);
+
+            return configured;
+        }
+
+        void ConfigureEncoderTransform(
+            IMFTransform* transform,
+            ComPtr<IMFMediaEventGenerator>& candidateEventGenerator,
+            ComPtr<ICodecAPI>& candidateCodecApi,
+            bool& candidateAsync)
+        {
             ComPtr<IMFAttributes> attributes;
-            if (SUCCEEDED(encoder_->GetAttributes(&attributes)))
+            LogNative(L"ConfigureEncoderTransform GetAttributes begin");
+            if (SUCCEEDED(transform->GetAttributes(&attributes)))
             {
                 attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
                 attributes->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
                 UINT32 asynchronous = FALSE;
-                if (SUCCEEDED(attributes->GetUINT32(MF_TRANSFORM_ASYNC, &asynchronous))) asyncEncoder_ = asynchronous != FALSE;
+                if (SUCCEEDED(attributes->GetUINT32(MF_TRANSFORM_ASYNC, &asynchronous)))
+                {
+                    candidateAsync = asynchronous != FALSE;
+                }
             }
-            if (asyncEncoder_) ThrowIfFailed(encoder_.As(&eventGenerator_));
-            startupStage_ = L"H.264 MFT D3D manager assignment";
-            ThrowIfFailed(encoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(deviceManager_.Get())));
+            LogNative(L"ConfigureEncoderTransform GetAttributes completed");
 
-            startupStage_ = L"H.264 MFT output media type";
+            if (candidateAsync)
+            {
+                LogNative(L"ConfigureEncoderTransform QueryInterface IMFMediaEventGenerator begin");
+                ThrowIfFailed(transform->QueryInterface(IID_PPV_ARGS(&candidateEventGenerator)));
+                LogNative(L"ConfigureEncoderTransform QueryInterface IMFMediaEventGenerator completed");
+            }
+
+            LogNative(L"ConfigureEncoderTransform SET_D3D_MANAGER begin");
+            unsigned long setD3DManagerException = 0;
+            HRESULT setD3DManagerResult = SafeProcessMessage(
+                transform,
+                MFT_MESSAGE_SET_D3D_MANAGER,
+                reinterpret_cast<ULONG_PTR>(deviceManager_.Get()),
+                &setD3DManagerException);
+            if (setD3DManagerException != 0)
+            {
+                std::wstringstream log;
+                log
+                    << L"ConfigureEncoderTransform SET_D3D_MANAGER SEH | Code=0x"
+                    << std::hex
+                    << setD3DManagerException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(setD3DManagerResult);
+            LogNative(L"ConfigureEncoderTransform SET_D3D_MANAGER completed");
+
             ComPtr<IMFMediaType> outputType;
+            LogNative(L"ConfigureEncoderTransform output type begin");
             ThrowIfFailed(MFCreateMediaType(&outputType));
             ThrowIfFailed(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
             ThrowIfFailed(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
@@ -543,10 +1396,12 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
             ConfigureSdrBt709ColorMetadata(outputType.Get());
-            ThrowIfFailed(encoder_->SetOutputType(0, outputType.Get(), 0));
+            LogNative(L"ConfigureEncoderTransform SetOutputType begin");
+            ThrowIfFailed(transform->SetOutputType(0, outputType.Get(), 0));
+            LogNative(L"ConfigureEncoderTransform SetOutputType completed");
 
-            startupStage_ = L"H.264 MFT input media type";
             ComPtr<IMFMediaType> inputType;
+            LogNative(L"ConfigureEncoderTransform input type begin");
             ThrowIfFailed(MFCreateMediaType(&inputType));
             ThrowIfFailed(inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
             ThrowIfFailed(inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12));
@@ -555,77 +1410,155 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeRatio(inputType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
             ThrowIfFailed(MFSetAttributeRatio(inputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
             ConfigureSdrBt709ColorMetadata(inputType.Get());
-            ThrowIfFailed(encoder_->SetInputType(0, inputType.Get(), 0));
+            LogNative(L"ConfigureEncoderTransform SetInputType begin");
+            ThrowIfFailed(transform->SetInputType(0, inputType.Get(), 0));
+            LogNative(L"ConfigureEncoderTransform SetInputType completed");
 
-            startupStage_ = L"H.264 MFT codec configuration";
-            encoder_.As(&codecApi_);
-            SetVariantUInt32(codecApi_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
-            SetVariantUInt32(codecApi_.Get(), CODECAPI_AVEncCommonMeanBitRate, config_.bitrateKbps * 1000);
-            SetVariantUInt32(codecApi_.Get(), CODECAPI_AVEncMPVGOPSize, config_.framesPerSecond);
-            SetVariantBool(codecApi_.Get(), CODECAPI_AVLowLatencyMode, true);
-            startupStage_ = L"H.264 MFT streaming start";
-            ThrowIfFailed(encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
-            ThrowIfFailed(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
-            ThrowIfFailed(encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+            LogNative(L"ConfigureEncoderTransform codec API begin");
+            transform->QueryInterface(IID_PPV_ARGS(&candidateCodecApi));
+            SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
+            SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonMeanBitRate, config_.bitrateKbps * 1000);
+            SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncMPVGOPSize, config_.framesPerSecond);
+            SetVariantBool(candidateCodecApi.Get(), CODECAPI_AVLowLatencyMode, true);
+            LogNative(L"ConfigureEncoderTransform codec API completed");
+
+            LogNative(L"ConfigureEncoderTransform stream messages begin");
+            unsigned long flushException = 0;
+            HRESULT flushResult = SafeProcessMessage(transform, MFT_MESSAGE_COMMAND_FLUSH, 0, &flushException);
+            if (flushException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform COMMAND_FLUSH SEH | Code=0x" << std::hex << flushException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(flushResult);
+
+            unsigned long beginStreamingException = 0;
+            HRESULT beginStreamingResult = SafeProcessMessage(transform, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0, &beginStreamingException);
+            if (beginStreamingException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform BEGIN_STREAMING SEH | Code=0x" << std::hex << beginStreamingException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(beginStreamingResult);
+
+            unsigned long startStreamException = 0;
+            HRESULT startStreamResult = SafeProcessMessage(transform, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0, &startStreamException);
+            if (startStreamException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform START_OF_STREAM SEH | Code=0x" << std::hex << startStreamException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(startStreamResult);
+            LogNative(L"ConfigureEncoderTransform stream messages completed");
         }
 
         void EncodeLoop()
         {
-            const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
-            auto next = std::chrono::steady_clock::now();
-            while (running_)
+            try
             {
-                next += std::chrono::nanoseconds(frameDuration * 100);
+                LogNative(L"EncodeLoop started.");
+                const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
+                auto next = std::chrono::steady_clock::now();
+                while (running_)
                 {
-                    std::unique_lock lock(textureMutex_);
-                    frameCondition_.wait_until(lock, next, [this] { return hasTexture_ || !running_; });
-                    if (!running_) break;
-                    if (!hasTexture_)
+                    next += std::chrono::nanoseconds(frameDuration * 100);
                     {
-                        droppedFrames_.fetch_add(1);
-                        continue;
+                        std::unique_lock lock(textureMutex_);
+                        frameCondition_.wait_until(lock, next, [this] { return hasTexture_ || !running_; });
+                        if (!running_) break;
+                        if (!hasTexture_)
+                        {
+                            droppedFrames_.fetch_add(1);
+                            continue;
+                        }
+                        if (config_.targetKind == EcTargetKind::Window)
+                        {
+                            context_->CopyResource(encoderTexture_.Get(), blackTexture_.Get());
+                            if (!windowSourceInvalid_.load())
+                            {
+                                RenderWindowSourceToCanvas();
+                            }
+                        }
+
+                        if (!(config_.targetKind == EcTargetKind::Window && windowSourceInvalid_.load()))
+                        {
+                            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+                            stream.Enable = TRUE;
+                            stream.pInputSurface = processorInput_.Get();
+                            const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
+                            if (FAILED(blit))
+                            {
+                                SetError(HResultMessage(blit));
+                                continue;
+                            }
+                        }
+
+                        try
+                        {
+                            const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
+                            SubmitFrame(encoderTexture_.Get(), static_cast<int64_t>(submittedIndex) * frameDuration, frameDuration);
+                            if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
+                            else DrainSynchronousEncoder();
+                        }
+                        catch (const winrt::hresult_error& error)
+                        {
+                            SetError(error.message().c_str());
+                            droppedFrames_.fetch_add(1);
+                        }
+                        catch (const std::exception& error)
+                        {
+                            SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                            droppedFrames_.fetch_add(1);
+                        }
                     }
-                    D3D11_VIDEO_PROCESSOR_STREAM stream{};
-                    stream.Enable = TRUE;
-                    stream.pInputSurface = processorInput_.Get();
-                    const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
-                    if (FAILED(blit))
+                    std::this_thread::sleep_until(next);
+                }
+                if (encoder_)
+                {
+                    encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+                    encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+                    try
                     {
-                        SetError(HResultMessage(blit));
-                        continue;
+                        if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::seconds(2));
+                        else DrainSynchronousEncoder();
                     }
+                    catch (...) {}
                 }
-                try
-                {
-                    const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
-                    SubmitFrame(static_cast<int64_t>(submittedIndex) * frameDuration, frameDuration);
-                    if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
-                    else DrainSynchronousEncoder();
-                }
-                catch (const winrt::hresult_error& error)
-                {
-                    SetError(error.message().c_str());
-                    droppedFrames_.fetch_add(1);
-                }
-                std::this_thread::sleep_until(next);
             }
-            if (encoder_)
+            catch (const winrt::hresult_error& error)
             {
-                encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-                encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-                try
-                {
-                    if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::seconds(2));
-                    else DrainSynchronousEncoder();
-                }
-                catch (...) {}
+                std::wstringstream log;
+                log
+                    << L"EncodeLoop fatal hresult_error | Code=0x" << std::hex
+                    << static_cast<uint32_t>(error.code())
+                    << L" | Message=" << error.message().c_str();
+                LogNative(log.str());
+                SetError(error.message().c_str());
+                running_ = false;
             }
+            catch (const std::exception& error)
+            {
+                LogNative(L"EncodeLoop fatal std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                running_ = false;
+            }
+            catch (...)
+            {
+                LogNative(L"EncodeLoop fatal unknown exception.");
+                SetError(L"Unexpected native encoder failure.");
+                running_ = false;
+            }
+
+            LogNative(L"EncodeLoop exited.");
         }
 
-        void SubmitFrame(int64_t timestamp, int64_t duration)
+        void SubmitFrame(ID3D11Texture2D* texture, int64_t timestamp, int64_t duration)
         {
             ComPtr<IMFMediaBuffer> buffer;
-            ThrowIfFailed(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), encoderTexture_.Get(), 0, FALSE, &buffer));
+            ThrowIfFailed(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer));
             ComPtr<IMFSample> sample;
             ThrowIfFailed(MFCreateSample(&sample));
             ThrowIfFailed(sample->AddBuffer(buffer.Get()));
@@ -859,9 +1792,32 @@ namespace EventCaptureNative
 
         void StopCore()
         {
+            LogNative(L"StopCore entered.");
             running_ = false;
             frameCondition_.notify_all();
-            if (encoderThread_.joinable()) encoderThread_.join();
+
+            if (encoderThread_.joinable())
+            {
+                if (encoderThread_.get_id() == std::this_thread::get_id())
+                {
+                    LogNative(L"StopCore skipped encoderThread join because current thread is encoderThread.");
+                    encoderThread_.detach();
+                }
+                else
+                {
+                    try
+                    {
+                        LogNative(L"StopCore joining encoderThread.");
+                        encoderThread_.join();
+                        LogNative(L"StopCore joined encoderThread.");
+                    }
+                    catch (const std::exception& error)
+                    {
+                        LogNative(L"StopCore encoderThread join failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                    }
+                }
+            }
+
             if (recordingStream_.is_open()) recordingStream_.close();
             if (activeSpoolStream_.is_open()) activeSpoolStream_.close();
             recording_ = false;
@@ -890,7 +1846,17 @@ namespace EventCaptureNative
             processor_.Reset();
             processorEnumerator_.Reset();
             encoderTexture_.Reset();
+            blackTexture_.Reset();
+            compositorSampler_.Reset();
+            compositorVertexBuffer_.Reset();
+            compositorInputLayout_.Reset();
+            compositorPixelShader_.Reset();
+            compositorVertexShader_.Reset();
+            canvasRenderTarget_.Reset();
+            canvasTexture_.Reset();
+            latestShaderResource_.Reset();
             latestTexture_.Reset();
+            latestRenderTarget_.Reset();
             videoContext_.Reset();
             videoDevice_.Reset();
             context_.Reset();
@@ -907,6 +1873,8 @@ namespace EventCaptureNative
                 RoUninitialize();
                 apartmentInitialized_ = false;
             }
+
+            LogNative(L"StopCore exited.");
         }
 
         void SetError(const std::wstring& message) const
@@ -939,15 +1907,31 @@ namespace EventCaptureNative
         mutable std::mutex textureMutex_;
         std::condition_variable frameCondition_;
         ComPtr<ID3D11Texture2D> latestTexture_;
+        ComPtr<ID3D11RenderTargetView> latestRenderTarget_;
+        ComPtr<ID3D11ShaderResourceView> latestShaderResource_;
+        ComPtr<ID3D11Texture2D> canvasTexture_;
+        ComPtr<ID3D11RenderTargetView> canvasRenderTarget_;
+        ComPtr<ID3D11VertexShader> compositorVertexShader_;
+        ComPtr<ID3D11PixelShader> compositorPixelShader_;
+        ComPtr<ID3D11InputLayout> compositorInputLayout_;
+        ComPtr<ID3D11Buffer> compositorVertexBuffer_;
+        ComPtr<ID3D11SamplerState> compositorSampler_;
         ComPtr<ID3D11Texture2D> encoderTexture_;
+        ComPtr<ID3D11Texture2D> blackTexture_;
         ComPtr<ID3D11VideoProcessorEnumerator> processorEnumerator_;
         ComPtr<ID3D11VideoProcessor> processor_;
         ComPtr<ID3D11VideoProcessorInputView> processorInput_;
         ComPtr<ID3D11VideoProcessorOutputView> processorOutput_;
         uint32_t sourceWidth_{};
         uint32_t sourceHeight_{};
+        uint32_t sourceContentWidth_{};
+        uint32_t sourceContentHeight_{};
+        uint32_t windowFrameWidth_{};
+        uint32_t windowFrameHeight_{};
         bool hasTexture_{ false };
         uint64_t textureVersion_{};
+        HMONITOR initialWindowMonitor_{ nullptr };
+        std::atomic_bool windowSourceInvalid_{ false };
 
         ComPtr<IMFTransform> encoder_;
         ComPtr<ICodecAPI> codecApi_;

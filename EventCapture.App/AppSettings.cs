@@ -66,6 +66,7 @@ public class AppSettings
 
             var settings = JsonSerializer.Deserialize<AppSettings>(json)
                            ?? new AppSettings();
+            settings.Fps = NormalizeFps(settings.Fps);
             settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
             settings.NormalizeHotkeys();
             return settings;
@@ -83,6 +84,14 @@ public class AppSettings
     private static int NormalizeVideoQuality(int value)
     {
         int[] presets = { 50, 70, 90 };
+        return presets
+            .OrderBy(preset => Math.Abs(preset - value))
+            .First();
+    }
+
+    private static int NormalizeFps(int value)
+    {
+        int[] presets = { 30, 60 };
         return presets
             .OrderBy(preset => Math.Abs(preset - value))
             .First();

@@ -465,31 +465,38 @@ public class ScreenCapturer : IDisposable
 
     public static (int Width, int Height) GetTargetSize(string captureTarget)
     {
-        if (TryResolveWindowHandle(captureTarget, out var windowHandle) &&
-            GetWindowRect(windowHandle, out var windowRect))
+        if (TryResolveWindowHandle(captureTarget, out var windowHandle))
         {
-            int width = Math.Max(1, windowRect.Right - windowRect.Left);
-            int height = Math.Max(1, windowRect.Bottom - windowRect.Top);
-            return (width, height);
+            var screen =
+                DisplayMonitorService.FromWindow(
+                    windowHandle);
+
+            return (screen.Bounds.Width, screen.Bounds.Height);
         }
 
-        var screen = ResolveScreen(captureTarget);
-        return (screen.Bounds.Width, screen.Bounds.Height);
+        var monitorScreen =
+            DisplayMonitorService.Resolve(captureTarget);
+
+        return (monitorScreen.Bounds.Width, monitorScreen.Bounds.Height);
     }
 
     public static int GetTargetRefreshRate(string captureTarget)
     {
         try
         {
-            Screen screen;
+            DisplayMonitor screen;
 
             if (TryResolveWindowHandle(captureTarget, out var windowHandle))
             {
-                screen = Screen.FromHandle(windowHandle);
+                screen =
+                    DisplayMonitorService.FromWindow(
+                        windowHandle);
             }
             else
             {
-                screen = ResolveScreen(captureTarget);
+                screen =
+                    DisplayMonitorService.Resolve(
+                        captureTarget);
             }
 
             var deviceMode = new DEVMODE
@@ -515,33 +522,12 @@ public class ScreenCapturer : IDisposable
 
     private static IntPtr ResolveMonitorHandle(string captureTarget)
     {
-        var monitor = ResolveScreen(captureTarget);
-        return MonitorFromPoint(
-            new POINT
-            {
-                x = monitor.Bounds.Left + 1,
-                y = monitor.Bounds.Top + 1
-            },
-            MONITOR_DEFAULTTONEAREST);
-    }
+        var monitor =
+            DisplayMonitorService.Resolve(captureTarget);
 
-    private static Screen ResolveScreen(string captureTarget)
-    {
-        if (captureTarget.StartsWith("Monitor|", StringComparison.Ordinal))
-        {
-            string deviceName = captureTarget["Monitor|".Length..];
-            var selected = Screen.AllScreens.FirstOrDefault(
-                screen => string.Equals(
-                    screen.DeviceName,
-                    deviceName,
-                    StringComparison.OrdinalIgnoreCase));
-
-            if (selected != null)
-                return selected;
-        }
-
-        return Screen.PrimaryScreen
-            ?? Screen.AllScreens.First();
+        return DisplayMonitorService.MonitorFromPoint(
+            monitor.Bounds.Left + 1,
+            monitor.Bounds.Top + 1);
     }
 
     private static bool TryResolveWindowHandle(

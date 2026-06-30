@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
 using EventCapture.App.Infrastructure;
@@ -20,6 +21,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly CaptureTargetService _targets;
     private readonly GlobalHotkeyService _hotkeys;
     private readonly NotificationService _notifications;
+    private readonly ScreenshotSelectionService _screenshotSelection = new();
     private readonly OverlayWindow _overlay;
     private readonly Func<Task> _toggleUi;
     private readonly Action<string, string> _updateTrayHotkeys;
@@ -109,7 +111,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _selectedTargetValue = settings.CaptureTarget;
         _resolution = FromStoredResolution(settings.Resolution);
         _quality = settings.VideoQuality switch { <= 50 => "Low", <= 70 => "Medium", _ => "High" };
-        _frameRate = settings.Fps;
+        _frameRate = NormalizeFrameRate(settings.Fps);
         _bufferDuration = settings.BufferSeconds;
         _systemAudioEnabled = settings.RecordSystemAudio;
         _microphoneEnabled = settings.RecordMicrophone;
@@ -168,7 +170,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     public string[] Resolutions => ["1280 × 720", "1920 × 1080", NativeResolutionLabel];
-    public int[] FrameRates { get; } = [30, 60, 120];
+    public int[] FrameRates { get; } = [30, 60];
     public int[] BufferDurations { get; } = [15, 30, 60, 120];
 
     public ICommand OpenSaveFolderCommand { get; }
@@ -946,23 +948,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            ApplyToSettings();
+            bool restoreUiAfterCapture =
+                IsSkadiPanelVisible();
 
-            await _capture.ApplySettingsAsync(
-                _settings,
-                restartPipeline: false);
+            string? path =
+                await _screenshotSelection.CaptureSelectionAsync(
+                    SaveFolder,
+                    _toggleUi,
+                    restoreUiAfterCapture);
 
-            string path =
-                await _capture.SaveScreenshotAsync();
+            if (path is null)
+            {
+                LogEvent(
+                    "Screenshot canceled");
+
+                return;
+            }
 
             if (string.IsNullOrWhiteSpace(path))
             {
                 LogEvent(
-                    "Selected window cannot be captured",
+                    "Screenshot capture unavailable",
                     warning: true);
 
                 _notifications.Show(
-                    "Window capture unavailable");
+                    "Screenshot unavailable");
 
                 return;
             }
@@ -986,6 +996,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _notifications.Show(
                 "Screenshot failed");
         }
+    }
+
+    private static bool IsSkadiPanelVisible()
+    {
+        return System.Windows.Application.Current?
+            .Windows
+            .OfType<MainWindow>()
+            .FirstOrDefault()?
+            .IsPanelVisible == true;
     }
 
     private async Task SaveRecordAsync()
@@ -1025,17 +1044,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             ApplyToSettings();
             _settings.Save();
-            IsContinuousRecording = true;
             LogEvent("Recording starting");
             await _capture.StartContinuousRecordingAsync();
+            IsContinuousRecording = true;
             LogEvent("Recording started");
             _notifications.Show("Recording started");
         }
         catch (Exception ex)
         {
-            IsContinuousRecording = wasRecording;
+            IsContinuousRecording =
+                wasRecording &&
+                !ex.Message.Contains("not active", StringComparison.OrdinalIgnoreCase);
+
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
-            LogEvent(wasRecording ? "Recording stop failed" : "Recording start failed", warning: true);
+            LogEvent(
+                string.IsNullOrWhiteSpace(ex.Message)
+                    ? wasRecording ? "Recording stop failed" : "Recording start failed"
+                    : ex.Message,
+                warning: true);
             _notifications.Show(wasRecording ? "Recording stop failed" : "Recording start failed");
         }
         finally
@@ -1162,7 +1188,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void ApplyToSettings()
     {
-        _settings.Fps = FrameRate;
+        _settings.Fps = NormalizeFrameRate(FrameRate);
         _settings.BufferSeconds = BufferDuration;
         _settings.Resolution = ToStoredResolution(Resolution);
         _settings.BufferEnabled = BufferEnabled;
@@ -1304,6 +1330,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private static string FromStoredMode(string mode) => mode == "VideoAudio" ? "Combined" : mode;
     private static string ToStoredMode(string mode) => mode == "Combined" ? "VideoAudio" : mode;
+    private static int NormalizeFrameRate(int value) => value <= 30 ? 30 : 60;
     private string FromStoredResolution(string resolution) => resolution switch
     {
         "720p" => "1280 × 720",

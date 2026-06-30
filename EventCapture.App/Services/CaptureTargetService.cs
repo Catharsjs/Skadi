@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -7,6 +7,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using EventCapture.App.Models;
+using EventCapture.Core.Capture;
 
 namespace EventCapture.App.Services;
 
@@ -23,13 +24,13 @@ public sealed class CaptureTargetService
     {
         var result = new List<CapturePreview>();
         int index = 1;
-        foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+        foreach (DisplayMonitor screen in DisplayMonitorService.GetAll())
         {
-            string target = screen.Primary ? "PrimaryMonitor" : $"Monitor|{screen.DeviceName}";
-            string title = screen.Primary ? $"Display {index} · Primary" : $"Display {index}";
-            string subtitle = $"{screen.Bounds.Width} × {screen.Bounds.Height}";
+            string target = screen.IsPrimary ? "PrimaryMonitor" : $"Monitor|{screen.DeviceName}";
+            string title = screen.IsPrimary ? $"Display {index} В· Primary" : $"Display {index}";
+            string subtitle = $"{screen.Bounds.Width} Г— {screen.Bounds.Height}";
             result.Add(new CapturePreview(
-                $"monitor-{index}", title, subtitle, "▣", target,
+                $"monitor-{index}", title, subtitle, "в–Ј", target,
                 CaptureMonitorPreview(screen)));
             index++;
         }
@@ -60,7 +61,7 @@ public sealed class CaptureTargetService
             result.Add(new CapturePreview(
                 $"window-{index++}", title,
                 string.IsNullOrWhiteSpace(processName) ? "Window" : processName,
-                "◇", target, CaptureWindowPreview(handle)));
+                "в—‡", target, CaptureWindowPreview(handle)));
             return true;
         }, IntPtr.Zero);
 
@@ -69,7 +70,7 @@ public sealed class CaptureTargetService
             .ToList();
     });
 
-    private static ImageSource? CaptureMonitorPreview(System.Windows.Forms.Screen screen)
+    private static ImageSource? CaptureMonitorPreview(DisplayMonitor screen)
     {
         try
         {
@@ -159,3 +160,4 @@ public sealed class CaptureTargetService
     [StructLayout(LayoutKind.Sequential)]
     private struct Rect { public int Left, Top, Right, Bottom; }
 }
+
