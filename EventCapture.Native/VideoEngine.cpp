@@ -1,6 +1,7 @@
 #include "VideoEngine.h"
 
 #include <Windows.h>
+#include <avrt.h>
 #include <codecapi.h>
 #include <icodecapi.h>
 #include <d3d11_4.h>
@@ -10,6 +11,7 @@
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
+#include <mfreadwrite.h>
 #include <mftransform.h>
 #include <roapi.h>
 #include <wrl/client.h>
@@ -366,13 +368,15 @@ namespace EventCaptureNative
 
             std::wstringstream configLog;
             configLog
-                << L"VideoEngine ctor | TargetKind=" << static_cast<int32_t>(config_.targetKind)
+                << L"VideoEngine ctor | Pipeline=mp4-encoded-sample-v2"
+                << L" | TargetKind=" << static_cast<int32_t>(config_.targetKind)
                 << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config_.targetHandle)
                 << std::dec
                 << L" | Output=" << config_.outputWidth << L"x" << config_.outputHeight
                 << L" | FPS=" << config_.framesPerSecond
                 << L" | BitrateKbps=" << config_.bitrateKbps
-                << L" | ReplaySeconds=" << config_.replaySeconds;
+                << L" | ReplaySeconds=" << config_.replaySeconds
+                << L" | EnableReplay=" << config_.enableReplay;
             LogNative(configLog.str());
 
             if (config_.outputWidth == 0 || config_.outputHeight == 0 || config_.framesPerSecond == 0 ||
@@ -474,32 +478,21 @@ namespace EventCaptureNative
         EcResult SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result)
         {
             if (path == nullptr || seconds == 0) return EcResult::InvalidArgument;
+            if (!ReplayEnabled()) return EcResult::InvalidState;
             std::vector<EncodedFrame> frames;
             {
                 std::scoped_lock lock(packetMutex_);
                 if (packets_.empty()) return EcResult::InvalidState;
                 const size_t requestedFrames = static_cast<size_t>(seconds) * config_.framesPerSecond;
                 size_t end = packets_.size();
-                if (end > 1)
-                {
-                    for (size_t index = end - 1; index > 0; --index)
-                    {
-                        if (packets_[index].keyFrame)
-                        {
-                            end = index;
-                            break;
-                        }
-                    }
-                }
-                if (end == 0) end = packets_.size();
                 size_t start = end > requestedFrames ? end - requestedFrames : 0;
-                while (start < end && !packets_[start].keyFrame) ++start;
                 if (start >= end) return EcResult::InvalidState;
                 frames.assign(packets_.begin() + static_cast<std::ptrdiff_t>(start), packets_.begin() + static_cast<std::ptrdiff_t>(end));
             }
-            if (!WriteFrames(path, frames)) return EcResult::NativeFailure;
-            result.startTimestamp100ns = frames.front().timestamp100ns;
-            result.endTimestamp100ns = frames.back().timestamp100ns + frames.back().duration100ns;
+            if (!WriteFramesToMp4(path, frames)) return EcResult::NativeFailure;
+            const int64_t frameDuration100ns = 10'000'000LL / std::max<uint32_t>(1, config_.framesPerSecond);
+            result.startTimestamp100ns = 0;
+            result.endTimestamp100ns = static_cast<int64_t>(frames.size()) * frameDuration100ns;
             result.frameCount = frames.size();
             return EcResult::Ok;
         }
@@ -507,26 +500,99 @@ namespace EventCaptureNative
         EcResult StartRecording(const wchar_t* path)
         {
             if (path == nullptr || *path == L'\0') return EcResult::InvalidArgument;
-            std::scoped_lock lock(packetMutex_);
-            if (recording_ || recordingPending_) return EcResult::InvalidState;
-            recordingPath_ = path;
-            recordingPending_ = true;
-            ForceKeyFrame();
-            return EcResult::Ok;
+            try
+            {
+                std::scoped_lock lock(packetMutex_);
+                if (recording_ || recordingPending_) return EcResult::InvalidState;
+                CreateRecordingWriter(path);
+                recordingPath_ = path;
+                recordingPending_ = false;
+                recording_ = true;
+                recordingStart100ns_ = -1;
+                recordingEnd100ns_ = 0;
+                recordingLastTimestamp100ns_ = -1;
+                recordingFrameCount_ = 0;
+                ForceKeyFrame();
+                return EcResult::Ok;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"MP4 recording writer failed with HRESULT 0x" << std::hex
+                    << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+                SetError(message.str());
+                LogNative(L"StartRecording failed | " + message.str());
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                return EcResult::NativeFailure;
+            }
+            catch (const std::exception& error)
+            {
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"StartRecording failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                return EcResult::NativeFailure;
+            }
+            catch (...)
+            {
+                SetError(L"Unknown MP4 recording writer failure.");
+                LogNative(L"StartRecording failed | unknown exception");
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                return EcResult::NativeFailure;
+            }
         }
 
         EcResult StopRecording(EcExportResult& result)
         {
-            std::scoped_lock lock(packetMutex_);
-            if (!recording_ && !recordingPending_) return EcResult::InvalidState;
-            recordingPending_ = false;
-            recording_ = false;
-            if (recordingStream_.is_open()) recordingStream_.close();
-            result.startTimestamp100ns = recordingStart100ns_;
-            result.endTimestamp100ns = recordingEnd100ns_;
-            result.frameCount = recordingFrameCount_;
-            recordingPath_.clear();
-            return recordingFrameCount_ > 0 ? EcResult::Ok : EcResult::InvalidState;
+            try
+            {
+                std::scoped_lock lock(packetMutex_);
+                if (!recording_ && !recordingPending_) return EcResult::InvalidState;
+                recordingPending_ = false;
+                recording_ = false;
+                if (recordingWriter_ != nullptr)
+                {
+                    ThrowIfFailed(recordingWriter_->Finalize());
+                    recordingWriter_.Reset();
+                }
+                result.startTimestamp100ns = recordingStart100ns_ >= 0 ? recordingStart100ns_ : 0;
+                result.endTimestamp100ns = recordingEnd100ns_;
+                result.frameCount = recordingFrameCount_;
+                recordingPath_.clear();
+                return recordingFrameCount_ > 0 ? EcResult::Ok : EcResult::InvalidState;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"MP4 recording finalize failed with HRESULT 0x" << std::hex
+                    << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+                SetError(message.str());
+                LogNative(L"StopRecording failed | " + message.str());
+                ReleaseRecordingWriterNoThrow();
+                recordingPath_.clear();
+                return EcResult::NativeFailure;
+            }
+            catch (const std::exception& error)
+            {
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"StopRecording failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                ReleaseRecordingWriterNoThrow();
+                recordingPath_.clear();
+                return EcResult::NativeFailure;
+            }
+            catch (...)
+            {
+                SetError(L"Unknown MP4 recording finalize failure.");
+                LogNative(L"StopRecording failed | unknown exception");
+                ReleaseRecordingWriterNoThrow();
+                recordingPath_.clear();
+                return EcResult::NativeFailure;
+            }
         }
 
         EcResult GetStats(EcVideoStats& stats) const
@@ -549,6 +615,11 @@ namespace EventCaptureNative
         }
 
     private:
+        bool ReplayEnabled() const
+        {
+            return config_.enableReplay != 0;
+        }
+
         void CreateDevice()
         {
             const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
@@ -1455,8 +1526,98 @@ namespace EventCaptureNative
             LogNative(L"ConfigureEncoderTransform stream messages completed");
         }
 
+        void CreateRecordingWriter(const wchar_t* path)
+        {
+            ComPtr<IMFAttributes> attributes;
+            ThrowIfFailed(MFCreateAttributes(&attributes, 1));
+            ThrowIfFailed(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
+
+            ComPtr<IMFSinkWriter> writer;
+            ThrowIfFailed(MFCreateSinkWriterFromURL(path, nullptr, attributes.Get(), &writer));
+
+            ComPtr<IMFMediaType> outputType;
+            ThrowIfFailed(MFCreateMediaType(&outputType));
+            ThrowIfFailed(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+            ThrowIfFailed(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrateKbps * 1000));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
+            ThrowIfFailed(MFSetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE, config_.outputWidth, config_.outputHeight));
+            ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
+            ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
+            ConfigureSdrBt709ColorMetadata(outputType.Get());
+
+            DWORD streamIndex = 0;
+            ThrowIfFailed(writer->AddStream(outputType.Get(), &streamIndex));
+            ThrowIfFailed(writer->SetInputMediaType(streamIndex, outputType.Get(), nullptr));
+            ThrowIfFailed(writer->BeginWriting());
+
+            recordingWriter_ = writer;
+            recordingStreamIndex_ = streamIndex;
+            LogNative(L"MP4 encoded sample writer started.");
+        }
+
+        void ReleaseRecordingWriterNoThrow()
+        {
+            try
+            {
+                if (recordingWriter_ != nullptr)
+                {
+                    recordingWriter_.Reset();
+                }
+            }
+            catch (...) {}
+        }
+
+        void WriteRecordingSample(IMFSample* sourceSample, int64_t nativeTimestamp100ns, int64_t fallbackDuration100ns, bool keyFrame)
+        {
+            std::scoped_lock lock(packetMutex_);
+            if ((!recording_ && !recordingPending_) || recordingWriter_ == nullptr) return;
+
+            if (recordingPending_ && !keyFrame) return;
+
+            if (recordingStart100ns_ < 0)
+            {
+                recordingPending_ = false;
+                recording_ = true;
+                recordingStart100ns_ = nativeTimestamp100ns;
+                recordingLastTimestamp100ns_ = nativeTimestamp100ns - fallbackDuration100ns;
+            }
+
+            if (nativeTimestamp100ns <= recordingLastTimestamp100ns_)
+            {
+                nativeTimestamp100ns = recordingLastTimestamp100ns_ + 1;
+            }
+
+            const int64_t sampleTime = nativeTimestamp100ns - recordingStart100ns_;
+            const int64_t sampleDuration = recordingFrameCount_ == 0
+                ? fallbackDuration100ns
+                : std::max<int64_t>(1, nativeTimestamp100ns - recordingLastTimestamp100ns_);
+
+            ThrowIfFailed(sourceSample->SetSampleTime(sampleTime));
+            ThrowIfFailed(sourceSample->SetSampleDuration(sampleDuration));
+            ThrowIfFailed(sourceSample->SetUINT32(MFSampleExtension_CleanPoint, keyFrame ? TRUE : FALSE));
+            ThrowIfFailed(recordingWriter_->WriteSample(recordingStreamIndex_, sourceSample));
+
+            recordingLastTimestamp100ns_ = nativeTimestamp100ns;
+            recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
+            ++recordingFrameCount_;
+        }
+
         void EncodeLoop()
         {
+            DWORD mmcssTaskIndex = 0;
+            HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Capture", &mmcssTaskIndex);
+            if (mmcssHandle != nullptr)
+            {
+                AvSetMmThreadPriority(mmcssHandle, AVRT_PRIORITY_HIGH);
+                LogNative(L"EncodeLoop MMCSS enabled | Task=Capture | Priority=High");
+            }
+            else
+            {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                LogNative(L"EncodeLoop MMCSS unavailable; using THREAD_PRIORITY_HIGHEST.");
+            }
+
             try
             {
                 LogNative(L"EncodeLoop started.");
@@ -1465,6 +1626,8 @@ namespace EventCaptureNative
                 while (running_)
                 {
                     next += std::chrono::nanoseconds(frameDuration * 100);
+                    bool framePrepared = false;
+
                     {
                         std::unique_lock lock(textureMutex_);
                         frameCondition_.wait_until(lock, next, [this] { return hasTexture_ || !running_; });
@@ -1496,6 +1659,11 @@ namespace EventCaptureNative
                             }
                         }
 
+                        framePrepared = true;
+                    }
+
+                    if (framePrepared)
+                    {
                         try
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
@@ -1514,6 +1682,7 @@ namespace EventCaptureNative
                             droppedFrames_.fetch_add(1);
                         }
                     }
+
                     std::this_thread::sleep_until(next);
                 }
                 if (encoder_)
@@ -1553,6 +1722,10 @@ namespace EventCaptureNative
             }
 
             LogNative(L"EncodeLoop exited.");
+            if (mmcssHandle != nullptr)
+            {
+                AvRevertMmThreadCharacteristics(mmcssHandle);
+            }
         }
 
         void SubmitFrame(ID3D11Texture2D* texture, int64_t timestamp, int64_t duration)
@@ -1643,6 +1816,17 @@ namespace EventCaptureNative
 
         void ConsumeEncodedSample(IMFSample* sample)
         {
+            int64_t timestamp = CurrentTimestamp100ns();
+            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_) timestamp = lastPacketTimestamp100ns_ + 1;
+            const int64_t duration = lastPacketTimestamp100ns_ >= 0
+                ? std::max<int64_t>(1, timestamp - lastPacketTimestamp100ns_)
+                : TicksPerSecond / config_.framesPerSecond;
+            lastPacketTimestamp100ns_ = timestamp;
+
+            UINT32 cleanPoint = FALSE;
+            sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint);
+            WriteRecordingSample(sample, timestamp, duration, cleanPoint != FALSE);
+
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(sample->ConvertToContiguousBuffer(&buffer));
             BYTE* data = nullptr;
@@ -1652,7 +1836,7 @@ namespace EventCaptureNative
             EncodedFrame frame;
             try
             {
-                frame.bytes = ToAnnexB(data, currentLength);
+                frame.bytes.assign(data, data + currentLength);
             }
             catch (...)
             {
@@ -1660,30 +1844,16 @@ namespace EventCaptureNative
                 throw;
             }
             buffer->Unlock();
-            LONGLONG timestamp = 0;
-            LONGLONG duration = TicksPerSecond / config_.framesPerSecond;
-            sample->GetSampleTime(&timestamp);
-            sample->GetSampleDuration(&duration);
-            UINT32 cleanPoint = FALSE;
-            sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint);
             frame.timestamp100ns = timestamp;
             frame.duration100ns = duration;
             frame.keyFrame = cleanPoint != FALSE;
-            AddPacket(std::move(frame));
+            if (ReplayEnabled()) AddPacket(std::move(frame));
             encodedFrames_.fetch_add(1);
         }
 
         void AddPacket(EncodedFrame frame)
         {
             std::scoped_lock lock(packetMutex_);
-            int64_t timestamp = CurrentTimestamp100ns();
-            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_) timestamp = lastPacketTimestamp100ns_ + 1;
-            frame.duration100ns = lastPacketTimestamp100ns_ >= 0
-                ? std::max<int64_t>(1, timestamp - lastPacketTimestamp100ns_)
-                : TicksPerSecond / config_.framesPerSecond;
-            frame.timestamp100ns = timestamp;
-            lastPacketTimestamp100ns_ = timestamp;
-
             const uint64_t size = frame.bytes.size();
             if (activeSpool_ == nullptr || (frame.keyFrame && activeSpoolFrameCount_ > 0)) RotateSpoolFile();
             const std::streampos position = activeSpoolStream_.tellp();
@@ -1750,39 +1920,115 @@ namespace EventCaptureNative
             activeSpoolFrameCount_ = 0;
         }
 
-        bool WriteFrames(const wchar_t* path, const std::vector<EncodedFrame>& frames)
+        bool WriteFramesToMp4(const wchar_t* path, const std::vector<EncodedFrame>& frames)
         {
-            std::ofstream stream(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
-            if (!stream)
+            if (frames.empty()) return false;
+
+            try
             {
-                SetError(L"Could not create replay export stream");
+                ComPtr<IMFAttributes> attributes;
+                ThrowIfFailed(MFCreateAttributes(&attributes, 1));
+                ThrowIfFailed(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
+
+                ComPtr<IMFSinkWriter> writer;
+                ThrowIfFailed(MFCreateSinkWriterFromURL(path, nullptr, attributes.Get(), &writer));
+
+                ComPtr<IMFMediaType> videoType;
+                ThrowIfFailed(MFCreateMediaType(&videoType));
+                ThrowIfFailed(videoType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+                ThrowIfFailed(videoType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
+                ThrowIfFailed(videoType->SetUINT32(MF_MT_AVG_BITRATE, config_.bitrateKbps * 1000));
+                ThrowIfFailed(videoType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
+                ThrowIfFailed(MFSetAttributeSize(videoType.Get(), MF_MT_FRAME_SIZE, config_.outputWidth, config_.outputHeight));
+                ThrowIfFailed(MFSetAttributeRatio(videoType.Get(), MF_MT_FRAME_RATE, config_.framesPerSecond, 1));
+                ThrowIfFailed(MFSetAttributeRatio(videoType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
+                ConfigureSdrBt709ColorMetadata(videoType.Get());
+
+                DWORD streamIndex = 0;
+                ThrowIfFailed(writer->AddStream(videoType.Get(), &streamIndex));
+                ThrowIfFailed(writer->SetInputMediaType(streamIndex, videoType.Get(), nullptr));
+                ThrowIfFailed(writer->BeginWriting());
+
+                const int64_t frameDuration100ns = 10'000'000LL / std::max<uint32_t>(1, config_.framesPerSecond);
+                int64_t sampleTime100ns = 0;
+                std::wstring currentStoragePath;
+                std::ifstream input;
+                std::vector<uint8_t> bytes;
+
+                for (const auto& frame : frames)
+                {
+                    if (frame.storage == nullptr || frame.storageLength == 0)
+                    {
+                        SetError(L"Replay frame storage is unavailable.");
+                        return false;
+                    }
+
+                    if (frame.storage->path != currentStoragePath)
+                    {
+                        input.close();
+                        currentStoragePath = frame.storage->path;
+                        input.open(std::filesystem::path(currentStoragePath), std::ios::binary);
+                        if (!input)
+                        {
+                            SetError(L"Could not open replay spool file.");
+                            return false;
+                        }
+                    }
+
+                    bytes.resize(frame.storageLength);
+                    input.seekg(static_cast<std::streamoff>(frame.storageOffset), std::ios::beg);
+                    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    if (input.gcount() != static_cast<std::streamsize>(bytes.size()))
+                    {
+                        SetError(L"Could not read replay spool packet.");
+                        return false;
+                    }
+
+                    ComPtr<IMFMediaBuffer> buffer;
+                    ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(bytes.size()), &buffer));
+                    BYTE* destination = nullptr;
+                    DWORD maxLength = 0;
+                    DWORD currentLength = 0;
+                    ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
+                    std::memcpy(destination, bytes.data(), bytes.size());
+                    ThrowIfFailed(buffer->Unlock());
+                    ThrowIfFailed(buffer->SetCurrentLength(static_cast<DWORD>(bytes.size())));
+
+                    ComPtr<IMFSample> sample;
+                    ThrowIfFailed(MFCreateSample(&sample));
+                    ThrowIfFailed(sample->AddBuffer(buffer.Get()));
+                    ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
+                    ThrowIfFailed(sample->SetSampleDuration(frameDuration100ns));
+                    ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, frame.keyFrame ? TRUE : FALSE));
+                    ThrowIfFailed(writer->WriteSample(streamIndex, sample.Get()));
+                    sampleTime100ns += frameDuration100ns;
+                }
+
+                ThrowIfFailed(writer->Finalize());
+                LogNative(L"Replay MP4 export completed.");
+                return true;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"Replay MP4 export failed with HRESULT 0x" << std::hex
+                    << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+                SetError(message.str());
+                LogNative(message.str());
                 return false;
             }
-            std::wstring currentStoragePath;
-            std::ifstream input;
-            std::vector<char> buffer;
-            for (const auto& frame : frames)
+            catch (const std::exception& error)
             {
-                if (frame.storage == nullptr || frame.storageLength == 0) return false;
-                if (frame.storage->path != currentStoragePath)
-                {
-                    input.close();
-                    currentStoragePath = frame.storage->path;
-                    input.open(std::filesystem::path(currentStoragePath), std::ios::binary);
-                    if (!input) return false;
-                }
-                buffer.resize(frame.storageLength);
-                input.seekg(static_cast<std::streamoff>(frame.storageOffset), std::ios::beg);
-                input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-                if (input.gcount() != static_cast<std::streamsize>(buffer.size())) return false;
-                stream.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-                if (!stream)
-                {
-                    SetError(L"Could not write replay export stream");
-                    return false;
-                }
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"Replay MP4 export failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                return false;
             }
-            return true;
+            catch (...)
+            {
+                SetError(L"Unknown replay MP4 export failure.");
+                LogNative(L"Replay MP4 export failed | unknown exception");
+                return false;
+            }
         }
 
         void ForceKeyFrame()
@@ -1819,6 +2065,7 @@ namespace EventCaptureNative
             }
 
             if (recordingStream_.is_open()) recordingStream_.close();
+            ReleaseRecordingWriterNoThrow();
             if (activeSpoolStream_.is_open()) activeSpoolStream_.close();
             recording_ = false;
             recordingPending_ = false;
@@ -1944,6 +2191,8 @@ namespace EventCaptureNative
         std::deque<EncodedFrame> packets_;
         std::wstring recordingPath_;
         std::ofstream recordingStream_;
+        ComPtr<IMFSinkWriter> recordingWriter_;
+        DWORD recordingStreamIndex_{};
         std::filesystem::path spoolDirectory_;
         std::shared_ptr<EncodedStorageFile> activeSpool_;
         std::ofstream activeSpoolStream_;
@@ -1953,6 +2202,7 @@ namespace EventCaptureNative
         bool recording_{ false };
         int64_t recordingStart100ns_{};
         int64_t recordingEnd100ns_{};
+        int64_t recordingLastTimestamp100ns_{ -1 };
         int64_t lastPacketTimestamp100ns_{ -1 };
         uint64_t recordingFrameCount_{};
         std::chrono::steady_clock::time_point encodeClockStart_{};

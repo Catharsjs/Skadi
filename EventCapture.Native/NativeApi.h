@@ -35,6 +35,7 @@ struct EcVideoConfig
     uint32_t framesPerSecond;
     uint32_t bitrateKbps;
     uint32_t replaySeconds;
+    int32_t enableReplay;
 };
 
 struct EcExportResult

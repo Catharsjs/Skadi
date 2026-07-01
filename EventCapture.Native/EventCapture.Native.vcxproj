@@ -27,7 +27,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><LanguageStandard>stdcpp20</LanguageStandard><ConformanceMode>true</ConformanceMode><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;EVENTCAPTURENATIVE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;dxgi.lib;mfplat.lib;mf.lib;mfuuid.lib;mfreadwrite.lib;runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>avrt.lib;d3d11.lib;d3dcompiler.lib;dwmapi.lib;dxgi.lib;mfplat.lib;mf.lib;mfuuid.lib;mfreadwrite.lib;runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="NativeApi.h" />

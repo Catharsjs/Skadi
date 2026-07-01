@@ -26,7 +26,8 @@ public sealed class GpuCapturePipeline : IDisposable
         int height,
         int bitrateKbps,
         int bufferSeconds,
-        string captureTarget)
+        string captureTarget,
+        bool enableReplay)
     {
         _fps = Math.Max(1, fps);
         var target = ResolveTarget(captureTarget);
@@ -39,7 +40,8 @@ public sealed class GpuCapturePipeline : IDisposable
             OutputHeight = (uint)Math.Max(2, height & ~1),
             FramesPerSecond = (uint)_fps,
             BitrateKbps = (uint)Math.Max(1_000, bitrateKbps),
-            ReplaySeconds = (uint)Math.Max(5, bufferSeconds)
+            ReplaySeconds = (uint)Math.Max(5, bufferSeconds),
+            EnableReplay = enableReplay ? 1 : 0
         };
 
         NativeResult result = NativeMethods.CreateVideoEngine(in config, out _handle);
@@ -67,24 +69,15 @@ public sealed class GpuCapturePipeline : IDisposable
         ThrowIfDisposed();
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
         Directory.CreateDirectory(outputFolder);
-        string rawPath = Path.Combine(_sessionDirectory, $"replay-{Guid.NewGuid():N}.h264");
-        var export = NativeExportResult.Create();
-        ThrowIfFailed(
-            NativeMethods.SaveReplay(_handle, rawPath, (uint)Math.Max(1, seconds), ref export),
-            _handle);
-
         string outputPath = Path.Combine(
             outputFolder,
             $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}.mp4");
+        var export = NativeExportResult.Create();
+        ThrowIfFailed(
+            NativeMethods.SaveReplay(_handle, outputPath, (uint)Math.Max(1, seconds), ref export),
+            _handle);
         double exportFps = CalculateExportFps(export);
-        try
-        {
-            await RemuxH264Async(rawPath, outputPath, exportFps);
-        }
-        finally
-        {
-            TryDelete(rawPath);
-        }
+        await Task.CompletedTask;
 
         long startMilliseconds = export.StartTimestamp100ns / 10_000;
         long elapsedMilliseconds = Math.Max(
@@ -106,7 +99,7 @@ public sealed class GpuCapturePipeline : IDisposable
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
         if (_continuousRawPath is not null)
             throw new InvalidOperationException("Continuous video recording is already active.");
-        string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.h264");
+        string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.mp4");
         ThrowIfFailed(NativeMethods.StartRecording(_handle, path), _handle);
         _continuousRawPath = path;
     }
@@ -115,7 +108,7 @@ public sealed class GpuCapturePipeline : IDisposable
         string outputFolder)
     {
         ThrowIfDisposed();
-        string rawPath = _continuousRawPath
+        string nativeMp4Path = _continuousRawPath
             ?? throw new InvalidOperationException("Continuous video recording is not active.");
         var export = NativeExportResult.Create();
         ThrowIfFailed(NativeMethods.StopRecording(_handle, ref export), _handle);
@@ -125,14 +118,7 @@ public sealed class GpuCapturePipeline : IDisposable
             outputFolder,
             $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_video.mp4");
         double exportFps = CalculateExportFps(export);
-        try
-        {
-            await RemuxH264Async(rawPath, outputPath, exportFps);
-        }
-        finally
-        {
-            TryDelete(rawPath);
-        }
+        await Task.Run(() => File.Move(nativeMp4Path, outputPath, true));
 
         LogExportDiagnostics(
             "Continuous",
@@ -420,6 +406,7 @@ internal struct NativeVideoConfig
     public uint FramesPerSecond;
     public uint BitrateKbps;
     public uint ReplaySeconds;
+    public int EnableReplay;
 }
 
 [StructLayout(LayoutKind.Sequential)]

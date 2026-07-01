@@ -208,6 +208,19 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
             return result;
         }
+        catch
+        {
+            IsContinuousRecording = false;
+
+            if (_settings is not null && !_settings.BufferEnabled)
+            {
+                await _pipelineLock.WaitAsync();
+                try { StopPipelineCore(); }
+                finally { _pipelineLock.Release(); }
+            }
+
+            throw;
+        }
         finally
         {
             _continuousLock.Release();
@@ -265,7 +278,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 height,
                 videoBitrate,
                 _settings.BufferSeconds,
-                _settings.CaptureTarget);
+                _settings.CaptureTarget,
+                _settings.BufferEnabled);
             _videoPipeline.Start();
             sharedTimestamp = _videoPipeline.StartTimestamp;
         }
