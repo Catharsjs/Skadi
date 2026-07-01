@@ -669,11 +669,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _systemAudioMeterDevice = ResolveAudioMeterDevice(
                 DataFlow.Render,
-                _systemDeviceIds.GetValueOrDefault(SystemAudioDevice));
+                ResolveSelectedAudioDeviceId(_systemDeviceIds, SystemAudioDevice));
 
             _microphoneMeterDevice = ResolveAudioMeterDevice(
                 DataFlow.Capture,
-                _microphoneDeviceIds.GetValueOrDefault(MicrophoneDevice));
+                ResolveSelectedAudioDeviceId(_microphoneDeviceIds, MicrophoneDevice));
         }
         catch (Exception ex)
         {
@@ -681,6 +681,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 nameof(MainViewModel),
                 $"Audio meter refresh failed: {ex}");
         }
+    }
+
+    private static string? ResolveSelectedAudioDeviceId(
+        IReadOnlyDictionary<string, string?> deviceIds,
+        string? selectedDeviceName)
+    {
+        return string.IsNullOrWhiteSpace(selectedDeviceName)
+            ? null
+            : deviceIds.TryGetValue(selectedDeviceName, out string? deviceId)
+                ? deviceId
+                : null;
     }
 
     private MMDevice? ResolveAudioMeterDevice(
@@ -1134,6 +1145,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             bool restart = _restartPending;
             _restartPending = false;
 
+            if (restart && IsContinuousRecording)
+            {
+                _restartPending = true;
+                LogEvent(
+                    "Stop recording to change settings",
+                    warning: true);
+                return;
+            }
+
             // Bindings і settings оновлюються в UI thread.
             ApplyToSettings();
             _settings.Save();
@@ -1166,6 +1186,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
+            if (restartCapture && IsContinuousRecording)
+            {
+                LogEvent(
+                    "Stop recording to change settings",
+                    warning: true);
+                return;
+            }
+
             ApplyToSettings();
             _settings.Save();
 

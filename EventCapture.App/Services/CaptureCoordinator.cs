@@ -224,7 +224,11 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try
         {
             if (IsContinuousRecording)
-                throw new InvalidOperationException("Stop recording before changing capture settings.");
+            {
+                AppLogger.Info("Pipeline restart skipped because continuous recording is active.");
+                return;
+            }
+
             StopPipelineCore();
             if (_settings.BufferEnabled)
             {
