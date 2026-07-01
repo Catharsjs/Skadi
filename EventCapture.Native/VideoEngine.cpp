@@ -480,19 +480,33 @@ namespace EventCaptureNative
             if (path == nullptr || seconds == 0) return EcResult::InvalidArgument;
             if (!ReplayEnabled()) return EcResult::InvalidState;
             std::vector<EncodedFrame> frames;
+            int64_t windowStart100ns = 0;
+            int64_t windowEnd100ns = 0;
             {
                 std::scoped_lock lock(packetMutex_);
                 if (packets_.empty()) return EcResult::InvalidState;
-                const size_t requestedFrames = static_cast<size_t>(seconds) * config_.framesPerSecond;
+
+                const int64_t requestedDuration100ns = static_cast<int64_t>(seconds) * 10'000'000LL;
+                windowEnd100ns = packets_.back().timestamp100ns + std::max<int64_t>(1, packets_.back().duration100ns);
+                windowStart100ns = std::max<int64_t>(
+                    packets_.front().timestamp100ns,
+                    windowEnd100ns - requestedDuration100ns);
+
+                size_t start = 0;
+                while (start < packets_.size())
+                {
+                    const int64_t frameEnd100ns = packets_[start].timestamp100ns + std::max<int64_t>(1, packets_[start].duration100ns);
+                    if (frameEnd100ns > windowStart100ns) break;
+                    ++start;
+                }
+
                 size_t end = packets_.size();
-                size_t start = end > requestedFrames ? end - requestedFrames : 0;
                 if (start >= end) return EcResult::InvalidState;
                 frames.assign(packets_.begin() + static_cast<std::ptrdiff_t>(start), packets_.begin() + static_cast<std::ptrdiff_t>(end));
             }
-            if (!WriteFramesToMp4(path, frames)) return EcResult::NativeFailure;
-            const int64_t frameDuration100ns = 10'000'000LL / std::max<uint32_t>(1, config_.framesPerSecond);
-            result.startTimestamp100ns = 0;
-            result.endTimestamp100ns = static_cast<int64_t>(frames.size()) * frameDuration100ns;
+            if (!WriteFramesToMp4(path, frames, windowStart100ns, windowEnd100ns)) return EcResult::NativeFailure;
+            result.startTimestamp100ns = windowStart100ns;
+            result.endTimestamp100ns = windowEnd100ns;
             result.frameCount = frames.size();
             return EcResult::Ok;
         }
@@ -1920,9 +1934,14 @@ namespace EventCaptureNative
             activeSpoolFrameCount_ = 0;
         }
 
-        bool WriteFramesToMp4(const wchar_t* path, const std::vector<EncodedFrame>& frames)
+        bool WriteFramesToMp4(
+            const wchar_t* path,
+            const std::vector<EncodedFrame>& frames,
+            int64_t windowStart100ns,
+            int64_t windowEnd100ns)
         {
             if (frames.empty()) return false;
+            if (windowEnd100ns <= windowStart100ns) return false;
 
             try
             {
@@ -1949,8 +1968,6 @@ namespace EventCaptureNative
                 ThrowIfFailed(writer->SetInputMediaType(streamIndex, videoType.Get(), nullptr));
                 ThrowIfFailed(writer->BeginWriting());
 
-                const int64_t frameDuration100ns = 10'000'000LL / std::max<uint32_t>(1, config_.framesPerSecond);
-                int64_t sampleTime100ns = 0;
                 std::wstring currentStoragePath;
                 std::ifstream input;
                 std::vector<uint8_t> bytes;
@@ -1997,11 +2014,18 @@ namespace EventCaptureNative
                     ComPtr<IMFSample> sample;
                     ThrowIfFailed(MFCreateSample(&sample));
                     ThrowIfFailed(sample->AddBuffer(buffer.Get()));
+
+                    const int64_t frameStart100ns = std::max(frame.timestamp100ns, windowStart100ns);
+                    const int64_t frameEnd100ns = std::min(
+                        frame.timestamp100ns + std::max<int64_t>(1, frame.duration100ns),
+                        windowEnd100ns);
+                    const int64_t sampleTime100ns = std::max<int64_t>(0, frameStart100ns - windowStart100ns);
+                    const int64_t sampleDuration100ns = std::max<int64_t>(1, frameEnd100ns - frameStart100ns);
+
                     ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
-                    ThrowIfFailed(sample->SetSampleDuration(frameDuration100ns));
+                    ThrowIfFailed(sample->SetSampleDuration(sampleDuration100ns));
                     ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, frame.keyFrame ? TRUE : FALSE));
                     ThrowIfFailed(writer->WriteSample(streamIndex, sample.Get()));
-                    sampleTime100ns += frameDuration100ns;
                 }
 
                 ThrowIfFailed(writer->Finalize());
