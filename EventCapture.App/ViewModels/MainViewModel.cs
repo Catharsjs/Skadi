@@ -1079,6 +1079,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             IsContinuousRecording =
                 wasRecording &&
+                _capture.IsContinuousRecording &&
                 !ex.Message.Contains("not active", StringComparison.OrdinalIgnoreCase);
 
             AppLogger.Error(nameof(MainViewModel), ex.ToString());

@@ -696,23 +696,7 @@ public sealed class AudioRecorder : IDisposable
 
     private static async Task RunFfmpegAsync(string arguments, string operation)
     {
-        string ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            }
-        };
-
-        process.Start();
-        string error = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0) throw new InvalidOperationException($"{operation} failed: {error}");
+        await FfmpegLocator.RunAsync(arguments, operation);
     }
 
     private static long CalculateBufferDurationMs(WaveFormat format, int bytesRecorded)

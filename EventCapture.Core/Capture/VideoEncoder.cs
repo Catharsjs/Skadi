@@ -64,7 +64,7 @@ public sealed class VideoEncoder : IDisposable
             ThrowIfDisposed();
             if (_isRunning) return;
 
-            string ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
+            string ffmpegPath = FfmpegLocator.GetFfmpegPath();
             string forceKeyFrames = $"expr:gte(t,n_forced*{SegmentSeconds})";
             string encoderOptions = HardwareEncoderSelector.GetEncoderOptions(
                 ffmpegPath,
@@ -246,7 +246,7 @@ public sealed class VideoEncoder : IDisposable
                 listPath,
                 segments.Select(segment => $"file '{segment.Path.Replace('\\', '/').Replace("'", "'\\''")}'"));
 
-            string ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
+            string ffmpegPath = FfmpegLocator.GetFfmpegPath();
             string arguments =
                 $"-hide_banner -loglevel warning -y -f concat -safe 0 -i \"{listPath}\" " +
                 $"-map 0:v:0 -an -c:v copy -movflags +faststart \"{outputPath}\"";

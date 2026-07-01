@@ -7,7 +7,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace EventCapture.Core.Capture;
 
-public sealed class GpuCapturePipeline : IDisposable
+public sealed class GpuCapturePipeline : IVideoCapturePipeline
 {
     private const int DwmwaExtendedFrameBounds = 9;
     private const int MonitorIntersectionTolerancePixels = 16;
@@ -207,7 +207,7 @@ public sealed class GpuCapturePipeline : IDisposable
 
     private static async Task RemuxH264Async(string inputPath, string outputPath, double fps)
     {
-        string ffmpegPath = FFMpegCore.GlobalFFOptions.GetFFMpegBinaryPath();
+        string ffmpegPath = FfmpegLocator.GetFfmpegPath();
         string fpsText = fps.ToString("0.###", CultureInfo.InvariantCulture);
         string arguments =
             $"-y -hide_banner -loglevel error -fflags +genpts -r {fpsText} " +

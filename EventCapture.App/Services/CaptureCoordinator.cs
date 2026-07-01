@@ -9,7 +9,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private readonly SemaphoreSlim _continuousLock = new(1, 1);
-    private GpuCapturePipeline? _videoPipeline;
+    private IVideoCapturePipeline? _videoPipeline;
     private AudioRecorder? _audioRecorder;
     private AppSettings? _settings;
 
@@ -50,7 +50,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             else
             {
                 if (_videoPipeline is null || !_videoPipeline.IsRunning)
-                    throw new InvalidOperationException("GPU capture pipeline is not running.");
+                    throw new InvalidOperationException("Video capture pipeline is not running.");
 
                 var saved = await _videoPipeline.SaveLastSecondsAsync(
                     _settings.SaveFolder,
@@ -266,14 +266,12 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 height,
                 effectiveFps,
                 _settings.VideoQuality);
-            _videoPipeline = new GpuCapturePipeline(
+            _videoPipeline = CreateVideoPipeline(
+                _settings,
                 effectiveFps,
                 width,
                 height,
-                videoBitrate,
-                _settings.BufferSeconds,
-                _settings.CaptureTarget,
-                _settings.BufferEnabled);
+                videoBitrate);
             _videoPipeline.Start();
             sharedTimestamp = _videoPipeline.StartTimestamp;
         }
@@ -292,8 +290,47 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
 
         AppLogger.Info(
-            $"Native GPU pipeline started | Mode={_settings.CaptureMode} | " +
+            $"Video pipeline started | Type={_videoPipeline?.GetType().Name} | Mode={_settings.CaptureMode} | " +
             $"Target={_settings.CaptureTarget} | FPS={effectiveFps} | Bitrate={videoBitrate}kbps");
+    }
+
+    private static IVideoCapturePipeline CreateVideoPipeline(
+        AppSettings settings,
+        int fps,
+        int width,
+        int height,
+        int bitrateKbps)
+    {
+        if (ShouldUseWindows10FfmpegMonitorFallback(settings))
+        {
+            return new FfmpegMonitorCapturePipeline(
+                fps,
+                width,
+                height,
+                bitrateKbps,
+                settings.BufferSeconds,
+                settings.CaptureTarget,
+                settings.BufferEnabled);
+        }
+
+        return new GpuCapturePipeline(
+            fps,
+            width,
+            height,
+            bitrateKbps,
+            settings.BufferSeconds,
+            settings.CaptureTarget,
+            settings.BufferEnabled);
+    }
+
+    private static bool ShouldUseWindows10FfmpegMonitorFallback(AppSettings settings)
+    {
+        if (settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
+            return false;
+
+        Version version = Environment.OSVersion.Version;
+        bool isWindows10 = OperatingSystem.IsWindows() && version.Major == 10 && version.Build < 22000;
+        return isWindows10;
     }
 
     private static (int Width, int Height) ResolveResolution(AppSettings settings)
