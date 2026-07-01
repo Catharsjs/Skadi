@@ -549,6 +549,7 @@ namespace EventCaptureNative
             {
                 std::scoped_lock lock(packetMutex_);
                 if (packets_.empty()) return EcResult::InvalidState;
+                if (activeSpoolStream_.is_open()) activeSpoolStream_.flush();
 
                 const int64_t requestedDuration100ns = static_cast<int64_t>(seconds) * 10'000'000LL;
                 windowEnd100ns = packets_.back().timestamp100ns + std::max<int64_t>(1, packets_.back().duration100ns);
@@ -1033,6 +1034,9 @@ namespace EventCaptureNative
 
             LogNative(L"DesktopDuplicationLoop started.");
 
+            const int64_t frameDuration100ns = TicksPerSecond / std::max<uint32_t>(1, config_.framesPerSecond);
+            int64_t nextRepeatFrame100ns = -1;
+
             while (running_)
             {
                 bool frameAcquired = false;
@@ -1041,10 +1045,26 @@ namespace EventCaptureNative
                 {
                     DXGI_OUTDUPL_FRAME_INFO frameInfo{};
                     ComPtr<IDXGIResource> resource;
-                    HRESULT result = desktopDuplication_->AcquireNextFrame(100, &frameInfo, &resource);
+                    HRESULT result = desktopDuplication_->AcquireNextFrame(2, &frameInfo, &resource);
 
                     if (result == DXGI_ERROR_WAIT_TIMEOUT)
                     {
+                        const int64_t now100ns = CurrentTimestamp100ns();
+                        if (desktopDuplicationLastTexture_ != nullptr &&
+                            nextRepeatFrame100ns >= 0 &&
+                            now100ns >= nextRepeatFrame100ns)
+                        {
+                            QueueDesktopDuplicationFrame(
+                                desktopDuplicationLastTexture_.Get(),
+                                false);
+
+                            do
+                            {
+                                nextRepeatFrame100ns += frameDuration100ns;
+                            }
+                            while (nextRepeatFrame100ns <= now100ns);
+                        }
+
                         continue;
                     }
 
@@ -1060,7 +1080,8 @@ namespace EventCaptureNative
 
                     ComPtr<ID3D11Texture2D> texture;
                     ThrowIfFailed(resource.As(&texture));
-                    QueueDesktopDuplicationFrame(texture.Get());
+                    QueueDesktopDuplicationFrame(texture.Get(), true);
+                    nextRepeatFrame100ns = CurrentTimestamp100ns() + frameDuration100ns;
                 }
                 catch (const winrt::hresult_error& error)
                 {
@@ -1096,7 +1117,9 @@ namespace EventCaptureNative
             }
         }
 
-        void QueueDesktopDuplicationFrame(ID3D11Texture2D* texture)
+        void QueueDesktopDuplicationFrame(
+            ID3D11Texture2D* texture,
+            bool updateLastFrame)
         {
             if (texture == nullptr) return;
 
@@ -1122,6 +1145,26 @@ namespace EventCaptureNative
 
             const size_t slotIndex = nextMonitorFrameSlot_;
             nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+
+            if (updateLastFrame)
+            {
+                if (desktopDuplicationLastTexture_ == nullptr)
+                {
+                    D3D11_TEXTURE2D_DESC description{};
+                    texture->GetDesc(&description);
+                    description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                    description.MiscFlags = 0;
+                    ThrowIfFailed(device_->CreateTexture2D(
+                        &description,
+                        nullptr,
+                        &desktopDuplicationLastTexture_));
+                }
+
+                context_->CopyResource(
+                    desktopDuplicationLastTexture_.Get(),
+                    texture);
+            }
+
             context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture);
             monitorFrameSlots_[slotIndex].captureTimestamp100ns = captureTimestamp100ns;
             queuedMonitorFrameSlots_.push_back(slotIndex);
@@ -2291,7 +2334,7 @@ namespace EventCaptureNative
             const int64_t cutoff = packets_.back().timestamp100ns - static_cast<int64_t>(config_.replaySeconds + 2) * TicksPerSecond;
             while (packets_.size() > config_.framesPerSecond && packets_.front().timestamp100ns < cutoff)
             {
-                bufferedBytes_.fetch_sub(packets_.front().bytes.size());
+                bufferedBytes_.fetch_sub(packets_.front().storageLength);
                 packets_.pop_front();
             }
 
@@ -2671,6 +2714,7 @@ namespace EventCaptureNative
             framePool_ = nullptr;
             captureItem_ = nullptr;
             desktopDuplication_.Reset();
+            desktopDuplicationLastTexture_.Reset();
             encoder_.Reset();
             codecApi_.Reset();
             eventGenerator_.Reset();
@@ -2738,6 +2782,7 @@ namespace EventCaptureNative
         GraphicsCaptureSession captureSession_{ nullptr };
         winrt::event_token frameToken_{};
         ComPtr<IDXGIOutputDuplication> desktopDuplication_;
+        ComPtr<ID3D11Texture2D> desktopDuplicationLastTexture_;
         std::thread desktopDuplicationThread_;
 
         mutable std::mutex textureMutex_;

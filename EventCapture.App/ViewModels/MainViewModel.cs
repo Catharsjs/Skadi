@@ -42,6 +42,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private MMDevice? _microphoneMeterDevice;
     private bool _restartPending;
     private bool _eventIsWarning;
+    private bool _suppressAudioDeviceChangeEvents;
     private int _captureSectionTransitionVersion;
     private bool _initializing = true;
     private bool _bufferEnabled;
@@ -334,8 +335,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public string QualityBitrate => Quality switch { "Low" => "50% bitrate", "High" => "90% bitrate", _ => "70% bitrate" };
     public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate · {value} FPS"); QueueSettingsUpdate(true); } } }
     public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration · {value} sec"); QueueSettingsUpdate(false); } } }
-    public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { RefreshAudioMeterDevices(); LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } }
-    public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { RefreshAudioMeterDevices(); LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } }
+    public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } } }
+    public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } } }
 
     public double SystemVolume
     {
@@ -517,6 +518,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void LoadAudioDevices()
     {
+        bool previousSuppressAudioDeviceChangeEvents =
+            _suppressAudioDeviceChangeEvents;
+
+        _suppressAudioDeviceChangeEvents = true;
+
+        try
+        {
         bool hadSystemSelection =
             _systemDeviceIds.TryGetValue(
                 _systemAudioDevice,
@@ -641,6 +649,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             nameof(MicrophoneDevice));
 
         RefreshAudioMeterDevices();
+        }
+        finally
+        {
+            _suppressAudioDeviceChangeEvents =
+                previousSuppressAudioDeviceChangeEvents;
+        }
     }
 
     private void StartAudioLevelMonitoring()
