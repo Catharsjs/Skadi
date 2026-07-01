@@ -1,26 +1,60 @@
 # Skadi
 
-Skadi is a compact Windows desktop capture tool built around a WPF control panel and a native GPU-accelerated recording pipeline.
+Skadi is a compact Windows desktop capture tool built around a WPF side-panel UI and a native GPU-accelerated recording pipeline.
 
-The project is designed as a background utility for instant replay capture, screenshots, and regular start/stop recording. It focuses on a clean side-panel UI, low-latency capture, hardware encoding, and predictable resource usage.
+The application runs in the background and provides three main workflows:
 
-> Portfolio note: this project demonstrates WPF/MVVM desktop UI development, Windows Graphics Capture integration, Direct3D 11 interop, Media Foundation hardware encoding, audio capture, global hotkeys, DPI-aware layout, and native/managed interoperability.
+- quick screenshots with area selection;
+- instant replay export from a rolling buffer;
+- regular start/stop recording.
+
+> Portfolio note: this project demonstrates WPF/MVVM desktop UI development, Windows Graphics Capture integration, Direct3D 11 interop, Media Foundation hardware encoding, audio capture, global hotkeys, DPI-aware layout, installer packaging, and native/managed interoperability.
+
+## Download and Install
+
+The latest installer is included in the repository:
+
+```text
+Installer/Output/Skadi_Setup_v2.0.1.exe
+```
+
+To install Skadi on another Windows PC:
+
+1. Download or clone this repository.
+2. Run `Installer/Output/Skadi_Setup_v2.0.1.exe`.
+3. Follow the installer steps.
+4. Launch Skadi from the Start Menu, desktop shortcut, or system tray.
+
+The installer targets x64 Windows and automatically downloads and installs the .NET 10 Desktop Runtime if it is missing.
+
+## Default Hotkeys
+
+| Action | Hotkey |
+|---|---|
+| Save Screenshot | `Alt+F1` |
+| Start/Stop Recording | `Alt+F2` |
+| Save Replay | `Alt+F3` |
+| Show/Hide UI | `Alt+Z` |
+
+Hotkeys can be changed from the UI. A hotkey can also be cleared with `Backspace`, after which it is shown as `Not assigned`.
 
 ## Features
 
+- Screenshot capture
+  - opens a dimmed multi-monitor selection overlay;
+  - click a monitor to capture the full monitor;
+  - drag-select an area to capture only that region;
+  - saves the screenshot as PNG;
+  - copies the screenshot to the clipboard.
 - Instant replay buffer
-  - continuously keeps the latest configured duration in the background;
+  - keeps the latest configured duration in the background;
   - exports the latest buffer with `Save Replay`;
   - supports video, audio, and combined capture modes.
 - Regular recording
   - `Start Recording` / `Stop Recording`;
-  - separate hotkey from replay export;
-  - saves a complete recording from the moment recording starts.
-- Screenshot capture
-  - monitor capture;
-  - selected window capture;
-  - save-folder selection.
-- Capture target selection
+  - saves a complete recording from the moment recording starts;
+  - supports video, audio, and combined capture modes.
+- Capture target selection for video recording and replay
   - monitors;
   - Alt+Tab-style windows;
   - preview grid with pagination.
@@ -28,15 +62,8 @@ The project is designed as a background utility for instant replay capture, scre
   - system audio device selection;
   - microphone device selection;
   - per-source recording volume;
+  - live activity indicators;
   - automatic refresh when audio devices are added, removed, or changed.
-- Global hotkeys
-  - configurable from the UI;
-  - hotkeys can be cleared with Backspace and shown as `Not assigned`;
-  - default mapping:
-    - `Alt+F1` — Save Screenshot;
-    - `Alt+F2` — Save Replay;
-    - `Alt+F3` — Start/Stop Recording;
-    - `Alt+Z` — Toggle UI.
 - Background-first workflow
   - starts in the background;
   - tray menu;
@@ -82,14 +109,14 @@ EventCapture.App
   WPF UI, MVVM, tray integration, global hotkeys, notifications
 
 EventCapture.Core
-  capture coordinator, audio recorder, screenshots, settings-facing services
+  capture coordinator, audio recorder, screenshot selection, settings-facing services
 
 EventCapture.Native
   native C++ GPU video pipeline:
-  Windows Graphics Capture → Direct3D 11 → GPU BGRA/NV12 conversion → hardware H.264 encoder
+  Windows Graphics Capture -> Direct3D 11 -> GPU BGRA/NV12 conversion -> hardware H.264 encoder
 ```
 
-### High-level capture pipeline
+### High-level video pipeline
 
 ```text
 Selected monitor/window
@@ -98,16 +125,32 @@ Windows Graphics Capture
         ↓
 Direct3D 11 texture
         ↓
-GPU color conversion
+GPU color conversion / frame normalization
         ↓
 Media Foundation H.264 hardware encoder
         ↓
-Bounded encoded replay storage / regular recording file
+Bounded encoded replay storage or continuous recording writer
         ↓
-MP4 muxing with FFmpeg
+MP4 output
 ```
 
-The video pipeline avoids copying full frames into managed memory. Encoded packets are stored in a bounded native ring/spool structure, which keeps memory usage predictable during long background sessions.
+The video pipeline avoids copying full frames into managed memory. Encoded samples are stored in bounded native storage for replay, which keeps memory usage predictable during background sessions.
+
+### Screenshot pipeline
+
+```text
+Save Screenshot / Alt+F1
+        ↓
+Multi-monitor selection overlay
+        ↓
+Full monitor click or region selection
+        ↓
+Windows Graphics Capture screenshot
+        ↓
+PNG file + clipboard
+```
+
+Screenshot capture is intentionally independent from the selected video capture target.
 
 ## Technology Stack
 
@@ -121,21 +164,29 @@ The video pipeline avoids copying full frames into managed memory. Encoded packe
 - Windows Graphics Capture
 - Direct3D 11
 - Media Foundation hardware H.264 encoding
-- NAudio
+- NAudio / WASAPI
 - FFmpeg
+- Inno Setup
 - Per-Monitor DPI Awareness V2
 
-## Requirements
+## Requirements for Running
 
-- Windows 10 19041+ / Windows 11
+- Windows 10 19041+ or Windows 11
+- x64 system
+- .NET 10 Desktop Runtime
+  - installed automatically by the installer if missing
+
+## Requirements for Development
+
 - Visual Studio 2026 with:
   - .NET desktop development workload;
   - Desktop development with C++;
   - Windows SDK 10.0.26100.0 or compatible;
   - MSVC toolset compatible with `v145`.
 - x64 build target.
+- Inno Setup 6 for installer builds.
 
-## Build
+## Build from Source
 
 Open:
 
@@ -163,6 +214,26 @@ Rebuild Solution
 
 Rebuild is recommended because the WPF app depends on the native `EventCapture.Native.dll`. The app project copies the native DLL into the output directory after build.
 
+## Build Installer
+
+Publish the WPF application for x64:
+
+```powershell
+MSBuild EventCapture.App\EventCapture.App.csproj /t:Restore,Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=false
+```
+
+Then compile the installer:
+
+```powershell
+ISCC Installer\Skadi.iss
+```
+
+The installer output is written to:
+
+```text
+Installer/Output/Skadi_Setup_v2.0.1.exe
+```
+
 ## Project Structure
 
 ```text
@@ -170,10 +241,13 @@ EventCapture.App/
   WPF application, XAML views, view models, styles, tray and hotkey services
 
 EventCapture.Core/
-  capture coordination, audio capture, screenshot saving, FFmpeg integration
+  capture coordination, audio capture, screenshot overlay integration, FFmpeg integration
 
 EventCapture.Native/
   C++ native GPU video engine and exported C ABI
+
+Installer/
+  Inno Setup installer script and installer output
 
 ThirdParty/FFmpeg/
   bundled FFmpeg binaries and license files
@@ -183,36 +257,31 @@ ThirdParty/FFmpeg/
 
 Implemented:
 
-- WPF UI prototype integrated with capture backend;
+- WPF UI integrated with capture backend;
 - monitor/window capture target selection;
 - instant replay export;
 - regular start/stop recording;
-- screenshot capture;
+- monitor/region screenshot capture;
 - system audio capture;
 - microphone capture path;
 - configurable hotkeys;
 - tray integration;
 - native GPU video pipeline;
 - hardware H.264 encoding;
-- DPI-aware scalable side panel.
+- MP4 output;
+- DPI-aware scalable side panel;
+- Windows installer with .NET runtime bootstrap.
 
-In progress / planned:
+Known limitations:
 
-- deeper performance profiling on more hardware configurations;
-- additional encoder options;
-- more robust edge-case handling for protected or unavailable windows;
-- packaging / installer;
-- automated UI tests;
-- optional overlay refinements.
+- Some protected or elevated windows may not be capturable because of OS-level restrictions, DRM, or application-specific rendering behavior.
+- Monitor capture currently uses Windows Graphics Capture; performance can vary depending on GPU load, compositor behavior, and the target application.
+- Further backend work is planned for more stable high-load monitor/game capture scenarios.
 
 ## Screenshots
 
 ![Skadi Basic Settings](docs/screenshots/basicsettings.png)
 ![Skadi Advanced Settings](docs/screenshots/advancedsettings.png)
-
-## Notes
-
-Some windows may not be capturable because of OS-level protection, DRM, elevated-process isolation, or application-specific rendering behavior. Skadi handles unavailable targets as gracefully as possible, but capture availability ultimately depends on Windows Graphics Capture and the target application.
 
 ## License
 

@@ -10,7 +10,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private readonly SemaphoreSlim _continuousLock = new(1, 1);
     private GpuCapturePipeline? _videoPipeline;
-    private ScreenshotSaver? _screenshotSaver;
     private AudioRecorder? _audioRecorder;
     private AppSettings? _settings;
 
@@ -22,19 +21,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     public async Task ApplySettingsAsync(AppSettings settings, bool restartPipeline)
     {
         _settings = settings;
-        _screenshotSaver = CreateScreenshotSaver(settings);
         _audioRecorder?.SetSystemVolume(settings.SystemAudioVolume);
         _audioRecorder?.SetMicrophoneVolume(settings.MicVolume);
 
         if (restartPipeline) await RestartPipelineAsync();
-    }
-
-    public Task<string> SaveScreenshotAsync()
-    {
-        if (_settings is null)
-            throw new InvalidOperationException("Capture is not initialized.");
-        _screenshotSaver ??= CreateScreenshotSaver(_settings);
-        return Task.Run(() => _screenshotSaver.SaveScreenshot());
     }
 
     public async Task<string> SaveRecordAsync()
@@ -300,14 +290,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         AppLogger.Info(
             $"Native GPU pipeline started | Mode={_settings.CaptureMode} | " +
             $"Target={_settings.CaptureTarget} | FPS={effectiveFps} | Bitrate={videoBitrate}kbps");
-    }
-
-    private ScreenshotSaver CreateScreenshotSaver(AppSettings settings)
-    {
-        if (settings.Resolution == "Native")
-            return new ScreenshotSaver(settings.SaveFolder, 0, 0, settings.CaptureTarget);
-        var (width, height) = ResolveResolution(settings);
-        return new ScreenshotSaver(settings.SaveFolder, width, height, settings.CaptureTarget);
     }
 
     private static (int Width, int Height) ResolveResolution(AppSettings settings)

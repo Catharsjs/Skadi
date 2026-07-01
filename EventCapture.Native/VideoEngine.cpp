@@ -28,6 +28,7 @@
 #include <csignal>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <iomanip>
@@ -58,6 +59,13 @@ namespace EventCaptureNative
             float y;
             float u;
             float v;
+        };
+
+        struct MonitorFrameSlot
+        {
+            ComPtr<ID3D11Texture2D> texture;
+            ComPtr<ID3D11VideoProcessorInputView> inputView;
+            int64_t captureTimestamp100ns{};
         };
 
         constexpr int64_t TicksPerSecond = 10'000'000;
@@ -428,6 +436,7 @@ namespace EventCaptureNative
                 encodeClockStart_ = std::chrono::steady_clock::now();
                 lastPacketTimestamp100ns_ = -1;
                 submittedFrames_.store(0);
+                ResetCaptureDiagnostics();
                 running_ = true;
                 LogNative(L"StartCapture begin.");
                 captureSession_.StartCapture();
@@ -504,6 +513,7 @@ namespace EventCaptureNative
                 if (start >= end) return EcResult::InvalidState;
                 frames.assign(packets_.begin() + static_cast<std::ptrdiff_t>(start), packets_.begin() + static_cast<std::ptrdiff_t>(end));
             }
+            LogReplayCaptureDiagnostics(seconds, windowStart100ns, windowEnd100ns, frames);
             if (!WriteFramesToMp4(path, frames, windowStart100ns, windowEnd100ns)) return EcResult::NativeFailure;
             result.startTimestamp100ns = windowStart100ns;
             result.endTimestamp100ns = windowEnd100ns;
@@ -690,7 +700,7 @@ namespace EventCaptureNative
             framePool_ = Direct3D11CaptureFramePool::CreateFreeThreaded(
                 winRtDevice_,
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                2,
+                3,
                 size);
             frameToken_ = framePool_.FrameArrived([this](const Direct3D11CaptureFramePool& pool, const winrt::Windows::Foundation::IInspectable&)
                 {
@@ -724,6 +734,7 @@ namespace EventCaptureNative
 
                             windowSourceInvalid_.store(true);
                             hasTexture_ = true;
+                            ++textureVersion_;
                             frameCondition_.notify_one();
                             return;
                         }
@@ -757,13 +768,40 @@ namespace EventCaptureNative
                                 description.Height);
                         }
 
-                        context_->CopyResource(latestTexture_.Get(), texture.Get());
+                        if (config_.targetKind == EcTargetKind::Monitor)
+                        {
+                            const int64_t captureTimestamp100ns = CurrentTimestamp100ns();
+                            monitorQueueMaxDepth_.store(std::max<uint64_t>(
+                                monitorQueueMaxDepth_.load(),
+                                static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
+
+                            if (queuedMonitorFrameSlots_.size() >= monitorFrameSlots_.size())
+                            {
+                                queuedMonitorFrameSlots_.pop_front();
+                                monitorQueueOverflowFrames_.fetch_add(1);
+                                droppedFrames_.fetch_add(1);
+                            }
+
+                            const size_t slotIndex = nextMonitorFrameSlot_;
+                            nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+                            context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture.Get());
+                            monitorFrameSlots_[slotIndex].captureTimestamp100ns = captureTimestamp100ns;
+                            queuedMonitorFrameSlots_.push_back(slotIndex);
+                            monitorQueueMaxDepth_.store(std::max<uint64_t>(
+                                monitorQueueMaxDepth_.load(),
+                                static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
+                        }
+                        else
+                        {
+                            context_->CopyResource(latestTexture_.Get(), texture.Get());
+                        }
                         sourceContentWidth_ = std::max<uint32_t>(1, std::min<uint32_t>(contentWidth, sourceWidth_));
                         sourceContentHeight_ = std::max<uint32_t>(1, std::min<uint32_t>(contentHeight, sourceHeight_));
                         windowSourceInvalid_.store(false);
                         hasTexture_ = true;
                         ++textureVersion_;
                         capturedFrames_.fetch_add(1);
+                        AddDiagnosticTimestamp(capturedTimeline100ns_, CurrentTimestamp100ns());
                         frameCondition_.notify_one();
                         lock.unlock();
 
@@ -772,7 +810,7 @@ namespace EventCaptureNative
                             framePool_.Recreate(
                                 winRtDevice_,
                                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                                2,
+                                3,
                                 contentSize);
                         }
                     }
@@ -865,6 +903,7 @@ namespace EventCaptureNative
                 processor_ = nextProcessor;
                 processorInput_ = nextProcessorInput;
                 processorOutput_ = nextProcessorOutput;
+                CreateMonitorFrameQueue(width, height);
             }
 
             latestTexture_ = nextLatestTexture;
@@ -874,6 +913,44 @@ namespace EventCaptureNative
             sourceHeight_ = height;
             if (sourceContentWidth_ == 0) sourceContentWidth_ = width;
             if (sourceContentHeight_ == 0) sourceContentHeight_ = height;
+        }
+
+        void CreateMonitorFrameQueue(uint32_t width, uint32_t height)
+        {
+            monitorFrameSlots_.clear();
+            queuedMonitorFrameSlots_.clear();
+            nextMonitorFrameSlot_ = 0;
+
+            if (config_.targetKind != EcTargetKind::Monitor || processorEnumerator_ == nullptr) return;
+
+            D3D11_TEXTURE2D_DESC description{};
+            description.Width = width;
+            description.Height = height;
+            description.MipLevels = 1;
+            description.ArraySize = 1;
+            description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            description.SampleDesc.Count = 1;
+            description.Usage = D3D11_USAGE_DEFAULT;
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputView{};
+            inputView.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            inputView.Texture2D.MipSlice = 0;
+            inputView.Texture2D.ArraySlice = 0;
+
+            constexpr size_t QueueSize = 8;
+            monitorFrameSlots_.reserve(QueueSize);
+            for (size_t index = 0; index < QueueSize; ++index)
+            {
+                MonitorFrameSlot slot;
+                ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &slot.texture));
+                ThrowIfFailed(videoDevice_->CreateVideoProcessorInputView(
+                    slot.texture.Get(),
+                    processorEnumerator_.Get(),
+                    &inputView,
+                    &slot.inputView));
+                monitorFrameSlots_.push_back(std::move(slot));
+            }
         }
 
         bool IsWindowOnInitialMonitor() const
@@ -1636,35 +1713,57 @@ namespace EventCaptureNative
             {
                 LogNative(L"EncodeLoop started.");
                 const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
-                auto next = std::chrono::steady_clock::now();
+                uint64_t lastEncodedTextureVersion = 0;
                 while (running_)
                 {
-                    next += std::chrono::nanoseconds(frameDuration * 100);
                     bool framePrepared = false;
+                    uint64_t preparedTextureVersion = 0;
+                    int64_t preparedCaptureTimestamp100ns = 0;
+                    ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
 
                     {
                         std::unique_lock lock(textureMutex_);
-                        frameCondition_.wait_until(lock, next, [this] { return hasTexture_ || !running_; });
-                        if (!running_) break;
-                        if (!hasTexture_)
-                        {
-                            droppedFrames_.fetch_add(1);
-                            continue;
-                        }
-                        if (config_.targetKind == EcTargetKind::Window)
-                        {
-                            context_->CopyResource(encoderTexture_.Get(), blackTexture_.Get());
-                            if (!windowSourceInvalid_.load())
+                        frameCondition_.wait(lock, [this, lastEncodedTextureVersion]
                             {
-                                RenderWindowSourceToCanvas();
+                                return !running_ ||
+                                    (config_.targetKind == EcTargetKind::Monitor && !queuedMonitorFrameSlots_.empty()) ||
+                                    (config_.targetKind != EcTargetKind::Monitor && hasTexture_ && textureVersion_ != lastEncodedTextureVersion);
+                            });
+                        if (!running_) break;
+
+                        if (config_.targetKind == EcTargetKind::Monitor)
+                        {
+                            if (queuedMonitorFrameSlots_.empty()) continue;
+                            const size_t slotIndex = queuedMonitorFrameSlots_.front();
+                            queuedMonitorFrameSlots_.pop_front();
+                            if (slotIndex >= monitorFrameSlots_.size()) continue;
+                            selectedProcessorInput = monitorFrameSlots_[slotIndex].inputView;
+                            preparedCaptureTimestamp100ns = monitorFrameSlots_[slotIndex].captureTimestamp100ns;
+                            preparedTextureVersion = textureVersion_;
+                        }
+                        else
+                        {
+                            if (!hasTexture_ || textureVersion_ == lastEncodedTextureVersion) continue;
+
+                            if (config_.targetKind == EcTargetKind::Window)
+                            {
+                                context_->CopyResource(encoderTexture_.Get(), blackTexture_.Get());
+                                if (!windowSourceInvalid_.load())
+                                {
+                                    RenderWindowSourceToCanvas();
+                                }
                             }
+
+                            selectedProcessorInput = processorInput_;
+                            preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
+                            preparedTextureVersion = textureVersion_;
                         }
 
                         if (!(config_.targetKind == EcTargetKind::Window && windowSourceInvalid_.load()))
                         {
                             D3D11_VIDEO_PROCESSOR_STREAM stream{};
                             stream.Enable = TRUE;
-                            stream.pInputSurface = processorInput_.Get();
+                            stream.pInputSurface = selectedProcessorInput.Get();
                             const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
                             if (FAILED(blit))
                             {
@@ -1681,9 +1780,11 @@ namespace EventCaptureNative
                         try
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
+                            AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
                             SubmitFrame(encoderTexture_.Get(), static_cast<int64_t>(submittedIndex) * frameDuration, frameDuration);
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
+                            lastEncodedTextureVersion = preparedTextureVersion;
                         }
                         catch (const winrt::hresult_error& error)
                         {
@@ -1696,8 +1797,6 @@ namespace EventCaptureNative
                             droppedFrames_.fetch_add(1);
                         }
                     }
-
-                    std::this_thread::sleep_until(next);
                 }
                 if (encoder_)
                 {
@@ -1862,6 +1961,7 @@ namespace EventCaptureNative
             frame.duration100ns = duration;
             frame.keyFrame = cleanPoint != FALSE;
             if (ReplayEnabled()) AddPacket(std::move(frame));
+            AddDiagnosticTimestamp(encodedTimeline100ns_, timestamp);
             encodedFrames_.fetch_add(1);
         }
 
@@ -1921,6 +2021,139 @@ namespace EventCaptureNative
         {
             const auto elapsed = std::chrono::steady_clock::now() - encodeClockStart_;
             return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 100;
+        }
+
+        void ResetCaptureDiagnostics()
+        {
+            std::scoped_lock lock(diagnosticsMutex_);
+            capturedTimeline100ns_.clear();
+            submittedTimeline100ns_.clear();
+            encodedTimeline100ns_.clear();
+            monitorQueueOverflowFrames_.store(0);
+            monitorQueueMaxDepth_.store(0);
+        }
+
+        void AddDiagnosticTimestamp(std::deque<int64_t>& timeline, int64_t timestamp100ns)
+        {
+            std::scoped_lock lock(diagnosticsMutex_);
+            timeline.push_back(timestamp100ns);
+            TrimDiagnosticTimelineLocked(timeline, timestamp100ns);
+        }
+
+        void TrimDiagnosticTimelineLocked(std::deque<int64_t>& timeline, int64_t newestTimestamp100ns) const
+        {
+            const int64_t retention100ns =
+                (static_cast<int64_t>(std::max<uint32_t>(config_.replaySeconds, 1)) + 10LL) * TicksPerSecond;
+            const int64_t minimumTimestamp100ns = newestTimestamp100ns - retention100ns;
+            while (!timeline.empty() && timeline.front() < minimumTimestamp100ns)
+            {
+                timeline.pop_front();
+            }
+        }
+
+        static size_t CountTimelineRange(
+            const std::deque<int64_t>& timeline,
+            int64_t startTimestamp100ns,
+            int64_t endTimestamp100ns)
+        {
+            return static_cast<size_t>(std::count_if(
+                timeline.begin(),
+                timeline.end(),
+                [startTimestamp100ns, endTimestamp100ns](int64_t timestamp)
+                {
+                    return timestamp >= startTimestamp100ns && timestamp < endTimestamp100ns;
+                }));
+        }
+
+        void LogReplayCaptureDiagnostics(
+            uint32_t requestedSeconds,
+            int64_t windowStart100ns,
+            int64_t windowEnd100ns,
+            const std::vector<EncodedFrame>& frames)
+        {
+            const int64_t windowDuration100ns = std::max<int64_t>(1, windowEnd100ns - windowStart100ns);
+            const double windowSeconds = static_cast<double>(windowDuration100ns) / static_cast<double>(TicksPerSecond);
+            const uint64_t expectedFrames = static_cast<uint64_t>(
+                std::llround(windowSeconds * static_cast<double>(config_.framesPerSecond)));
+
+            size_t capturedInWindow = 0;
+            size_t submittedInWindow = 0;
+            size_t encodedInWindow = 0;
+            {
+                std::scoped_lock lock(diagnosticsMutex_);
+                capturedInWindow = CountTimelineRange(capturedTimeline100ns_, windowStart100ns, windowEnd100ns);
+                submittedInWindow = CountTimelineRange(submittedTimeline100ns_, windowStart100ns, windowEnd100ns);
+                encodedInWindow = CountTimelineRange(encodedTimeline100ns_, windowStart100ns, windowEnd100ns);
+            }
+
+            const int64_t idealFrameDuration100ns = TicksPerSecond / std::max<uint32_t>(1, config_.framesPerSecond);
+            size_t gapsOverOneAndHalfFrames = 0;
+            size_t gapsOverTwoFrames = 0;
+            size_t gapsOverThreeFrames = 0;
+            int64_t largestGap100ns = 0;
+
+            for (size_t index = 1; index < frames.size(); ++index)
+            {
+                const int64_t gap100ns = frames[index].timestamp100ns - frames[index - 1].timestamp100ns;
+                largestGap100ns = std::max(largestGap100ns, gap100ns);
+                if (gap100ns > idealFrameDuration100ns * 3 / 2) ++gapsOverOneAndHalfFrames;
+                if (gap100ns > idealFrameDuration100ns * 2) ++gapsOverTwoFrames;
+                if (gap100ns > idealFrameDuration100ns * 3) ++gapsOverThreeFrames;
+            }
+
+            const uint64_t replayFrames = static_cast<uint64_t>(frames.size());
+            const uint64_t missingFrames = expectedFrames > replayFrames ? expectedFrames - replayFrames : 0;
+            const int64_t capturedToSubmittedLoss = static_cast<int64_t>(capturedInWindow) - static_cast<int64_t>(submittedInWindow);
+            const int64_t submittedToEncodedLoss = static_cast<int64_t>(submittedInWindow) - static_cast<int64_t>(encodedInWindow);
+            const int64_t encodedToReplayLoss = static_cast<int64_t>(encodedInWindow) - static_cast<int64_t>(replayFrames);
+
+            const wchar_t* likelyBottleneck = L"none";
+            if (missingFrames > 0)
+            {
+                if (capturedInWindow + 2 < expectedFrames)
+                {
+                    likelyBottleneck = L"WGC/capture source did not deliver enough frames";
+                }
+                else if (capturedToSubmittedLoss > static_cast<int64_t>(std::max<uint64_t>(3, missingFrames / 4)))
+                {
+                    likelyBottleneck = L"EncodeLoop did not submit enough captured frames";
+                }
+                else if (submittedToEncodedLoss > static_cast<int64_t>(std::max<uint64_t>(3, missingFrames / 4)))
+                {
+                    likelyBottleneck = L"H.264 encoder did not output enough submitted frames";
+                }
+                else if (encodedToReplayLoss > 3)
+                {
+                    likelyBottleneck = L"Replay buffer/export window excluded encoded frames";
+                }
+                else
+                {
+                    likelyBottleneck = L"capture intervals are irregular inside the replay window";
+                }
+            }
+
+            std::wstringstream log;
+            log
+                << L"Replay frame diagnostics | RequestedSec=" << requestedSeconds
+                << L" | WindowSec=" << std::fixed << std::setprecision(3) << windowSeconds
+                << L" | ConfiguredFps=" << config_.framesPerSecond
+                << L" | ExpectedFrames=" << expectedFrames
+                << L" | WgcCapturedInWindow=" << capturedInWindow
+                << L" | SubmittedInWindow=" << submittedInWindow
+                << L" | EncodedInWindow=" << encodedInWindow
+                << L" | ReplayFrames=" << replayFrames
+                << L" | MissingForConfiguredFps=" << missingFrames
+                << L" | CapturedMinusSubmitted=" << capturedToSubmittedLoss
+                << L" | SubmittedMinusEncoded=" << submittedToEncodedLoss
+                << L" | EncodedMinusReplay=" << encodedToReplayLoss
+                << L" | MonitorQueueOverflow=" << monitorQueueOverflowFrames_.load()
+                << L" | MonitorQueueMaxDepth=" << monitorQueueMaxDepth_.load()
+                << L" | GapsOver1_5Frames=" << gapsOverOneAndHalfFrames
+                << L" | GapsOver2Frames=" << gapsOverTwoFrames
+                << L" | GapsOver3Frames=" << gapsOverThreeFrames
+                << L" | LargestGapMs=" << static_cast<double>(largestGap100ns) / 10'000.0
+                << L" | LikelyBottleneck=" << likelyBottleneck;
+            LogNative(log.str());
         }
 
         void RotateSpoolFile()
@@ -2201,6 +2434,9 @@ namespace EventCaptureNative
         uint32_t windowFrameHeight_{};
         bool hasTexture_{ false };
         uint64_t textureVersion_{};
+        std::vector<MonitorFrameSlot> monitorFrameSlots_;
+        std::deque<size_t> queuedMonitorFrameSlots_;
+        size_t nextMonitorFrameSlot_{};
         HMONITOR initialWindowMonitor_{ nullptr };
         std::atomic_bool windowSourceInvalid_{ false };
 
@@ -2231,11 +2467,18 @@ namespace EventCaptureNative
         uint64_t recordingFrameCount_{};
         std::chrono::steady_clock::time_point encodeClockStart_{};
 
+        mutable std::mutex diagnosticsMutex_;
+        std::deque<int64_t> capturedTimeline100ns_;
+        std::deque<int64_t> submittedTimeline100ns_;
+        std::deque<int64_t> encodedTimeline100ns_;
+
         std::atomic_uint64_t capturedFrames_{};
         std::atomic_uint64_t submittedFrames_{};
         std::atomic_uint64_t encodedFrames_{};
         std::atomic_uint64_t droppedFrames_{};
         std::atomic_uint64_t bufferedBytes_{};
+        std::atomic_uint64_t monitorQueueOverflowFrames_{};
+        std::atomic_uint64_t monitorQueueMaxDepth_{};
     };
 
     VideoEngine::VideoEngine(const EcVideoConfig& config) : implementation_(std::make_unique<Implementation>(config)) {}
