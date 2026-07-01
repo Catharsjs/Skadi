@@ -68,6 +68,12 @@ namespace EventCaptureNative
             int64_t captureTimestamp100ns{};
         };
 
+        enum class CaptureBackend
+        {
+            WindowsGraphicsCapture,
+            DesktopDuplication
+        };
+
         constexpr int64_t TicksPerSecond = 10'000'000;
         std::once_flag diagnosticsInstallFlag;
 
@@ -164,6 +170,29 @@ namespace EventCaptureNative
         {
             AppendNativeLogNoThrow(message);
             OutputDebugStringW((message + L"\n").c_str());
+        }
+
+        bool TryGetWindowsBuildNumber(uint32_t& buildNumber)
+        {
+            buildNumber = 0;
+            using RtlGetVersionFunction = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+            HMODULE module = GetModuleHandleW(L"ntdll.dll");
+            if (module == nullptr) return false;
+            auto rtlGetVersion = reinterpret_cast<RtlGetVersionFunction>(
+                GetProcAddress(module, "RtlGetVersion"));
+            if (rtlGetVersion == nullptr) return false;
+            RTL_OSVERSIONINFOW version{};
+            version.dwOSVersionInfoSize = sizeof(version);
+            if (rtlGetVersion(&version) != 0) return false;
+            buildNumber = version.dwBuildNumber;
+            return true;
+        }
+
+        bool IsWindows11OrGreater()
+        {
+            uint32_t buildNumber = 0;
+            return TryGetWindowsBuildNumber(buildNumber) &&
+                buildNumber >= 22000;
         }
 
         void AbortSignalHandler(int signal)
@@ -373,10 +402,16 @@ namespace EventCaptureNative
         explicit Implementation(const EcVideoConfig& config) : config_(config)
         {
             InstallNativeDiagnostics();
+            captureBackend_ =
+                config_.targetKind == EcTargetKind::Monitor && !IsWindows11OrGreater()
+                    ? CaptureBackend::DesktopDuplication
+                    : CaptureBackend::WindowsGraphicsCapture;
 
             std::wstringstream configLog;
             configLog
                 << L"VideoEngine ctor | Pipeline=mp4-encoded-sample-v2"
+                << L" | Backend="
+                << (captureBackend_ == CaptureBackend::DesktopDuplication ? L"DDA" : L"WGC")
                 << L" | TargetKind=" << static_cast<int32_t>(config_.targetKind)
                 << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config_.targetHandle)
                 << std::dec
@@ -427,8 +462,16 @@ namespace EventCaptureNative
                 mediaFoundationStarted_ = true;
                 startupStage_ = L"D3D11 device creation";
                 CreateDevice();
-                startupStage_ = L"Windows Graphics Capture creation";
-                CreateCapture();
+                if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                {
+                    startupStage_ = L"Desktop Duplication capture creation";
+                    CreateDesktopDuplicationCapture();
+                }
+                else
+                {
+                    startupStage_ = L"Windows Graphics Capture creation";
+                    CreateCapture();
+                }
                 startupStage_ = L"H.264 encoder creation";
                 LogNative(L"CreateEncoder begin.");
                 CreateEncoder();
@@ -438,9 +481,21 @@ namespace EventCaptureNative
                 submittedFrames_.store(0);
                 ResetCaptureDiagnostics();
                 running_ = true;
-                LogNative(L"StartCapture begin.");
-                captureSession_.StartCapture();
-                LogNative(L"StartCapture completed.");
+                if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                {
+                    LogNative(L"DesktopDuplication thread creation begin.");
+                    desktopDuplicationThread_ = std::thread([this] { DesktopDuplicationLoop(); });
+                    std::wstringstream log;
+                    log << L"DesktopDuplication thread created | IdHash="
+                        << std::hash<std::thread::id>{}(desktopDuplicationThread_.get_id());
+                    LogNative(log.str());
+                }
+                else
+                {
+                    LogNative(L"StartCapture begin.");
+                    captureSession_.StartCapture();
+                    LogNative(L"StartCapture completed.");
+                }
                 LogNative(L"Encoder thread creation begin.");
                 encoderThread_ = std::thread([this] { EncodeLoop(); });
                 {
@@ -644,13 +699,60 @@ namespace EventCaptureNative
             return config_.enableReplay != 0;
         }
 
+        ComPtr<IDXGIAdapter1> FindAdapterForTargetMonitor()
+        {
+            if (config_.targetKind != EcTargetKind::Monitor ||
+                config_.targetHandle == nullptr)
+            {
+                return nullptr;
+            }
+
+            ComPtr<IDXGIFactory1> factory;
+            if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
+
+            for (UINT adapterIndex = 0;; ++adapterIndex)
+            {
+                ComPtr<IDXGIAdapter1> adapter;
+                if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+
+                for (UINT outputIndex = 0;; ++outputIndex)
+                {
+                    ComPtr<IDXGIOutput> output;
+                    if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+
+                    DXGI_OUTPUT_DESC description{};
+                    if (SUCCEEDED(output->GetDesc(&description)) &&
+                        description.Monitor == static_cast<HMONITOR>(config_.targetHandle))
+                    {
+                        DXGI_ADAPTER_DESC1 adapterDescription{};
+                        adapter->GetDesc1(&adapterDescription);
+                        std::wstringstream log;
+                        log
+                            << L"DDA target adapter selected | Adapter=" << adapterDescription.Description
+                            << L" | Output=" << description.DeviceName
+                            << L" | Monitor=0x" << std::hex
+                            << reinterpret_cast<uintptr_t>(description.Monitor);
+                        LogNative(log.str());
+                        return adapter;
+                    }
+                }
+            }
+
+            LogNative(L"DDA target adapter was not found; falling back to default D3D adapter.");
+            return nullptr;
+        }
+
         void CreateDevice()
         {
             const UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
             D3D_FEATURE_LEVEL featureLevel{};
+            ComPtr<IDXGIAdapter1> targetAdapter =
+                captureBackend_ == CaptureBackend::DesktopDuplication
+                    ? FindAdapterForTargetMonitor()
+                    : nullptr;
             ThrowIfFailed(D3D11CreateDevice(
-                nullptr,
-                D3D_DRIVER_TYPE_HARDWARE,
+                targetAdapter.Get(),
+                targetAdapter != nullptr ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
                 nullptr,
                 flags,
                 nullptr,
@@ -849,6 +951,191 @@ namespace EventCaptureNative
             }
             catch (...) {}
             LogNative(L"CreateCapture completed.");
+        }
+
+        void CreateDesktopDuplicationCapture()
+        {
+            if (config_.targetKind != EcTargetKind::Monitor)
+            {
+                throw std::runtime_error("Desktop Duplication backend supports monitor targets only");
+            }
+
+            LogNative(L"CreateDesktopDuplicationCapture entered.");
+
+            ComPtr<IDXGIDevice> dxgiDevice;
+            ThrowIfFailed(device_.As(&dxgiDevice));
+
+            ComPtr<IDXGIAdapter> adapter;
+            ThrowIfFailed(dxgiDevice->GetAdapter(&adapter));
+
+            ComPtr<IDXGIOutput> selectedOutput;
+            DXGI_OUTPUT_DESC selectedDescription{};
+
+            for (UINT outputIndex = 0;; ++outputIndex)
+            {
+                ComPtr<IDXGIOutput> output;
+                HRESULT result = adapter->EnumOutputs(outputIndex, &output);
+                if (result == DXGI_ERROR_NOT_FOUND) break;
+                ThrowIfFailed(result);
+
+                DXGI_OUTPUT_DESC description{};
+                ThrowIfFailed(output->GetDesc(&description));
+                if (description.Monitor == static_cast<HMONITOR>(config_.targetHandle))
+                {
+                    selectedOutput = output;
+                    selectedDescription = description;
+                    break;
+                }
+            }
+
+            if (selectedOutput == nullptr)
+            {
+                throw std::runtime_error("Desktop Duplication target output was not found on the selected adapter");
+            }
+
+            const uint32_t width = static_cast<uint32_t>(
+                std::max<LONG>(1, selectedDescription.DesktopCoordinates.right - selectedDescription.DesktopCoordinates.left));
+            const uint32_t height = static_cast<uint32_t>(
+                std::max<LONG>(1, selectedDescription.DesktopCoordinates.bottom - selectedDescription.DesktopCoordinates.top));
+
+            {
+                std::wstringstream log;
+                log
+                    << L"DDA output selected | DeviceName=" << selectedDescription.DeviceName
+                    << L" | Bounds=" << RectToString(selectedDescription.DesktopCoordinates)
+                    << L" | Size=" << width << L"x" << height;
+                LogNative(log.str());
+            }
+
+            CreateLatestTexture(width, height);
+
+            ComPtr<IDXGIOutput1> output1;
+            ThrowIfFailed(selectedOutput.As(&output1));
+            ThrowIfFailed(output1->DuplicateOutput(device_.Get(), &desktopDuplication_));
+
+            LogNative(L"CreateDesktopDuplicationCapture completed.");
+        }
+
+        void DesktopDuplicationLoop()
+        {
+            DWORD mmcssTaskIndex = 0;
+            HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Capture", &mmcssTaskIndex);
+            if (mmcssHandle != nullptr)
+            {
+                AvSetMmThreadPriority(mmcssHandle, AVRT_PRIORITY_HIGH);
+                LogNative(L"DesktopDuplicationLoop MMCSS enabled | Task=Capture | Priority=High");
+            }
+            else
+            {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                LogNative(L"DesktopDuplicationLoop MMCSS unavailable; using THREAD_PRIORITY_HIGHEST.");
+            }
+
+            LogNative(L"DesktopDuplicationLoop started.");
+
+            while (running_)
+            {
+                bool frameAcquired = false;
+
+                try
+                {
+                    DXGI_OUTDUPL_FRAME_INFO frameInfo{};
+                    ComPtr<IDXGIResource> resource;
+                    HRESULT result = desktopDuplication_->AcquireNextFrame(100, &frameInfo, &resource);
+
+                    if (result == DXGI_ERROR_WAIT_TIMEOUT)
+                    {
+                        continue;
+                    }
+
+                    if (result == DXGI_ERROR_ACCESS_LOST)
+                    {
+                        LogNative(L"DesktopDuplicationLoop access lost.");
+                        SetError(L"Desktop Duplication access was lost.");
+                        break;
+                    }
+
+                    ThrowIfFailed(result);
+                    frameAcquired = true;
+
+                    ComPtr<ID3D11Texture2D> texture;
+                    ThrowIfFailed(resource.As(&texture));
+                    QueueDesktopDuplicationFrame(texture.Get());
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    std::wstringstream log;
+                    log
+                        << L"DesktopDuplicationLoop hresult_error | Code=0x" << std::hex
+                        << static_cast<uint32_t>(error.code())
+                        << L" | Message=" << error.message().c_str();
+                    LogNative(log.str());
+                    droppedFrames_.fetch_add(1);
+                }
+                catch (const std::exception& error)
+                {
+                    LogNative(L"DesktopDuplicationLoop std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                    droppedFrames_.fetch_add(1);
+                }
+                catch (...)
+                {
+                    LogNative(L"DesktopDuplicationLoop unknown exception.");
+                    droppedFrames_.fetch_add(1);
+                }
+
+                if (frameAcquired && desktopDuplication_ != nullptr)
+                {
+                    desktopDuplication_->ReleaseFrame();
+                }
+            }
+
+            LogNative(L"DesktopDuplicationLoop exited.");
+            if (mmcssHandle != nullptr)
+            {
+                AvRevertMmThreadCharacteristics(mmcssHandle);
+            }
+        }
+
+        void QueueDesktopDuplicationFrame(ID3D11Texture2D* texture)
+        {
+            if (texture == nullptr) return;
+
+            const int64_t captureTimestamp100ns = CurrentTimestamp100ns();
+            std::unique_lock lock(textureMutex_);
+
+            if (monitorFrameSlots_.empty())
+            {
+                droppedFrames_.fetch_add(1);
+                return;
+            }
+
+            monitorQueueMaxDepth_.store(std::max<uint64_t>(
+                monitorQueueMaxDepth_.load(),
+                static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
+
+            if (queuedMonitorFrameSlots_.size() >= monitorFrameSlots_.size())
+            {
+                queuedMonitorFrameSlots_.pop_front();
+                monitorQueueOverflowFrames_.fetch_add(1);
+                droppedFrames_.fetch_add(1);
+            }
+
+            const size_t slotIndex = nextMonitorFrameSlot_;
+            nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+            context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture);
+            monitorFrameSlots_[slotIndex].captureTimestamp100ns = captureTimestamp100ns;
+            queuedMonitorFrameSlots_.push_back(slotIndex);
+            monitorQueueMaxDepth_.store(std::max<uint64_t>(
+                monitorQueueMaxDepth_.load(),
+                static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
+
+            sourceContentWidth_ = sourceWidth_;
+            sourceContentHeight_ = sourceHeight_;
+            hasTexture_ = true;
+            ++textureVersion_;
+            capturedFrames_.fetch_add(1);
+            AddDiagnosticTimestamp(capturedTimeline100ns_, captureTimestamp100ns);
+            frameCondition_.notify_one();
         }
 
         void CreateLatestTexture(uint32_t width, uint32_t height)
@@ -1713,6 +2000,7 @@ namespace EventCaptureNative
             {
                 LogNative(L"EncodeLoop started.");
                 const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
+                int64_t nextFrameDue100ns = -1;
                 uint64_t lastEncodedTextureVersion = 0;
                 while (running_)
                 {
@@ -1777,6 +2065,24 @@ namespace EventCaptureNative
 
                     if (framePrepared)
                     {
+                        if (nextFrameDue100ns < 0)
+                        {
+                            nextFrameDue100ns = preparedCaptureTimestamp100ns;
+                        }
+
+                        const int64_t pacingTolerance100ns = std::max<int64_t>(1, frameDuration / 4);
+                        if (preparedCaptureTimestamp100ns + pacingTolerance100ns < nextFrameDue100ns)
+                        {
+                            lastEncodedTextureVersion = preparedTextureVersion;
+                            continue;
+                        }
+
+                        do
+                        {
+                            nextFrameDue100ns += frameDuration;
+                        }
+                        while (nextFrameDue100ns <= preparedCaptureTimestamp100ns);
+
                         try
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
@@ -2299,6 +2605,28 @@ namespace EventCaptureNative
             running_ = false;
             frameCondition_.notify_all();
 
+            if (desktopDuplicationThread_.joinable())
+            {
+                if (desktopDuplicationThread_.get_id() == std::this_thread::get_id())
+                {
+                    LogNative(L"StopCore skipped desktopDuplicationThread join because current thread is desktopDuplicationThread.");
+                    desktopDuplicationThread_.detach();
+                }
+                else
+                {
+                    try
+                    {
+                        LogNative(L"StopCore joining desktopDuplicationThread.");
+                        desktopDuplicationThread_.join();
+                        LogNative(L"StopCore joined desktopDuplicationThread.");
+                    }
+                    catch (const std::exception& error)
+                    {
+                        LogNative(L"StopCore desktopDuplicationThread join failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                    }
+                }
+            }
+
             if (encoderThread_.joinable())
             {
                 if (encoderThread_.get_id() == std::this_thread::get_id())
@@ -2342,6 +2670,7 @@ namespace EventCaptureNative
             captureSession_ = nullptr;
             framePool_ = nullptr;
             captureItem_ = nullptr;
+            desktopDuplication_.Reset();
             encoder_.Reset();
             codecApi_.Reset();
             eventGenerator_.Reset();
@@ -2388,6 +2717,7 @@ namespace EventCaptureNative
         }
 
         EcVideoConfig config_{};
+        CaptureBackend captureBackend_{ CaptureBackend::WindowsGraphicsCapture };
         mutable std::mutex stateMutex_;
         mutable std::mutex errorMutex_;
         mutable std::wstring lastError_;
@@ -2407,6 +2737,8 @@ namespace EventCaptureNative
         Direct3D11CaptureFramePool framePool_{ nullptr };
         GraphicsCaptureSession captureSession_{ nullptr };
         winrt::event_token frameToken_{};
+        ComPtr<IDXGIOutputDuplication> desktopDuplication_;
+        std::thread desktopDuplicationThread_;
 
         mutable std::mutex textureMutex_;
         std::condition_variable frameCondition_;
