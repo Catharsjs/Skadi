@@ -483,12 +483,7 @@ namespace EventCaptureNative
                 running_ = true;
                 if (captureBackend_ == CaptureBackend::DesktopDuplication)
                 {
-                    LogNative(L"DesktopDuplication thread creation begin.");
-                    desktopDuplicationThread_ = std::thread([this] { DesktopDuplicationLoop(); });
-                    std::wstringstream log;
-                    log << L"DesktopDuplication thread created | IdHash="
-                        << std::hash<std::thread::id>{}(desktopDuplicationThread_.get_id());
-                    LogNative(log.str());
+                    LogNative(L"DesktopDuplication capture will run on the encoder thread.");
                 }
                 else
                 {
@@ -1097,6 +1092,78 @@ namespace EventCaptureNative
             }
         }
 
+        bool TryAcquireDesktopDuplicationFrame(uint32_t timeoutMilliseconds)
+        {
+            if (desktopDuplication_ == nullptr) return false;
+
+            bool frameAcquired = false;
+            bool frameUpdated = false;
+            try
+            {
+                DXGI_OUTDUPL_FRAME_INFO frameInfo{};
+                ComPtr<IDXGIResource> resource;
+                const HRESULT result = desktopDuplication_->AcquireNextFrame(timeoutMilliseconds, &frameInfo, &resource);
+
+                if (result == DXGI_ERROR_WAIT_TIMEOUT)
+                {
+                    return false;
+                }
+
+                if (result == DXGI_ERROR_ACCESS_LOST)
+                {
+                    LogNative(L"DesktopDuplication access lost.");
+                    SetError(L"Desktop Duplication access was lost.");
+                    running_ = false;
+                    return false;
+                }
+
+                ThrowIfFailed(result);
+                frameAcquired = true;
+
+                ComPtr<ID3D11Texture2D> texture;
+                ThrowIfFailed(resource.As(&texture));
+                UpdateDesktopDuplicationLatestFrame(texture.Get());
+                frameUpdated = true;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream log;
+                log
+                    << L"TryAcquireDesktopDuplicationFrame hresult_error | Code=0x" << std::hex
+                    << static_cast<uint32_t>(error.code())
+                    << L" | Message=" << error.message().c_str();
+                LogNative(log.str());
+                droppedFrames_.fetch_add(1);
+            }
+            catch (const std::exception& error)
+            {
+                LogNative(L"TryAcquireDesktopDuplicationFrame std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                droppedFrames_.fetch_add(1);
+            }
+            catch (...)
+            {
+                LogNative(L"TryAcquireDesktopDuplicationFrame unknown exception.");
+                droppedFrames_.fetch_add(1);
+            }
+
+            if (frameAcquired && desktopDuplication_ != nullptr)
+            {
+                desktopDuplication_->ReleaseFrame();
+            }
+
+            return frameUpdated;
+        }
+
+        void PumpDesktopDuplicationFrames(uint32_t firstTimeoutMilliseconds)
+        {
+            if (!TryAcquireDesktopDuplicationFrame(firstTimeoutMilliseconds)) return;
+
+            constexpr int MaxExtraFrames = 4;
+            for (int index = 0; index < MaxExtraFrames && running_; ++index)
+            {
+                if (!TryAcquireDesktopDuplicationFrame(0)) break;
+            }
+        }
         void UpdateDesktopDuplicationLatestFrame(ID3D11Texture2D* texture)
         {
             if (texture == nullptr) return;
@@ -2094,18 +2161,22 @@ namespace EventCaptureNative
                         std::unique_lock lock(textureMutex_);
                         if (useFixedDesktopDuplicationClock)
                         {
+                            lock.unlock();
+
                             if (nextFixedWake == std::chrono::steady_clock::time_point{})
                             {
-                                frameCondition_.wait(lock, [this]
-                                    {
-                                        return !running_ || hasTexture_;
-                                    });
-                                if (!running_) break;
+                                while (running_)
+                                {
+                                    PumpDesktopDuplicationFrames(16);
+                                    lock.lock();
+                                    const bool ready = hasTexture_;
+                                    lock.unlock();
+                                    if (ready) break;
+                                }
                                 nextFixedWake = std::chrono::steady_clock::now();
                             }
                             else
                             {
-                                lock.unlock();
                                 nextFixedWake += fixedFrameInterval;
                                 const auto now = std::chrono::steady_clock::now();
                                 if (nextFixedWake < now)
@@ -2113,12 +2184,13 @@ namespace EventCaptureNative
                                     nextFixedWake = now + fixedFrameInterval;
                                 }
                                 std::this_thread::sleep_until(nextFixedWake);
-                                lock.lock();
-                                if (!running_) break;
-                                if (!hasTexture_) continue;
+                                PumpDesktopDuplicationFrames(0);
                             }
 
-                            if (monitorFrameSlots_.empty()) continue;
+                            lock.lock();
+                            if (!running_) break;
+                            if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
+
                             selectedProcessorInput = monitorFrameSlots_[0].inputView;
                             preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
                             preparedTextureVersion = textureVersion_;
