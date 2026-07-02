@@ -150,6 +150,78 @@ begin
   end;
 end;
 
+function IsSkadiRunning: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+
+  if Exec(
+    ExpandConstant('{sys}\cmd.exe'),
+    '/C tasklist /FI "IMAGENAME eq {#AppExe}" | find /I "{#AppExe}" >nul',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) then
+  begin
+    Result := ResultCode = 0;
+  end;
+end;
+
+function StopSkadiProcess: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := True;
+
+  if not IsSkadiRunning() then
+  begin
+    exit;
+  end;
+
+  Exec(
+    ExpandConstant('{sys}\taskkill.exe'),
+    '/IM "{#AppExe}" /T /F',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+
+  Sleep(1000);
+  Result := not IsSkadiRunning();
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+
+  if not IsSkadiRunning() then
+  begin
+    exit;
+  end;
+
+  if MsgBox(
+    'Skadi is currently running.' + #13#10#13#10 +
+    'The application must be closed before it can be uninstalled.' + #13#10 +
+    'Do you want Setup to close Skadi now?',
+    mbConfirmation,
+    MB_YESNO) <> IDYES then
+  begin
+    Result := False;
+    exit;
+  end;
+
+  if not StopSkadiProcess() then
+  begin
+    MsgBox(
+      'Setup could not close Skadi.' + #13#10#13#10 +
+      'Please close Skadi from the system tray and run uninstall again.',
+      mbError,
+      MB_OK);
+    Result := False;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
