@@ -52,13 +52,7 @@ public sealed class ScreenshotSelectionService
                     monitorBitmap,
                     selection);
 
-            Directory.CreateDirectory(outputFolder);
-
-            string filePath =
-                Path.Combine(
-                    outputFolder,
-                    DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") +
-                    ".png");
+            string filePath = OutputFileName.Create(outputFolder, "Screenshot", ".png");
 
             finalBitmap.Save(
                 filePath,

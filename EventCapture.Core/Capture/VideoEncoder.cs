@@ -162,10 +162,7 @@ public sealed class VideoEncoder : IDisposable
             if (lease.Segments.Count == 0)
                 throw new InvalidOperationException("Replay buffer does not contain finalized video segments yet.");
 
-            Directory.CreateDirectory(outputFolder);
-            string outputPath = Path.Combine(
-                outputFolder,
-                $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}.mp4");
+            string outputPath = OutputFileName.Create(outputFolder, "Replay", ".mp4");
             await ConcatenateSegmentsAsync(lease.Segments, outputPath);
 
             long actualStart = lease.Segments[0].StartTimestamp;

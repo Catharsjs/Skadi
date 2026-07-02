@@ -270,10 +270,7 @@ public sealed class AudioRecorder : IDisposable
         string? mixedAudio = await CreateAudioSnapshotAsync(windowStart, windowEnd);
         if (mixedAudio is null) return null;
 
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_final.mp4");
+        string outputPath = OutputFileName.Create(outputFolder, "Replay", ".mp4");
 
         try
         {
@@ -293,10 +290,7 @@ public sealed class AudioRecorder : IDisposable
         string? mixedAudio = await CreateAudioSnapshotAsync(windowStart, windowEnd);
         if (mixedAudio is null) return null;
 
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_audio.mp3");
+        string outputPath = OutputFileName.Create(outputFolder, "Audio", ".mp3");
 
         try
         {
@@ -436,10 +430,7 @@ public sealed class AudioRecorder : IDisposable
         long videoEndTimestamp,
         long audioStartTimestamp)
     {
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_recording.mp4");
+        string outputPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
         long offsetMilliseconds = audioStartTimestamp - videoStartTimestamp;
         double duration = Math.Max(0.001, (videoEndTimestamp - videoStartTimestamp) / 1000.0);
         string audioFilter = offsetMilliseconds >= 0
@@ -464,10 +455,7 @@ public sealed class AudioRecorder : IDisposable
         string audioPath,
         string outputFolder)
     {
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_recording.mp3");
+        string outputPath = OutputFileName.Create(outputFolder, "Audio", ".mp3");
         await EncodeMp3Async(audioPath, outputPath);
         return outputPath;
     }

@@ -68,10 +68,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline
     {
         ThrowIfDisposed();
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}.mp4");
+        string outputPath = OutputFileName.Create(outputFolder, "Replay", ".mp4");
         var export = NativeExportResult.Create();
         ThrowIfFailed(
             NativeMethods.SaveReplay(_handle, outputPath, (uint)Math.Max(1, seconds), ref export),
@@ -113,10 +110,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline
         var export = NativeExportResult.Create();
         ThrowIfFailed(NativeMethods.StopRecording(_handle, ref export), _handle);
         _continuousRawPath = null;
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = Path.Combine(
-            outputFolder,
-            $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}_video.mp4");
+        string outputPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
         double exportFps = CalculateExportFps(export);
         await Task.Run(() => File.Move(nativeMp4Path, outputPath, true));
 
