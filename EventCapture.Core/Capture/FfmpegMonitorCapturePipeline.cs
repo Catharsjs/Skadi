@@ -417,9 +417,11 @@ public sealed class FfmpegMonitorCapturePipeline : IVideoCapturePipeline
             double trimDurationSeconds = Math.Max(0.001, (requestedEndTimestamp - requestedStartTimestamp) / 1000.0);
             string trimArguments =
                 $"-hide_banner -loglevel warning -y " +
-                $"-ss {FormatSeconds(trimStartSeconds)} -i \"{temporaryPath}\" " +
-                $"-t {FormatSeconds(trimDurationSeconds)} " +
-                $"-map 0:v:0 -an -c:v copy -movflags +faststart \"{outputPath}\"";
+                $"-i \"{temporaryPath}\" " +
+                $"-filter_complex \"[0:v]trim=start={FormatSeconds(trimStartSeconds)}:duration={FormatSeconds(trimDurationSeconds)}," +
+                $"setpts=PTS-STARTPTS,fps={_fps},format=yuv420p[v]\" " +
+                $"-map \"[v]\" -an {CreateReplayTrimEncoderArguments()} " +
+                $"-movflags +faststart \"{outputPath}\"";
 
             await FfmpegLocator.RunAsync(trimArguments, "FFmpeg replay trim");
         }
@@ -433,6 +435,15 @@ public sealed class FfmpegMonitorCapturePipeline : IVideoCapturePipeline
     private static string FormatSeconds(double seconds)
     {
         return seconds.ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    private string CreateReplayTrimEncoderArguments()
+    {
+        int gop = Math.Max(1, _fps * SegmentSeconds);
+        return
+            $"-c:v libx264 -preset veryfast -tune zerolatency " +
+            $"-b:v {_bitrateKbps}k -maxrate {_bitrateKbps}k -bufsize {_bitrateKbps * 2}k " +
+            $"-r {_fps} -g {gop} -keyint_min {gop} -sc_threshold 0 -bf 0";
     }
 
     private void ThrowIfDisposed()
