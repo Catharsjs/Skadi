@@ -2053,7 +2053,6 @@ namespace EventCaptureNative
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::nanoseconds(frameDuration * 100));
                 int64_t nextFrameDue100ns = -1;
-                int64_t nextFixedFrameTime100ns = -1;
                 std::chrono::steady_clock::time_point nextFixedWake{};
                 uint64_t lastEncodedTextureVersion = 0;
                 while (running_)
@@ -2067,20 +2066,24 @@ namespace EventCaptureNative
                         std::unique_lock lock(textureMutex_);
                         if (useFixedDesktopDuplicationClock)
                         {
-                            if (nextFixedFrameTime100ns < 0)
+                            if (nextFixedWake == std::chrono::steady_clock::time_point{})
                             {
                                 frameCondition_.wait(lock, [this]
                                     {
                                         return !running_ || hasTexture_;
                                     });
                                 if (!running_) break;
-                                nextFixedFrameTime100ns = CurrentTimestamp100ns();
                                 nextFixedWake = std::chrono::steady_clock::now();
                             }
                             else
                             {
                                 lock.unlock();
                                 nextFixedWake += fixedFrameInterval;
+                                const auto now = std::chrono::steady_clock::now();
+                                if (nextFixedWake < now)
+                                {
+                                    nextFixedWake = now + fixedFrameInterval;
+                                }
                                 std::this_thread::sleep_until(nextFixedWake);
                                 lock.lock();
                                 if (!running_) break;
@@ -2089,7 +2092,7 @@ namespace EventCaptureNative
 
                             if (monitorFrameSlots_.empty()) continue;
                             selectedProcessorInput = monitorFrameSlots_[0].inputView;
-                            preparedCaptureTimestamp100ns = nextFixedFrameTime100ns;
+                            preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
                             preparedTextureVersion = textureVersion_;
                         }
                         else
@@ -2181,10 +2184,6 @@ namespace EventCaptureNative
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             lastEncodedTextureVersion = preparedTextureVersion;
-                            if (useFixedDesktopDuplicationClock)
-                            {
-                                nextFixedFrameTime100ns += frameDuration;
-                            }
                         }
                         catch (const winrt::hresult_error& error)
                         {
