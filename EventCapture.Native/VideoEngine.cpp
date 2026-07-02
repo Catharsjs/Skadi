@@ -2518,31 +2518,6 @@ namespace EventCaptureNative
                 bufferedBytes_.fetch_sub(packets_.front().storageLength);
                 packets_.pop_front();
             }
-
-            const EncodedFrame& packet = packets_.back();
-            if (recordingPending_ && packet.keyFrame)
-            {
-                recordingStream_.open(recordingPath_, std::ios::binary | std::ios::trunc);
-                if (recordingStream_)
-                {
-                    recordingPending_ = false;
-                    recording_ = true;
-                    recordingStart100ns_ = packet.timestamp100ns;
-                    recordingEnd100ns_ = packet.timestamp100ns;
-                    recordingFrameCount_ = 0;
-                }
-                else
-                {
-                    recordingPending_ = false;
-                    SetError(L"Could not create the continuous recording stream");
-                }
-            }
-            if (recording_ && recordingStream_)
-            {
-                recordingStream_.write(reinterpret_cast<const char*>(packet.bytes.data()), static_cast<std::streamsize>(packet.bytes.size()));
-                recordingEnd100ns_ = packet.timestamp100ns + packet.duration100ns;
-                ++recordingFrameCount_;
-            }
             packets_.back().bytes.clear();
             packets_.back().bytes.shrink_to_fit();
         }

@@ -310,7 +310,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             bitrateKbps,
             settings.BufferSeconds,
             settings.CaptureTarget,
-            settings.BufferEnabled);
+            enableReplay: true);
     }
 
     private static (int Width, int Height) ResolveResolution(AppSettings settings)
