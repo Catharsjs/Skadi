@@ -430,7 +430,13 @@ public sealed class AudioRecorder : IDisposable
         long videoEndTimestamp,
         long audioStartTimestamp)
     {
-        string outputPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
+        Directory.CreateDirectory(outputFolder);
+        string outputPath = IsInsideFolder(videoPath, outputFolder)
+            ? videoPath
+            : OutputFileName.Create(outputFolder, "Record", ".mp4");
+        string mergeOutputPath = Path.Combine(
+            outputFolder,
+            $".record-merge-{Guid.NewGuid():N}.tmp.mp4");
         long offsetMilliseconds = audioStartTimestamp - videoStartTimestamp;
         double duration = Math.Max(0.001, (videoEndTimestamp - videoStartTimestamp) / 1000.0);
         string audioFilter = offsetMilliseconds >= 0
@@ -440,14 +446,27 @@ public sealed class AudioRecorder : IDisposable
             $"-y -i \"{videoPath}\" -i \"{audioPath}\" " +
             $"-filter_complex \"{audioFilter}\" " +
             "-map 0:v:0 -map \"[a]\" -c:v copy -c:a aac -b:a 192k " +
-            $"-t {FormatSeconds(duration)} -movflags +faststart \"{outputPath}\"";
+            $"-t {FormatSeconds(duration)} -movflags +faststart \"{mergeOutputPath}\"";
 
         AppLogger.Info(
             $"Continuous merge diagnostics | VideoStart={videoStartTimestamp} | " +
             $"VideoEnd={videoEndTimestamp} | AudioStart={audioStartTimestamp} | " +
             $"OffsetMs={offsetMilliseconds} | DurationSec={FormatSeconds(duration)}");
 
-        await RunFfmpegAsync(arguments, "Continuous audio/video merge");
+        try
+        {
+            await RunFfmpegAsync(arguments, "Continuous audio/video merge");
+
+            if (File.Exists(outputPath))
+                File.Delete(outputPath);
+
+            File.Move(mergeOutputPath, outputPath, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(mergeOutputPath);
+        }
+
         return outputPath;
     }
 
@@ -666,6 +685,16 @@ public sealed class AudioRecorder : IDisposable
 
     private static string FormatSeconds(double value) =>
         value.ToString("F3", CultureInfo.InvariantCulture);
+
+    private static bool IsInsideFolder(string path, string folder)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string fullFolder = Path.GetFullPath(folder)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+
+        return fullPath.StartsWith(fullFolder, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static async Task MergeWithVideoAsync(string videoPath, string audioPath, string outputPath)
     {

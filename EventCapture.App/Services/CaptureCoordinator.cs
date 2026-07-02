@@ -167,7 +167,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                     video.StartTimestamp,
                     video.EndTimestamp,
                     audio.Value.StartTimestamp);
-                TryDelete(video.VideoPath);
+                if (!string.Equals(result, video.VideoPath, StringComparison.OrdinalIgnoreCase))
+                    TryDelete(video.VideoPath);
                 TryDelete(audio.Value.AudioPath);
             }
             else if (video is not null)
