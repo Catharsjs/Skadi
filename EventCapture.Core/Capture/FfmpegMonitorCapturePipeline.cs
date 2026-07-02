@@ -88,11 +88,13 @@ public sealed class FfmpegMonitorCapturePipeline : IVideoCapturePipeline
         await WaitForSegmentCoverageAsync(requestedEnd, TimeSpan.FromSeconds(SegmentSeconds + 2));
 
         ReplaySegmentBuffer.Lease lease;
+        long requestedStart;
+        long effectiveEnd;
         lock (_sync)
         {
             RefreshSegmentsCore();
-            long effectiveEnd = Math.Min(requestedEnd, _latestSegmentEndTimestamp);
-            long requestedStart = Math.Max(StartTimestamp, effectiveEnd - Math.Max(1, seconds) * 1000L);
+            effectiveEnd = Math.Min(requestedEnd, _latestSegmentEndTimestamp);
+            requestedStart = Math.Max(StartTimestamp, effectiveEnd - Math.Max(1, seconds) * 1000L);
             lease = _segments.Acquire(requestedStart, effectiveEnd);
         }
 
@@ -106,17 +108,19 @@ public sealed class FfmpegMonitorCapturePipeline : IVideoCapturePipeline
                 outputFolder,
                 $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{Guid.NewGuid().ToString("N")[..8]}.mp4");
 
-            await ConcatenateSegmentsAsync(lease.Segments, outputPath);
+            await ConcatenateSegmentsAsync(
+                lease.Segments,
+                outputPath,
+                requestedStart,
+                effectiveEnd);
 
-            long actualStart = lease.Segments[0].StartTimestamp;
-            long actualEnd = lease.Segments[^1].EndTimestamp;
-            long elapsed = Math.Max(1, actualEnd - actualStart);
+            long elapsed = Math.Max(1, effectiveEnd - requestedStart);
             AppLogger.Info(
                 $"FFmpeg replay diagnostics | RequestedSec={seconds} | " +
                 $"DurationSec={(elapsed / 1000.0).ToString("0.###", CultureInfo.InvariantCulture)} | " +
                 $"Segments={lease.Segments.Count} | OutputBytes={new FileInfo(outputPath).Length}");
 
-            return (outputPath, elapsed, actualStart);
+            return (outputPath, elapsed, requestedStart);
         }
     }
 
@@ -390,25 +394,45 @@ public sealed class FfmpegMonitorCapturePipeline : IVideoCapturePipeline
 
     private async Task ConcatenateSegmentsAsync(
         IReadOnlyList<ReplaySegmentBuffer.Segment> segments,
-        string outputPath)
+        string outputPath,
+        long requestedStartTimestamp,
+        long requestedEndTimestamp)
     {
         string listPath = Path.Combine(_sessionDirectory, $"export_{Guid.NewGuid():N}.txt");
+        string temporaryPath = Path.Combine(_sessionDirectory, $"concat_{Guid.NewGuid():N}.mp4");
         try
         {
             await File.WriteAllLinesAsync(
                 listPath,
                 segments.Select(segment => $"file '{segment.Path.Replace('\\', '/').Replace("'", "'\\''")}'"));
 
-            string arguments =
+            string concatArguments =
                 $"-hide_banner -loglevel warning -y -f concat -safe 0 -i \"{listPath}\" " +
+                $"-map 0:v:0 -an -c:v copy -movflags +faststart \"{temporaryPath}\"";
+
+            await FfmpegLocator.RunAsync(concatArguments, "FFmpeg replay concat");
+
+            long firstSegmentStart = segments[0].StartTimestamp;
+            double trimStartSeconds = Math.Max(0, (requestedStartTimestamp - firstSegmentStart) / 1000.0);
+            double trimDurationSeconds = Math.Max(0.001, (requestedEndTimestamp - requestedStartTimestamp) / 1000.0);
+            string trimArguments =
+                $"-hide_banner -loglevel warning -y " +
+                $"-ss {FormatSeconds(trimStartSeconds)} -i \"{temporaryPath}\" " +
+                $"-t {FormatSeconds(trimDurationSeconds)} " +
                 $"-map 0:v:0 -an -c:v copy -movflags +faststart \"{outputPath}\"";
 
-            await FfmpegLocator.RunAsync(arguments, "FFmpeg replay export");
+            await FfmpegLocator.RunAsync(trimArguments, "FFmpeg replay trim");
         }
         finally
         {
             TryDelete(listPath);
+            TryDelete(temporaryPath);
         }
+    }
+
+    private static string FormatSeconds(double seconds)
+    {
+        return seconds.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private void ThrowIfDisposed()
