@@ -69,7 +69,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                         saved.videoStartTimestamp);
                     if (!string.IsNullOrWhiteSpace(merged) && File.Exists(merged))
                     {
-                        TryDelete(saved.videoPath);
+                        if (!string.Equals(merged, saved.videoPath, StringComparison.OrdinalIgnoreCase))
+                            TryDelete(saved.videoPath);
                         result = merged;
                     }
                 }

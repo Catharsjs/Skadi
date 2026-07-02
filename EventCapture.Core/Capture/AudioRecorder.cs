@@ -270,16 +270,28 @@ public sealed class AudioRecorder : IDisposable
         string? mixedAudio = await CreateAudioSnapshotAsync(windowStart, windowEnd);
         if (mixedAudio is null) return null;
 
-        string outputPath = OutputFileName.Create(outputFolder, "Replay", ".mp4");
+        Directory.CreateDirectory(outputFolder);
+        string outputPath = IsInsideFolder(videoPath, outputFolder)
+            ? videoPath
+            : OutputFileName.Create(outputFolder, "Replay", ".mp4");
+        string mergeOutputPath = Path.Combine(
+            outputFolder,
+            $".replay-merge-{Guid.NewGuid():N}.tmp.mp4");
 
         try
         {
-            await MergeWithVideoAsync(videoPath, mixedAudio, outputPath);
+            await MergeWithVideoAsync(videoPath, mixedAudio, mergeOutputPath);
+
+            if (File.Exists(outputPath))
+                File.Delete(outputPath);
+
+            File.Move(mergeOutputPath, outputPath, overwrite: true);
             return File.Exists(outputPath) && new FileInfo(outputPath).Length > 0 ? outputPath : null;
         }
         finally
         {
             TryDelete(mixedAudio);
+            TryDelete(mergeOutputPath);
         }
     }
 

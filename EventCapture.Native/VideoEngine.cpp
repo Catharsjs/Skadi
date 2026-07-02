@@ -581,8 +581,8 @@ namespace EventCaptureNative
                 if (recording_ || recordingPending_) return EcResult::InvalidState;
                 CreateRecordingWriter(path);
                 recordingPath_ = path;
-                recordingPending_ = false;
-                recording_ = true;
+                recordingPending_ = true;
+                recording_ = false;
                 recordingStart100ns_ = -1;
                 recordingEnd100ns_ = 0;
                 recordingLastTimestamp100ns_ = -1;
@@ -632,7 +632,10 @@ namespace EventCaptureNative
                 recording_ = false;
                 if (recordingWriter_ != nullptr)
                 {
-                    ThrowIfFailed(recordingWriter_->Finalize());
+                    if (recordingFrameCount_ > 0)
+                    {
+                        ThrowIfFailed(recordingWriter_->Finalize());
+                    }
                     recordingWriter_.Reset();
                 }
                 result.startTimestamp100ns = recordingStart100ns_ >= 0 ? recordingStart100ns_ : 0;
