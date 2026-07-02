@@ -1376,6 +1376,33 @@ namespace EventCaptureNative
             videoContext_->VideoProcessorSetOutputColorSpace(processor.Get(), &outputColorSpace);
         }
 
+        ComPtr<ID3D11Texture2D> PrepareEncoderInputTexture()
+        {
+            if (captureBackend_ != CaptureBackend::DesktopDuplication)
+            {
+                return encoderTexture_;
+            }
+
+            if (encoderSubmitTextures_.empty())
+            {
+                D3D11_TEXTURE2D_DESC description{};
+                encoderTexture_->GetDesc(&description);
+                constexpr size_t SubmitTextureCount = 16;
+                encoderSubmitTextures_.reserve(SubmitTextureCount);
+                for (size_t index = 0; index < SubmitTextureCount; ++index)
+                {
+                    ComPtr<ID3D11Texture2D> texture;
+                    ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &texture));
+                    encoderSubmitTextures_.push_back(texture);
+                }
+            }
+
+            ComPtr<ID3D11Texture2D> texture = encoderSubmitTextures_[nextEncoderSubmitTexture_];
+            nextEncoderSubmitTexture_ = (nextEncoderSubmitTexture_ + 1) % encoderSubmitTextures_.size();
+            context_->CopyResource(texture.Get(), encoderTexture_.Get());
+            return texture;
+        }
+
         RECT CalculateCenteredActualSizeRect(uint32_t sourceWidth, uint32_t sourceHeight) const
         {
             const LONG width = static_cast<LONG>(std::min<uint32_t>(sourceWidth, config_.outputWidth));
@@ -2060,6 +2087,7 @@ namespace EventCaptureNative
                     bool framePrepared = false;
                     uint64_t preparedTextureVersion = 0;
                     int64_t preparedCaptureTimestamp100ns = 0;
+                    ComPtr<ID3D11Texture2D> preparedEncoderTexture;
                     ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
 
                     {
@@ -2147,6 +2175,8 @@ namespace EventCaptureNative
                             }
                         }
 
+                        preparedEncoderTexture = PrepareEncoderInputTexture();
+
                         framePrepared = true;
                     }
 
@@ -2180,7 +2210,7 @@ namespace EventCaptureNative
                             const int64_t submitTimestamp = useFixedDesktopDuplicationClock
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
-                            SubmitFrame(encoderTexture_.Get(), submitTimestamp, frameDuration);
+                            SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration);
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             lastEncodedTextureVersion = preparedTextureVersion;
@@ -2874,6 +2904,8 @@ namespace EventCaptureNative
         ComPtr<ID3D11Buffer> compositorVertexBuffer_;
         ComPtr<ID3D11SamplerState> compositorSampler_;
         ComPtr<ID3D11Texture2D> encoderTexture_;
+        std::vector<ComPtr<ID3D11Texture2D>> encoderSubmitTextures_;
+        size_t nextEncoderSubmitTexture_{};
         ComPtr<ID3D11Texture2D> blackTexture_;
         ComPtr<ID3D11VideoProcessorEnumerator> processorEnumerator_;
         ComPtr<ID3D11VideoProcessor> processor_;
