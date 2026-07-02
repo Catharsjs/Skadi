@@ -279,6 +279,8 @@
                                      SelectedItem="{Binding SelectedPreview}"
                                      Background="Transparent"
                                      BorderThickness="0"
+                                     Visibility="{Binding IsPreviewListVisible,
+                                                          Converter={StaticResource BooleanToVisibilityConverter}}"
                                      ScrollViewer.VerticalScrollBarVisibility="Disabled"
                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
 
@@ -416,12 +418,33 @@
                                         </ListBox.ItemTemplate>
                                     </ListBox>
 
+                                    <Border Height="350"
+                                            Background="{StaticResource SurfaceBrush}"
+                                            BorderBrush="{StaticResource BorderBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="3"
+                                            Margin="4"
+                                            Visibility="{Binding IsWindowCaptureUnavailable,
+                                                                 Converter={StaticResource BooleanToVisibilityConverter}}">
+
+                                        <TextBlock Text="На вашій OS функція недоступна"
+                                                   FontSize="17"
+                                                   Foreground="{StaticResource SecondaryTextBrush}"
+                                                   TextAlignment="Center"
+                                                   TextWrapping="Wrap"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   Margin="24,0"/>
+                                    </Border>
+
                                     <Button Style="{StaticResource BaseButtonStyle}"
                                     Height="30"
                                     Width="84"
                                     HorizontalAlignment="Center"
                                     Command="{Binding NextPreviewPageCommand}"
                                     IsEnabled="{Binding HasNextPreviewPage}"
+                                    Visibility="{Binding IsPreviewListVisible,
+                                                         Converter={StaticResource BooleanToVisibilityConverter}}"
                                     Margin="0,4,0,6"
                                     Background="Transparent"
                                     BorderThickness="0">

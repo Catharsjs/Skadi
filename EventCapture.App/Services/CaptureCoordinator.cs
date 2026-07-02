@@ -302,18 +302,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         int height,
         int bitrateKbps)
     {
-        if (ShouldUseWindows10FfmpegMonitorFallback(settings))
-        {
-            return new FfmpegMonitorCapturePipeline(
-                fps,
-                width,
-                height,
-                bitrateKbps,
-                settings.BufferSeconds,
-                settings.CaptureTarget,
-                settings.BufferEnabled);
-        }
-
         return new GpuCapturePipeline(
             fps,
             width,
@@ -322,16 +310,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             settings.BufferSeconds,
             settings.CaptureTarget,
             settings.BufferEnabled);
-    }
-
-    private static bool ShouldUseWindows10FfmpegMonitorFallback(AppSettings settings)
-    {
-        if (settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
-            return false;
-
-        Version version = Environment.OSVersion.Version;
-        bool isWindows10 = OperatingSystem.IsWindows() && version.Major == 10 && version.Build < 22000;
-        return isWindows10;
     }
 
     private static (int Width, int Height) ResolveResolution(AppSettings settings)

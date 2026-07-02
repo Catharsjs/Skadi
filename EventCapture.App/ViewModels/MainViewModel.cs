@@ -108,8 +108,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         _bufferEnabled = settings.BufferEnabled;
         _captureMode = FromStoredMode(settings.CaptureMode);
-        _captureTargetType = settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) ? "Windows" : "Monitors";
-        _selectedTargetValue = settings.CaptureTarget;
+        if (IsWindows10() && settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
+        {
+            _captureTargetType = "Monitors";
+            _selectedTargetValue = "PrimaryMonitor";
+        }
+        else
+        {
+            _captureTargetType = settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) ? "Windows" : "Monitors";
+            _selectedTargetValue = settings.CaptureTarget;
+        }
         _resolution = FromStoredResolution(settings.Resolution);
         _quality = settings.VideoQuality switch { <= 50 => "Low", <= 70 => "Medium", _ => "High" };
         _frameRate = NormalizeFrameRate(settings.Fps);
@@ -285,6 +293,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             // Одразу показуємо targets із кешу.
             RefreshVisiblePreviews();
+            OnPropertyChanged(nameof(IsWindowCaptureUnavailable));
+            OnPropertyChanged(nameof(IsPreviewListVisible));
 
             // У фоні оновлюємо список відкритих
             // вікон або підключених моніторів.
@@ -423,6 +433,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool IsEventVisible { get => _isEventVisible; private set => SetProperty(ref _isEventVisible, value); }
     public bool CanEditSettings => !BufferEnabled && !IsContinuousRecording;
     public bool IsSettingsLocked => !CanEditSettings;
+    public bool IsWindowCaptureUnavailable => IsWindows10() && _captureTargetType == "Windows";
+    public bool IsPreviewListVisible => !IsWindowCaptureUnavailable;
 
     public bool EventIsWarning
     {
@@ -430,13 +442,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _eventIsWarning, value);
     }
 
-    private IReadOnlyList<CapturePreview> CurrentTargets => _captureTargetType == "Monitors" ? _monitors : _windows;
+    private IReadOnlyList<CapturePreview> CurrentTargets =>
+        _captureTargetType == "Monitors"
+            ? _monitors
+            : IsWindows10()
+                ? []
+                : _windows;
 
     private async Task RefreshTargetsAsync(string type)
     {
         try
         {
             if (type == "Monitors") _monitors = await _targets.GetMonitorsAsync();
+            else if (IsWindows10()) _windows = [];
             else _windows = await _targets.GetWindowsAsync();
             if (_captureTargetType != type) return;
             _previewPage = 0;
@@ -510,6 +528,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void NextPreviewPage()
     {
+        if (IsWindowCaptureUnavailable) return;
         int pages = Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d));
         _previewPage = (_previewPage + 1) % pages;
         RefreshVisiblePreviews();
@@ -1374,6 +1393,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private static string FromStoredMode(string mode) => mode == "VideoAudio" ? "Combined" : mode;
     private static string ToStoredMode(string mode) => mode == "Combined" ? "VideoAudio" : mode;
     private static int NormalizeFrameRate(int value) => value <= 30 ? 30 : 60;
+    private static bool IsWindows10()
+    {
+        Version version = Environment.OSVersion.Version;
+        return OperatingSystem.IsWindows() && version.Major == 10 && version.Build < 22000;
+    }
+
     private string FromStoredResolution(string resolution) => resolution switch
     {
         "720p" => "1280 × 720",
