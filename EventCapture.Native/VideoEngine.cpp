@@ -2238,6 +2238,9 @@ namespace EventCaptureNative
 
             buffer->Unlock();
 
+            frame.storageOffset = 0;
+            frame.storageLength = static_cast<uint32_t>(frame.bytes.size());
+
             return frame;
         }
 
