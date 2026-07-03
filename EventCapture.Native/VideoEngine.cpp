@@ -537,6 +537,19 @@ namespace EventCaptureNative
         EcResult SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result)
         {
             if (path == nullptr || seconds == 0) return EcResult::InvalidArgument;
+            {
+                std::wstringstream message;
+                message << L"Native state | Action=SaveReplay enter | RequestedSec=" << seconds
+                    << L" | ReplayEnabled=" << ReplayEnabled()
+                    << L" | Recording=" << recording_
+                    << L" | RecordingPending=" << recordingPending_
+                    << L" | Packets=" << packets_.size()
+                    << L" | Captured=" << capturedFrames_.load()
+                    << L" | Submitted=" << submittedFrames_.load()
+                    << L" | Encoded=" << encodedFrames_.load()
+                    << L" | RecordingFrames=" << recordingFrameCount_;
+                LogNative(message.str());
+            }
             if (!ReplayEnabled()) return EcResult::InvalidState;
             std::vector<EncodedFrame> frames;
             int64_t windowStart100ns = 0;
@@ -563,12 +576,33 @@ namespace EventCaptureNative
                 size_t end = packets_.size();
                 if (start >= end) return EcResult::InvalidState;
                 frames.assign(packets_.begin() + static_cast<std::ptrdiff_t>(start), packets_.begin() + static_cast<std::ptrdiff_t>(end));
+                std::wstringstream message;
+                message << L"Native state | Action=SaveReplay selected-window | RequestedSec=" << seconds
+                    << L" | PacketCount=" << packets_.size()
+                    << L" | StartIndex=" << start
+                    << L" | EndIndex=" << end
+                    << L" | SelectedFrames=" << frames.size()
+                    << L" | WindowStart=" << windowStart100ns
+                    << L" | WindowEnd=" << windowEnd100ns
+                    << L" | Recording=" << recording_
+                    << L" | RecordingPending=" << recordingPending_
+                    << L" | RecordingFrames=" << recordingFrameCount_;
+                LogNative(message.str());
             }
             LogReplayCaptureDiagnostics(seconds, windowStart100ns, windowEnd100ns, frames);
             if (!WriteFramesToMp4(path, frames, windowStart100ns, windowEnd100ns)) return EcResult::NativeFailure;
             result.startTimestamp100ns = windowStart100ns;
             result.endTimestamp100ns = windowEnd100ns;
             result.frameCount = frames.size();
+            {
+                std::wstringstream message;
+                message << L"Native state | Action=SaveReplay exit | Frames=" << frames.size()
+                    << L" | WindowDurationMs=" << ((windowEnd100ns - windowStart100ns) / 10000)
+                    << L" | Recording=" << recording_
+                    << L" | RecordingPending=" << recordingPending_
+                    << L" | RecordingFrames=" << recordingFrameCount_;
+                LogNative(message.str());
+            }
             return EcResult::Ok;
         }
 
@@ -588,6 +622,15 @@ namespace EventCaptureNative
                 recordingLastTimestamp100ns_ = -1;
                 recordingFrameCount_ = 0;
                 ForceKeyFrame();
+                {
+                    std::wstringstream message;
+                    message << L"Native state | Action=StartRecording armed | ReplayEnabled=" << ReplayEnabled()
+                        << L" | Packets=" << packets_.size()
+                        << L" | Captured=" << capturedFrames_.load()
+                        << L" | Submitted=" << submittedFrames_.load()
+                        << L" | Encoded=" << encodedFrames_.load();
+                    LogNative(message.str());
+                }
                 return EcResult::Ok;
             }
             catch (const winrt::hresult_error& error)
@@ -641,6 +684,20 @@ namespace EventCaptureNative
                 result.startTimestamp100ns = recordingStart100ns_ >= 0 ? recordingStart100ns_ : 0;
                 result.endTimestamp100ns = recordingEnd100ns_;
                 result.frameCount = recordingFrameCount_;
+                {
+                    std::wstringstream message;
+                    message << L"Native state | Action=StopRecording exit | Result=" << (recordingFrameCount_ > 0 ? L"Ok" : L"InvalidState")
+                        << L" | Frames=" << recordingFrameCount_
+                        << L" | Start=" << result.startTimestamp100ns
+                        << L" | End=" << result.endTimestamp100ns
+                        << L" | DurationMs=" << ((result.endTimestamp100ns - result.startTimestamp100ns) / 10000)
+                        << L" | ReplayEnabled=" << ReplayEnabled()
+                        << L" | Packets=" << packets_.size()
+                        << L" | Captured=" << capturedFrames_.load()
+                        << L" | Submitted=" << submittedFrames_.load()
+                        << L" | Encoded=" << encodedFrames_.load();
+                    LogNative(message.str());
+                }
                 recordingPath_.clear();
                 return recordingFrameCount_ > 0 ? EcResult::Ok : EcResult::InvalidState;
             }
@@ -2102,6 +2159,16 @@ namespace EventCaptureNative
                 recording_ = true;
                 recordingStart100ns_ = nativeTimestamp100ns;
                 recordingLastTimestamp100ns_ = nativeTimestamp100ns - fallbackDuration100ns;
+                std::wstringstream message;
+                message << L"Native state | Action=Recording first-sample | Timestamp=" << nativeTimestamp100ns
+                    << L" | Duration=" << fallbackDuration100ns
+                    << L" | KeyFrame=" << keyFrame
+                    << L" | ReplayEnabled=" << ReplayEnabled()
+                    << L" | Packets=" << packets_.size()
+                    << L" | Captured=" << capturedFrames_.load()
+                    << L" | Submitted=" << submittedFrames_.load()
+                    << L" | Encoded=" << encodedFrames_.load();
+                LogNative(message.str());
             }
 
             if (nativeTimestamp100ns <= recordingLastTimestamp100ns_)
@@ -2122,6 +2189,20 @@ namespace EventCaptureNative
             recordingLastTimestamp100ns_ = nativeTimestamp100ns;
             recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
             ++recordingFrameCount_;
+            if (recordingFrameCount_ == 1 || recordingFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond) == 0)
+            {
+                std::wstringstream message;
+                message << L"Native state | Action=Recording sample-written | Frames=" << recordingFrameCount_
+                    << L" | SampleTime=" << sampleTime
+                    << L" | SampleDuration=" << sampleDuration
+                    << L" | NativeTimestamp=" << nativeTimestamp100ns
+                    << L" | ReplayEnabled=" << ReplayEnabled()
+                    << L" | Packets=" << packets_.size()
+                    << L" | Captured=" << capturedFrames_.load()
+                    << L" | Submitted=" << submittedFrames_.load()
+                    << L" | Encoded=" << encodedFrames_.load();
+                LogNative(message.str());
+            }
         }
 
         void EncodeLoop()
@@ -2512,6 +2593,18 @@ namespace EventCaptureNative
             bufferedBytes_.fetch_add(size);
             packets_.push_back(std::move(frame));
             ++activeSpoolFrameCount_;
+            if (activeSpoolFrameCount_ == 1 || activeSpoolFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond * 2) == 0)
+            {
+                std::wstringstream message;
+                message << L"Native state | Action=Replay packet-added | SpoolFrames=" << activeSpoolFrameCount_
+                    << L" | Packets=" << packets_.size()
+                    << L" | PacketTimestamp=" << packets_.back().timestamp100ns
+                    << L" | PacketDuration=" << packets_.back().duration100ns
+                    << L" | Recording=" << recording_
+                    << L" | RecordingPending=" << recordingPending_
+                    << L" | RecordingFrames=" << recordingFrameCount_;
+                LogNative(message.str());
+            }
             const int64_t cutoff = packets_.back().timestamp100ns - static_cast<int64_t>(config_.replaySeconds + 2) * TicksPerSecond;
             while (packets_.size() > config_.framesPerSecond && packets_.front().timestamp100ns < cutoff)
             {

@@ -234,6 +234,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            AppLogger.Info($"UI state | Action=BufferToggle changed | Buffer={value} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | CanEdit={CanEditSettings} | Frames={_capture.CapturedFrames}");
+
             OnPropertyChanged(nameof(BufferStatus));
             OnPropertyChanged(nameof(BufferToggleText));
             OnPropertyChanged(nameof(CanEditSettings));
@@ -1053,15 +1055,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task SaveRecordAsync()
     {
+        AppLogger.Info($"UI state | Action=SaveReplay clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
         try
         {
             string path = await _capture.SaveRecordAsync();
+            AppLogger.Info($"UI state | Action=SaveReplay success | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
             LogEvent($"Replay saved · {Path.GetFileName(path)}");
             _notifications.Show(_captureMode == "Audio" ? "MP3 saved" : "Replay saved");
         }
         catch (Exception ex)
         {
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
+            AppLogger.Info($"UI state | Action=SaveReplay failed | Message={ex.Message} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
             LogEvent(ex.Message);
             _notifications.Show("Replay save failed");
         }
@@ -1070,8 +1075,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task ToggleContinuousRecordingAsync()
     {
         if (_isRecordStateChanging)
+        {
+            AppLogger.Info($"UI state | Action=Recording click ignored-state-changing | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
             return;
+        }
 
+        AppLogger.Info($"UI state | Action=Recording clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
         _isRecordStateChanging = true;
         bool wasRecording = IsContinuousRecording;
 
@@ -1080,6 +1089,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (wasRecording)
             {
                 string path = await _capture.StopContinuousRecordingAsync();
+                AppLogger.Info($"UI state | Action=StopRecording success-before-ui-state | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
                 IsContinuousRecording = false;
                 LogEvent($"Recording saved · {Path.GetFileName(path)}");
                 _notifications.Show("Recording saved");
@@ -1090,6 +1100,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _settings.Save();
             LogEvent("Recording starting");
             await _capture.StartContinuousRecordingAsync();
+            AppLogger.Info($"UI state | Action=StartRecording success-before-ui-state | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
             IsContinuousRecording = true;
             LogEvent("Recording started");
             _notifications.Show("Recording started");
@@ -1111,6 +1122,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            AppLogger.Info($"UI state | Action=Recording command finished | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
             _isRecordStateChanging = false;
         }
     }

@@ -20,15 +20,18 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public async Task ApplySettingsAsync(AppSettings settings, bool restartPipeline)
     {
+        AppLogger.Info($"Coordinator state | Action=ApplySettings enter | Restart={restartPipeline} | NewBuffer={settings.BufferEnabled} | NewMode={settings.CaptureMode} | NewTarget={settings.CaptureTarget} | Current={DescribeState()}");
         _settings = settings;
         _audioRecorder?.SetSystemVolume(settings.SystemAudioVolume);
         _audioRecorder?.SetMicrophoneVolume(settings.MicVolume);
 
         if (restartPipeline) await RestartPipelineAsync();
+        AppLogger.Info($"Coordinator state | Action=ApplySettings exit | Restart={restartPipeline} | Current={DescribeState()}");
     }
 
     public async Task<string> SaveRecordAsync()
     {
+        AppLogger.Info($"Coordinator state | Action=SaveReplay enter | Current={DescribeState()}");
         if (_settings is null || !_settings.BufferEnabled)
             throw new InvalidOperationException("Replay buffer is disabled.");
         if (!await _saveLock.WaitAsync(0))
@@ -78,6 +81,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
             if (string.IsNullOrWhiteSpace(result) || !File.Exists(result))
                 throw new InvalidOperationException("The replay could not be exported.");
+            AppLogger.Info($"Coordinator state | Action=SaveReplay exit | Result={Path.GetFileName(result)} | Current={DescribeState()}");
             return result;
         }
         finally
@@ -88,6 +92,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public async Task StartContinuousRecordingAsync()
     {
+        AppLogger.Info($"Coordinator state | Action=StartRecording enter | Current={DescribeState()}");
         if (_settings is null)
             throw new InvalidOperationException("Capture is not initialized.");
         if (!await _continuousLock.WaitAsync(0))
@@ -120,6 +125,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
                 IsContinuousRecording = true;
                 AppLogger.Info($"Continuous recording started | Mode={_settings.CaptureMode}");
+                AppLogger.Info($"Coordinator state | Action=StartRecording exit | Current={DescribeState()}");
             }
             catch
             {
@@ -139,6 +145,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public async Task<string> StopContinuousRecordingAsync()
     {
+        AppLogger.Info($"Coordinator state | Action=StopRecording enter | Current={DescribeState()}");
         if (_settings is null)
             throw new InvalidOperationException("Capture is not initialized.");
         if (!await _continuousLock.WaitAsync(0))
@@ -190,6 +197,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
             IsContinuousRecording = false;
             AppLogger.Info($"Continuous recording saved | Path={result}");
+            AppLogger.Info($"Coordinator state | Action=StopRecording media-saved | Result={Path.GetFileName(result)} | Current={DescribeState()}");
 
             if (!_settings.BufferEnabled)
             {
@@ -227,7 +235,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         {
             if (IsContinuousRecording)
             {
-                AppLogger.Info("Pipeline restart skipped because continuous recording is active.");
+                AppLogger.Info($"Coordinator state | Action=RestartPipeline skipped-recording-active | Current={DescribeState()}");
                 return;
             }
 
@@ -252,7 +260,12 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     private void StartPipelineCore(bool forceStart)
     {
-        if (_settings is null || (!forceStart && !_settings.BufferEnabled)) return;
+        AppLogger.Info($"Coordinator state | Action=StartPipelineCore enter | ForceStart={forceStart} | Current={DescribeState()}");
+        if (_settings is null || (!forceStart && !_settings.BufferEnabled))
+        {
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore skipped | ForceStart={forceStart} | Current={DescribeState()}");
+            return;
+        }
         bool wantsVideo = _settings.CaptureMode != "Audio";
         bool wantsAudio = _settings.CaptureMode != "Video";
         long sharedTimestamp = Environment.TickCount64;
@@ -294,6 +307,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         AppLogger.Info(
             $"Video pipeline started | Type={_videoPipeline?.GetType().Name} | Mode={_settings.CaptureMode} | " +
             $"Target={_settings.CaptureTarget} | FPS={effectiveFps} | Bitrate={videoBitrate}kbps");
+        AppLogger.Info($"Coordinator state | Action=StartPipelineCore exit | WantsVideo={wantsVideo} | WantsAudio={wantsAudio} | SharedTimestamp={sharedTimestamp} | Current={DescribeState()}");
     }
 
     private static IVideoCapturePipeline CreateVideoPipeline(
@@ -375,12 +389,14 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     private void StopPipelineCore()
     {
+        AppLogger.Info($"Coordinator state | Action=StopPipelineCore enter | Current={DescribeState()}");
         try { _audioRecorder?.Dispose(); } catch { }
         try { _videoPipeline?.Stop(); } catch { }
         try { _videoPipeline?.Dispose(); } catch { }
         IsContinuousRecording = false;
         _audioRecorder = null;
         _videoPipeline = null;
+        AppLogger.Info($"Coordinator state | Action=StopPipelineCore exit | Current={DescribeState()}");
     }
 
     public async Task StopAllAsync()
@@ -399,6 +415,17 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    private string DescribeState()
+    {
+        string settings = _settings is null
+            ? "Settings=null"
+            : $"Buffer={_settings.BufferEnabled}, Mode={_settings.CaptureMode}, Target={_settings.CaptureTarget}, Fps={_settings.Fps}, BufferSec={_settings.BufferSeconds}";
+        string video = _videoPipeline is null
+            ? "Video=null"
+            : $"Video={_videoPipeline.GetType().Name}, Running={_videoPipeline.IsRunning}, Continuous={_videoPipeline.IsContinuousRecording}, Frames={_videoPipeline.FramesCaptured}";
+        string audio = _audioRecorder is null ? "Audio=null" : "Audio=active";
+        return $"Continuous={IsContinuousRecording}, {settings}, {video}, {audio}";
+    }
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
