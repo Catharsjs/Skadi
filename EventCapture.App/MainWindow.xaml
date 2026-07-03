@@ -507,9 +507,7 @@
                                                      Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     </Grid>
 
-                    <Border Height="1"
-                    Background="{StaticResource BorderBrush}"
-                    Margin="0,6,0,0"/>
+                    
 
                     <!-- Hot Keys залишаються доступними -->
                     <TextBlock Text="Hot Keys"
