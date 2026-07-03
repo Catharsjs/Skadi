@@ -2,7 +2,9 @@
 #define AppVersion   "2.0.1"
 #define AppPublisher "Catharsjs"
 #define AppExe       "Skadi.exe"
-#define SourceDir    "C:\Users\user\source\repos\EventCapture\EventCapture.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish"
+#ifndef SourceDir
+#define SourceDir "..\EventCapture.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish"
+#endif
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -15,7 +17,11 @@ AppUpdatesURL=https://github.com/Catharsjs/Skadi/releases
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputBaseFilename=Skadi_Setup_v2.0.1
-OutputDir=C:\Users\user\source\repos\EventCapture\Installer\Output
+#ifndef InstallerOutputDir
+#define InstallerOutputDir "Output"
+#endif
+
+OutputDir={#InstallerOutputDir}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
