@@ -1049,10 +1049,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task SaveRecordAsync()
     {
         AppLogger.Info($"UI state | Action=SaveReplay clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
+
         try
         {
             if (BufferEnabled)
             {
+                _settingsCts?.Cancel();
+                _restartPending = false;
+
                 ApplyToSettings();
                 _settings.Save();
 
@@ -1063,18 +1067,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
                 await _capture.ApplySettingsAsync(
                     _settings,
-                    restartPipeline: !IsContinuousRecording);
+                    restartPipeline: false);
             }
 
             string path = await _capture.SaveRecordAsync();
+
             AppLogger.Info($"UI state | Action=SaveReplay success | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
-            LogEvent($"Replay saved В· {Path.GetFileName(path)}");
+
+            LogEvent($"Replay saved · {Path.GetFileName(path)}");
             _notifications.Show(_captureMode == "Audio" ? "MP3 saved" : "Replay saved");
         }
         catch (Exception ex)
         {
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
             AppLogger.Info($"UI state | Action=SaveReplay failed | Message={ex.Message} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
+
             LogEvent(ex.Message);
             _notifications.Show("Replay save failed");
         }
