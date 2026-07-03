@@ -106,15 +106,21 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             await _pipelineLock.WaitAsync();
             try
             {
-                if (_videoPipeline is null && _audioRecorder is null)
+                bool wantsVideo = _settings.CaptureMode != "Audio";
+
+                if (_settings.BufferEnabled && wantsVideo && _videoPipeline is not null)
+                {
+                    AppLogger.Info($"Coordinator state | Action=StartRecording restart-buffer-pipeline | Current={DescribeState()}");
+                    StopPipelineCore();
+                    await Task.Run(() => StartPipelineCore(forceStart: true));
+                }
+                else if (_videoPipeline is null && _audioRecorder is null)
                 {
                     await Task.Run(
                         () => StartPipelineCore(forceStart: true));
                 }
 
-                bool wantsVideo = _settings.CaptureMode != "Audio";
-                bool wantsAudio = _settings.CaptureMode != "Video" &&
-                    (_settings.RecordSystemAudio || _settings.RecordMicrophone);
+                bool wantsAudio = _settings.CaptureMode != "Video" && (_settings.RecordSystemAudio || _settings.RecordMicrophone);
 
                 if (wantsAudio)
                     (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
