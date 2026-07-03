@@ -20,29 +20,28 @@ jobs:
       APP_PROJECT: EventCapture.App\EventCapture.App.csproj
       NATIVE_PROJECT: EventCapture.Native\EventCapture.Native.vcxproj
       ISS_SCRIPT: Installer\Skadi.iss
-      PUBLISH_DIR: EventCapture.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish
       INSTALLER_OUTPUT_DIR: Installer\Output
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 10
+      - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.4
+          dotnet-version: '10.0.x'
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build native project
+      - name: Build native DLL
         shell: pwsh
         run: |
           msbuild $env:NATIVE_PROJECT `
+            /restore `
             /p:Configuration=$env:CONFIGURATION `
             /p:Platform=$env:PLATFORM `
-            /m `
-            /restore
+            /m
 
       - name: Publish WPF app
         shell: pwsh
@@ -53,16 +52,36 @@ jobs:
             /p:Platform=$env:PLATFORM `
             /p:RuntimeIdentifier=$env:RUNTIME_ID `
             /p:SelfContained=false `
+            /p:PublishSingleFile=false `
             /m
 
-      - name: Validate publish output
+      - name: Locate publish output
+        id: publish
         shell: pwsh
         run: |
-          if (!(Test-Path "$env:PUBLISH_DIR\Skadi.exe")) {
-            Write-Error "Skadi.exe was not found in publish directory: $env:PUBLISH_DIR"
+          $exe = Get-ChildItem -Path "EventCapture.App\bin" -Recurse -Filter "Skadi.exe" |
+            Where-Object { $_.FullName -like "*\publish\*" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $exe) {
+            Write-Error "Skadi.exe was not found in any publish directory."
           }
 
-          Get-ChildItem $env:PUBLISH_DIR
+          $publishDir = $exe.Directory.FullName
+          Write-Host "PublishDir=$publishDir"
+          "publish_dir=$publishDir" >> $env:GITHUB_OUTPUT
+
+          Get-ChildItem $publishDir
+
+      - name: Validate native DLL
+        shell: pwsh
+        run: |
+          $nativeDll = Join-Path "${{ steps.publish.outputs.publish_dir }}" "EventCapture.Native.dll"
+
+          if (!(Test-Path $nativeDll)) {
+            Write-Error "EventCapture.Native.dll was not copied to publish directory."
+          }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -75,7 +94,7 @@ jobs:
 
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             $env:ISS_SCRIPT `
-            "/DSourceDir=$env:GITHUB_WORKSPACE\$env:PUBLISH_DIR" `
+            "/DSourceDir=${{ steps.publish.outputs.publish_dir }}" `
             "/DInstallerOutputDir=$env:GITHUB_WORKSPACE\$env:INSTALLER_OUTPUT_DIR"
 
       - name: Upload installer artifact
