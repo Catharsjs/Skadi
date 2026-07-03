@@ -169,7 +169,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             try
             {
                 var (width, height) = ScreenCapturer.GetTargetSize(_selectedTargetValue);
-                return $"Native ({width} Г— {height})";
+                return $"Native ({width}x{height})";
             }
             catch
             {
@@ -178,7 +178,35 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string[] Resolutions => ["1280 Г— 720", "1920 Г— 1080", NativeResolutionLabel];
+    public string[] Resolutions
+    {
+        get
+        {
+            var resolutions = new List<string>
+        {
+            "1280x720"
+        };
+
+            try
+            {
+                var (_, height) = ScreenCapturer.GetTargetSize(_selectedTargetValue);
+
+                if (height >= 1440)
+                    resolutions.Add("1920x1080");
+
+                if (height >= 2160)
+                    resolutions.Add("2560x1440");
+            }
+            catch
+            {
+                resolutions.Add("1920x1080");
+            }
+
+            resolutions.Add(NativeResolutionLabel);
+
+            return resolutions.ToArray();
+        }
+    }
     public int[] FrameRates { get; } = [30, 60];
     public int[] BufferDurations { get; } = [15, 30, 60, 120];
 
@@ -1459,14 +1487,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private string FromStoredResolution(string resolution) => resolution switch
     {
-        "720p" => "1280 Г— 720",
-        "1080p" => "1920 Г— 1080",
+        "720p" => "1280x720",
+        "1080p" => "1920x1080",
+        "1440p" => "2560x1440",
         _ => NativeResolutionLabel
     };
+
     private static string ToStoredResolution(string resolution) => resolution switch
     {
-        "1280 Г— 720" => "720p",
-        "1920 Г— 1080" => "1080p",
+        "1280x720" => "720p",
+        "1920x1080" => "1080p",
+        "2560x1440" => "1440p",
         _ => "Native"
     };
 

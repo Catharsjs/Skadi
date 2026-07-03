@@ -14,6 +14,10 @@ namespace EventCapture.App.Services;
 
 public sealed class ScreenshotSelectionService
 {
+    private sealed record FrozenMonitorCapture(
+    DisplayMonitor Monitor,
+    Bitmap Bitmap,
+    BitmapSource Image);
     public async Task<string?> CaptureSelectionAsync(
         string outputFolder,
         Func<Task> toggleUi,
@@ -26,31 +30,28 @@ public sealed class ScreenshotSelectionService
         }
 
         ScreenshotSelectionResult? selection = null;
+        List<FrozenMonitorCapture> frozenCaptures = CaptureFrozenScreens();
 
         try
         {
-            selection = await SelectRegionAsync();
+            selection = await SelectRegionAsync(frozenCaptures);
 
             if (selection is null)
             {
                 return null;
             }
 
-            await Task.Delay(80);
+            FrozenMonitorCapture? frozenCapture = frozenCaptures.FirstOrDefault(
+    capture => capture.Monitor.DeviceName == selection.DeviceName);
 
-            using Bitmap? monitorBitmap =
-                ScreenCapturer.CaptureScreenshot(
-                    selection.CaptureTarget);
-
-            if (monitorBitmap is null)
+            if (frozenCapture is null)
             {
                 return string.Empty;
             }
 
-            using Bitmap finalBitmap =
-                CreateFinalBitmap(
-                    monitorBitmap,
-                    selection);
+            using Bitmap finalBitmap = CreateFinalBitmap(
+                frozenCapture.Bitmap,
+                selection);
 
             string filePath = OutputFileName.Create(outputFolder, "Screenshot", ".png");
 
@@ -73,6 +74,11 @@ public sealed class ScreenshotSelectionService
         }
         finally
         {
+            foreach (FrozenMonitorCapture capture in frozenCaptures)
+            {
+                capture.Bitmap.Dispose();
+            }
+
             if (restoreUiAfterCapture)
             {
                 await toggleUi();
@@ -80,21 +86,19 @@ public sealed class ScreenshotSelectionService
         }
     }
 
-    private static async Task<ScreenshotSelectionResult?> SelectRegionAsync()
+    private static async Task<ScreenshotSelectionResult?> SelectRegionAsync(
+    IReadOnlyList<FrozenMonitorCapture> frozenCaptures)
     {
-        var completion =
-            new TaskCompletionSource<ScreenshotSelectionResult?>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource<ScreenshotSelectionResult?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var windows =
-            DisplayMonitorService.GetAll()
-                .Select(
-                    screen =>
-                        new ScreenshotSelectionWindow(
-                            screen,
-                            result => completion.TrySetResult(result)))
-                .Cast<WpfWindow>()
-                .ToList();
+        var windows = frozenCaptures
+            .Select(capture => new ScreenshotSelectionWindow(
+                capture.Monitor,
+                capture.Image,
+                result => completion.TrySetResult(result)))
+            .Cast<WpfWindow>()
+            .ToList();
 
         try
         {
@@ -103,23 +107,61 @@ public sealed class ScreenshotSelectionService
                 window.Show();
             }
 
-            ScreenshotSelectionResult? result =
-                await completion.Task;
-
+            ScreenshotSelectionResult? result = await completion.Task;
             return result;
         }
         finally
         {
             foreach (WpfWindow window in windows)
             {
-                try
-                {
-                    window.Close();
-                }
-                catch
-                {
-                }
+                try { window.Close(); }
+                catch { }
             }
+        }
+    }
+
+    private static List<FrozenMonitorCapture> CaptureFrozenScreens()
+    {
+        var captures = new List<FrozenMonitorCapture>();
+
+        foreach (DisplayMonitor monitor in DisplayMonitorService.GetAll())
+        {
+            Bitmap? bitmap = ScreenCapturer.CaptureScreenshot($"Monitor|{monitor.DeviceName}");
+
+            if (bitmap is null)
+            {
+                continue;
+            }
+
+            BitmapSource source = CreateBitmapSource(bitmap);
+
+            captures.Add(new FrozenMonitorCapture(
+                monitor,
+                bitmap,
+                source));
+        }
+
+        return captures;
+    }
+
+    private static BitmapSource CreateBitmapSource(Bitmap bitmap)
+    {
+        IntPtr bitmapHandle = bitmap.GetHbitmap();
+
+        try
+        {
+            BitmapSource source = Imaging.CreateBitmapSourceFromHBitmap(
+                bitmapHandle,
+                IntPtr.Zero,
+                Int32Rect.Empty,
+                BitmapSizeOptions.FromEmptyOptions());
+
+            source.Freeze();
+            return source;
+        }
+        finally
+        {
+            DeleteObject(bitmapHandle);
         }
     }
 

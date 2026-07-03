@@ -160,6 +160,39 @@
                 <Border Height="1"
                         Background="{StaticResource BorderBrush}"
                         Margin="0,0,0,8"/>
+                
+                <!-- Save Folder залишається доступним -->
+    <TextBlock Text="Save Folder"
+       FontSize="18"
+       Foreground="{StaticResource SecondaryTextBrush}"
+       Margin="6,6,0,2"/>
+
+    <TextBlock Text="{Binding SaveFolder}"
+       FontSize="18"
+       Foreground="{StaticResource AccentBrush}"
+       Margin="6,0,0,5"
+       TextTrimming="CharacterEllipsis"/>
+
+                <Grid Height="36">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition/>
+                        <ColumnDefinition Width="10"/>
+                        <ColumnDefinition/>
+                    </Grid.ColumnDefinitions>
+
+                    <Button Style="{StaticResource BaseButtonStyle}"
+                            Height="36"
+                            Command="{Binding OpenSaveFolderCommand}"
+                            Content="Browse"
+                            FontSize="16"/>
+
+                    <Button Grid.Column="2"
+                            Style="{StaticResource BaseButtonStyle}"
+                            Height="36"
+                            Command="{Binding SelectFolderCommand}"
+                            Content="Save Folder"
+                            FontSize="16"/>
+                </Grid>
 
                 <TextBlock Text="Settings"
                            FontSize="19"
@@ -427,7 +460,7 @@
                                             Visibility="{Binding IsWindowCaptureUnavailable,
                                                                  Converter={StaticResource BooleanToVisibilityConverter}}">
 
-                                        <TextBlock Text="На вашій OS функція недоступна"
+                                        <TextBlock Text="This feature is unavailable on your OS."
                                                    FontSize="17"
                                                    Foreground="{StaticResource SecondaryTextBrush}"
                                                    TextAlignment="Center"
@@ -472,39 +505,6 @@
                                 Command="{Binding SettingsLockedCommand}"
                                 Visibility="{Binding IsSettingsLocked,
                                                      Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                    </Grid>
-
-                    <!-- Save Folder залишається доступним -->
-                    <TextBlock Text="Save Folder"
-                       FontSize="18"
-                       Foreground="{StaticResource SecondaryTextBrush}"
-                       Margin="6,6,0,2"/>
-
-                    <TextBlock Text="{Binding SaveFolder}"
-                       FontSize="18"
-                       Foreground="{StaticResource AccentBrush}"
-                       Margin="6,0,0,5"
-                       TextTrimming="CharacterEllipsis"/>
-
-                    <Grid Height="36">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition/>
-                            <ColumnDefinition Width="10"/>
-                            <ColumnDefinition/>
-                        </Grid.ColumnDefinitions>
-
-                        <Button Style="{StaticResource BaseButtonStyle}"
-                                Height="36"
-                                Command="{Binding OpenSaveFolderCommand}"
-                                Content="Browse"
-                                FontSize="16"/>
-
-                        <Button Grid.Column="2"
-                                Style="{StaticResource BaseButtonStyle}"
-                                Height="36"
-                                Command="{Binding SelectFolderCommand}"
-                                Content="Save Folder"
-                                FontSize="16"/>
                     </Grid>
 
                     <Border Height="1"

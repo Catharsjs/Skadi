@@ -1,12 +1,15 @@
+using EventCapture.Core.Capture;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using EventCapture.Core.Capture;
+using System.Windows.Media.Imaging;
+using System.Windows.Xps.Packaging;
 using DrawingRectangle = System.Drawing.Rectangle;
 using ShapesRectangle = System.Windows.Shapes.Rectangle;
+using WpfImage = System.Windows.Controls.Image;
 using WpfBrushes = System.Windows.Media.Brushes;
 using WpfColor = System.Windows.Media.Color;
 using WpfCursors = System.Windows.Input.Cursors;
@@ -28,8 +31,9 @@ internal sealed class ScreenshotSelectionWindow : Window
     private bool _completed;
 
     public ScreenshotSelectionWindow(
-        DisplayMonitor screen,
-        Action<ScreenshotSelectionResult?> complete)
+     DisplayMonitor screen,
+     BitmapSource? frozenImage,
+     Action<ScreenshotSelectionResult?> complete)
     {
         _screen = screen;
         _complete = complete;
@@ -37,16 +41,29 @@ internal sealed class ScreenshotSelectionWindow : Window
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
         AllowsTransparency = true;
-        Background = new SolidColorBrush(WpfColor.FromArgb(92, 0, 0, 0));
+        Background = WpfBrushes.Transparent;
         Topmost = true;
         ShowInTaskbar = false;
         Focusable = true;
         Cursor = WpfCursors.Cross;
 
-        _canvas = new Canvas
+        var root = new Grid();
+
+        if (frozenImage is not null)
         {
-            Background = WpfBrushes.Transparent
-        };
+            root.Children.Add(new WpfImage
+            {
+                Source = frozenImage,
+                Stretch = Stretch.Fill
+            });
+        }
+
+        root.Children.Add(new Border
+        {
+            Background = new SolidColorBrush(WpfColor.FromArgb(92, 0, 0, 0))
+        });
+
+        _canvas = new Canvas { Background = WpfBrushes.Transparent };
 
         _selectionRectangle = new ShapesRectangle
         {
@@ -57,7 +74,8 @@ internal sealed class ScreenshotSelectionWindow : Window
         };
 
         _canvas.Children.Add(_selectionRectangle);
-        Content = _canvas;
+        root.Children.Add(_canvas);
+        Content = root;
 
         SourceInitialized += OnSourceInitialized;
         Loaded += (_, _) =>
