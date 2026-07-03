@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -82,7 +82,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isRecordStateChanging;
     private DateTimeOffset _recordingStartedAt;
     private TimeSpan _recordingElapsed;
-    private string _eventMessage = "Initializing capture…";
+    private string _eventMessage = "Initializing captureвЂ¦";
     private bool _isEventVisible = true;
 
     public MainViewModel(
@@ -169,7 +169,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             try
             {
                 var (width, height) = ScreenCapturer.GetTargetSize(_selectedTargetValue);
-                return $"Native ({width} × {height})";
+                return $"Native ({width} Г— {height})";
             }
             catch
             {
@@ -178,7 +178,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string[] Resolutions => ["1280 × 720", "1920 × 1080", NativeResolutionLabel];
+    public string[] Resolutions => ["1280 Г— 720", "1920 Г— 1080", NativeResolutionLabel];
     public int[] FrameRates { get; } = [30, 60];
     public int[] BufferDurations { get; } = [15, 30, 60, 120];
 
@@ -250,16 +250,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     ? "Buffer enabled"
                     : "Buffer disabled");
 
-            if (value)
-            {
-                QueueSettingsUpdate(true);
-            }
-            else
-            {
-                _settingsCts?.Cancel();
-                _restartPending = false;
-                _ = ApplySettingsImmediatelyAsync(restartCapture: true);
-            }
+            _settingsCts?.Cancel();
+            _restartPending = false;
+            _ = ApplyBufferStateImmediatelyAsync();
         }
     }
     public string BufferStatus => BufferEnabled ? "Buffer Enabled" : "Buffer Disabled";
@@ -273,7 +266,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (!SetProperty(ref _captureMode, value)) return;
             UpdateCaptureSectionState(value, immediate: false);
-            LogEvent($"Capture mode · {value}");
+            LogEvent($"Capture mode В· {value}");
             QueueSettingsUpdate(true);
         }
     }
@@ -293,17 +286,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _previewPage = 0;
 
-            // Одразу показуємо targets із кешу.
+            // РћРґСЂР°Р·Сѓ РїРѕРєР°Р·СѓС”РјРѕ targets С–Р· РєРµС€Сѓ.
             RefreshVisiblePreviews();
             OnPropertyChanged(nameof(IsWindowCaptureUnavailable));
             OnPropertyChanged(nameof(IsPreviewListVisible));
 
-            // У фоні оновлюємо список відкритих
-            // вікон або підключених моніторів.
+            // РЈ С„РѕРЅС– РѕРЅРѕРІР»СЋС”РјРѕ СЃРїРёСЃРѕРє РІС–РґРєСЂРёС‚РёС…
+            // РІС–РєРѕРЅ Р°Р±Рѕ РїС–РґРєР»СЋС‡РµРЅРёС… РјРѕРЅС–С‚РѕСЂС–РІ.
             _ = RefreshTargetsAsync(value);
 
             LogEvent(
-                $"Capture target · {value}");
+                $"Capture target В· {value}");
         }
     }
 
@@ -329,7 +322,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             RefreshNativeResolutionLabel();
 
             LogEvent(
-                $"Selected · {value.Title}");
+                $"Selected В· {value.Title}");
 
             QueueSettingsUpdate(true);
         }
@@ -342,11 +335,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool HasNextPreviewPage => CurrentTargets.Count > 4;
     public string PreviewPageLabel => $"{_previewPage + 1} / {Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d))}";
 
-    public string Resolution { get => _resolution; set { if (SetProperty(ref _resolution, value)) { LogEvent($"Resolution · {value}"); QueueSettingsUpdate(true); } } }
-    public string Quality { get => _quality; set { if (SetProperty(ref _quality, value)) { OnPropertyChanged(nameof(QualityBitrate)); LogEvent($"Quality · {value} ({QualityBitrate})"); QueueSettingsUpdate(true); } } }
+    public string Resolution { get => _resolution; set { if (SetProperty(ref _resolution, value)) { LogEvent($"Resolution В· {value}"); QueueSettingsUpdate(true); } } }
+    public string Quality { get => _quality; set { if (SetProperty(ref _quality, value)) { OnPropertyChanged(nameof(QualityBitrate)); LogEvent($"Quality В· {value} ({QualityBitrate})"); QueueSettingsUpdate(true); } } }
     public string QualityBitrate => Quality switch { "Low" => "50% bitrate", "High" => "90% bitrate", _ => "70% bitrate" };
-    public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate · {value} FPS"); QueueSettingsUpdate(true); } } }
-    public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration · {value} sec"); QueueSettingsUpdate(false); } } }
+    public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate В· {value} FPS"); QueueSettingsUpdate(true); } } }
+    public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration В· {value} sec"); QueueSettingsUpdate(false); } } }
     public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } } }
     public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } } }
 
@@ -404,10 +397,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             QueueSettingsUpdate(false);
         }
     }
-    public string ScreenshotHotkey { get => _screenshotHotkey; set { if (SetProperty(ref _screenshotHotkey, value)) { LogEvent($"Screenshot hotkey · {value}"); QueueSettingsUpdate(false); } } }
-    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey · {value}"); QueueSettingsUpdate(false); } } }
-    public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey · {value}"); QueueSettingsUpdate(false); } } }
-    public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey · {value}"); QueueSettingsUpdate(false); } } }
+    public string ScreenshotHotkey { get => _screenshotHotkey; set { if (SetProperty(ref _screenshotHotkey, value)) { LogEvent($"Screenshot hotkey В· {value}"); QueueSettingsUpdate(false); } } }
+    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey В· {value}"); QueueSettingsUpdate(false); } } }
+    public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey В· {value}"); QueueSettingsUpdate(false); } } }
+    public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey В· {value}"); QueueSettingsUpdate(false); } } }
     public bool IsContinuousRecording
     {
         get => _isContinuousRecording;
@@ -481,9 +474,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             VisiblePreviews.Add(item);
         }
 
-        // Шукаємо тільки реально активний capture target.
-        // Якщо активний monitor, у Windows нічого
-        // не буде вибрано, і навпаки.
+        // РЁСѓРєР°С”РјРѕ С‚С–Р»СЊРєРё СЂРµР°Р»СЊРЅРѕ Р°РєС‚РёРІРЅРёР№ capture target.
+        // РЇРєС‰Рѕ Р°РєС‚РёРІРЅРёР№ monitor, Сѓ Windows РЅС–С‡РѕРіРѕ
+        // РЅРµ Р±СѓРґРµ РІРёР±СЂР°РЅРѕ, С– РЅР°РІРїР°РєРё.
         CapturePreview? selection =
             CurrentTargets.FirstOrDefault(
                 item =>
@@ -534,7 +527,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         int pages = Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d));
         _previewPage = (_previewPage + 1) % pages;
         RefreshVisiblePreviews();
-        LogEvent($"Preview page · {_previewPage + 1}");
+        LogEvent($"Preview page В· {_previewPage + 1}");
     }
 
     private void LoadAudioDevices()
@@ -594,7 +587,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     Role.Multimedia);
 
             defaultOutput =
-                $"Default · {defaultOutputDevice.FriendlyName}";
+                $"Default В· {defaultOutputDevice.FriendlyName}";
         }
         catch
         {
@@ -611,7 +604,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     Role.Multimedia);
 
             defaultInput =
-                $"Default · {defaultInputDevice.FriendlyName}";
+                $"Default В· {defaultInputDevice.FriendlyName}";
         }
         catch
         {
@@ -963,7 +956,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (dialog.ShowDialog() == true)
         {
             SaveFolder = dialog.FolderName;
-            LogEvent($"Save folder · {Path.GetFileName(SaveFolder)}");
+            LogEvent($"Save folder В· {Path.GetFileName(SaveFolder)}");
         }
         await Task.CompletedTask;
     }
@@ -981,7 +974,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     UseShellExecute = true
                 });
 
-            LogEvent($"Opened folder В· {Path.GetFileName(SaveFolder)}");
+            LogEvent($"Opened folder Р’В· {Path.GetFileName(SaveFolder)}");
         }
         catch (Exception ex)
         {
@@ -1024,7 +1017,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             }
 
             LogEvent(
-                $"Screenshot saved · {Path.GetFileName(path)}");
+                $"Screenshot saved В· {Path.GetFileName(path)}");
 
             _notifications.Show(
                 "Screenshot saved");
@@ -1058,9 +1051,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         AppLogger.Info($"UI state | Action=SaveReplay clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
         try
         {
+            if (BufferEnabled)
+            {
+                ApplyToSettings();
+                _settings.Save();
+
+                AppLogger.Info(
+                    $"UI state | Action=SaveReplay sync-settings | Buffer={BufferEnabled} | " +
+                    $"Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | " +
+                    $"Frames={_capture.CapturedFrames}");
+
+                await _capture.ApplySettingsAsync(
+                    _settings,
+                    restartPipeline: !IsContinuousRecording);
+            }
+
             string path = await _capture.SaveRecordAsync();
             AppLogger.Info($"UI state | Action=SaveReplay success | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
-            LogEvent($"Replay saved · {Path.GetFileName(path)}");
+            LogEvent($"Replay saved В· {Path.GetFileName(path)}");
             _notifications.Show(_captureMode == "Audio" ? "MP3 saved" : "Replay saved");
         }
         catch (Exception ex)
@@ -1091,7 +1099,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 string path = await _capture.StopContinuousRecordingAsync();
                 AppLogger.Info($"UI state | Action=StopRecording success-before-ui-state | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
                 IsContinuousRecording = false;
-                LogEvent($"Recording saved · {Path.GetFileName(path)}");
+                LogEvent($"Recording saved В· {Path.GetFileName(path)}");
                 _notifications.Show("Recording saved");
                 return;
             }
@@ -1182,8 +1190,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            // Збираємо швидкі послідовні зміни
-            // в одне оновлення pipeline.
+            // Р—Р±РёСЂР°С”РјРѕ С€РІРёРґРєС– РїРѕСЃР»С–РґРѕРІРЅС– Р·РјС–РЅРё
+            // РІ РѕРґРЅРµ РѕРЅРѕРІР»РµРЅРЅСЏ pipeline.
             await Task.Delay(900, token);
 
             token.ThrowIfCancellationRequested();
@@ -1200,12 +1208,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            // Bindings і settings оновлюються в UI thread.
+            // Bindings С– settings РѕРЅРѕРІР»СЋСЋС‚СЊСЃСЏ РІ UI thread.
             ApplyToSettings();
             _settings.Save();
 
-            // Stop/start capture, encoder і audio виконуються
-            // поза UI thread.
+            // Stop/start capture, encoder С– audio РІРёРєРѕРЅСѓСЋС‚СЊСЃСЏ
+            // РїРѕР·Р° UI thread.
             await Task.Run(
                 () => _capture.ApplySettingsAsync(
                     _settings,
@@ -1214,7 +1222,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Наступна зміна замінила попередню.
+            // РќР°СЃС‚СѓРїРЅР° Р·РјС–РЅР° Р·Р°РјС–РЅРёР»Р° РїРѕРїРµСЂРµРґРЅСЋ.
         }
         catch (Exception ex)
         {
@@ -1260,6 +1268,37 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task ApplyBufferStateImmediatelyAsync()
+    {
+        try
+        {
+            ApplyToSettings();
+            _settings.Save();
+
+            bool restartCapture = !IsContinuousRecording;
+
+            AppLogger.Info(
+                $"UI state | Action=BufferApplyImmediate | Buffer={BufferEnabled} | " +
+                $"Restart={restartCapture} | Recording={IsContinuousRecording} | " +
+                $"CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
+
+            await Task.Run(
+                () => _capture.ApplySettingsAsync(
+                    _settings,
+                    restartCapture));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(MainViewModel),
+                ex.ToString());
+
+            LogEvent(
+                "Could not apply buffer state",
+                warning: true);
+        }
+    }
+
     private void ApplyToSettings()
     {
         _settings.Fps = NormalizeFrameRate(FrameRate);
@@ -1301,7 +1340,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         int transitionVersion =
             ++_captureSectionTransitionVersion;
 
-        // Активні секції розблоковуються перед fade-in.
+        // РђРєС‚РёРІРЅС– СЃРµРєС†С–С— СЂРѕР·Р±Р»РѕРєРѕРІСѓСЋС‚СЊСЃСЏ РїРµСЂРµРґ fade-in.
         if (video)
             IsVideoInputEnabled = true;
 
@@ -1343,7 +1382,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Input блокується лише після завершення fade-out.
+        // Input Р±Р»РѕРєСѓС”С‚СЊСЃСЏ Р»РёС€Рµ РїС–СЃР»СЏ Р·Р°РІРµСЂС€РµРЅРЅСЏ fade-out.
         IsVideoInputEnabled = video;
         IsAudioInputEnabled = audio;
     }
@@ -1413,14 +1452,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private string FromStoredResolution(string resolution) => resolution switch
     {
-        "720p" => "1280 × 720",
-        "1080p" => "1920 × 1080",
+        "720p" => "1280 Г— 720",
+        "1080p" => "1920 Г— 1080",
         _ => NativeResolutionLabel
     };
     private static string ToStoredResolution(string resolution) => resolution switch
     {
-        "1280 × 720" => "720p",
-        "1920 × 1080" => "1080p",
+        "1280 Г— 720" => "720p",
+        "1920 Г— 1080" => "1080p",
         _ => "Native"
     };
 
@@ -1533,3 +1572,4 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _microphoneVolumeAnimationCts?.Dispose();
     }
 }
+
