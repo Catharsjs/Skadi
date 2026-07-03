@@ -2921,38 +2921,47 @@ namespace EventCaptureNative
 
                 for (const auto& frame : frames)
                 {
-                    if (frame.storage == nullptr || frame.storageLength == 0)
+                    if (!frame.bytes.empty())
                     {
-                        SetError(L"Replay frame storage is unavailable.");
-                        return false;
+                        bytes = frame.bytes;
                     }
-
-                    if (frame.storage->path != currentStoragePath)
+                    else
                     {
-                        input.close();
-                        currentStoragePath = frame.storage->path;
-                        input.open(std::filesystem::path(currentStoragePath), std::ios::binary);
-                        if (!input)
+                        if (frame.storage == nullptr || frame.storageLength == 0)
                         {
-                            SetError(L"Could not open replay spool file.");
+                            SetError(L"Encoded frame data is unavailable.");
+                            return false;
+                        }
+
+                        if (frame.storage->path != currentStoragePath)
+                        {
+                            input.close();
+                            currentStoragePath = frame.storage->path;
+                            input.open(std::filesystem::path(currentStoragePath), std::ios::binary);
+                            if (!input)
+                            {
+                                SetError(L"Could not open replay spool file.");
+                                return false;
+                            }
+                        }
+
+                        bytes.resize(frame.storageLength);
+                        input.seekg(static_cast<std::streamoff>(frame.storageOffset), std::ios::beg);
+                        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                        if (input.gcount() != static_cast<std::streamsize>(bytes.size()))
+                        {
+                            SetError(L"Could not read replay spool packet.");
                             return false;
                         }
                     }
 
-                    bytes.resize(frame.storageLength);
-                    input.seekg(static_cast<std::streamoff>(frame.storageOffset), std::ios::beg);
-                    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                    if (input.gcount() != static_cast<std::streamsize>(bytes.size()))
-                    {
-                        SetError(L"Could not read replay spool packet.");
-                        return false;
-                    }
-
                     ComPtr<IMFMediaBuffer> buffer;
                     ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(bytes.size()), &buffer));
+
                     BYTE* destination = nullptr;
                     DWORD maxLength = 0;
                     DWORD currentLength = 0;
+
                     ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
                     std::memcpy(destination, bytes.data(), bytes.size());
                     ThrowIfFailed(buffer->Unlock());
@@ -2966,6 +2975,7 @@ namespace EventCaptureNative
                     const int64_t frameEnd100ns = std::min(
                         frame.timestamp100ns + std::max<int64_t>(1, frame.duration100ns),
                         windowEnd100ns);
+
                     const int64_t sampleTime100ns = std::max<int64_t>(0, frameStart100ns - windowStart100ns);
                     const int64_t sampleDuration100ns = std::max<int64_t>(1, frameEnd100ns - frameStart100ns);
 
@@ -2976,13 +2986,13 @@ namespace EventCaptureNative
                 }
 
                 ThrowIfFailed(writer->Finalize());
-                LogNative(L"Replay MP4 export completed.");
+                LogNative(L"MP4 export completed.");
                 return true;
             }
             catch (const winrt::hresult_error& error)
             {
                 std::wstringstream message;
-                message << L"Replay MP4 export failed with HRESULT 0x" << std::hex
+                message << L"MP4 export failed with HRESULT 0x" << std::hex
                     << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
                 SetError(message.str());
                 LogNative(message.str());
@@ -2991,13 +3001,13 @@ namespace EventCaptureNative
             catch (const std::exception& error)
             {
                 SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
-                LogNative(L"Replay MP4 export failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"MP4 export failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                 return false;
             }
             catch (...)
             {
-                SetError(L"Unknown replay MP4 export failure.");
-                LogNative(L"Replay MP4 export failed | unknown exception");
+                SetError(L"Unknown MP4 export failure.");
+                LogNative(L"MP4 export failed | unknown exception");
                 return false;
             }
         }

@@ -324,7 +324,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _ = RefreshTargetsAsync(value);
 
             LogEvent(
-                $"Capture target : {value}");
+                $"Capture target: {value}");
         }
     }
 
@@ -350,7 +350,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             RefreshNativeResolutionLabel();
 
             LogEvent(
-                $"Selected : {value.Title}");
+                $"Selected: {value.Title}");
 
             QueueSettingsUpdate(true);
         }
@@ -363,11 +363,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool HasNextPreviewPage => CurrentTargets.Count > 4;
     public string PreviewPageLabel => $"{_previewPage + 1} / {Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d))}";
 
-    public string Resolution { get => _resolution; set { if (SetProperty(ref _resolution, value)) { LogEvent($"Resolution : {value}"); QueueSettingsUpdate(true); } } }
-    public string Quality { get => _quality; set { if (SetProperty(ref _quality, value)) { OnPropertyChanged(nameof(QualityBitrate)); LogEvent($"Quality : {value} ({QualityBitrate})"); QueueSettingsUpdate(true); } } }
+    public string Resolution { get => _resolution; set { if (SetProperty(ref _resolution, value)) { LogEvent($"Resolution: {value}"); QueueSettingsUpdate(true); } } }
+    public string Quality { get => _quality; set { if (SetProperty(ref _quality, value)) { OnPropertyChanged(nameof(QualityBitrate)); LogEvent($"Quality: {value} ({QualityBitrate})"); QueueSettingsUpdate(true); } } }
     public string QualityBitrate => Quality switch { "Low" => "50% bitrate", "High" => "90% bitrate", _ => "70% bitrate" };
-    public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate : {value} FPS"); QueueSettingsUpdate(true); } } }
-    public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration : {value} sec"); QueueSettingsUpdate(false); } } }
+    public int FrameRate { get => _frameRate; set { if (SetProperty(ref _frameRate, value)) { LogEvent($"Frame rate: {value} FPS"); QueueSettingsUpdate(true); } } }
+    public int BufferDuration { get => _bufferDuration; set { if (SetProperty(ref _bufferDuration, value)) { LogEvent($"Buffer duration: {value} sec"); QueueSettingsUpdate(false); } } }
     public string SystemAudioDevice { get => _systemAudioDevice; set { if (SetProperty(ref _systemAudioDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("System audio device changed"); QueueSettingsUpdate(true); } } } }
     public string MicrophoneDevice { get => _microphoneDevice; set { if (SetProperty(ref _microphoneDevice, value)) { RefreshAudioMeterDevices(); if (!_suppressAudioDeviceChangeEvents) { LogEvent("Microphone device changed"); QueueSettingsUpdate(true); } } } }
 
@@ -425,10 +425,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             QueueSettingsUpdate(false);
         }
     }
-    public string ScreenshotHotkey { get => _screenshotHotkey; set { if (SetProperty(ref _screenshotHotkey, value)) { LogEvent($"Screenshot hotkey : {value}"); QueueSettingsUpdate(false); } } }
-    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey : {value}"); QueueSettingsUpdate(false); } } }
-    public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey : {value}"); QueueSettingsUpdate(false); } } }
-    public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey : {value}"); QueueSettingsUpdate(false); } } }
+    public string ScreenshotHotkey { get => _screenshotHotkey; set { if (SetProperty(ref _screenshotHotkey, value)) { LogEvent($"Screenshot hotkey: {value}"); QueueSettingsUpdate(false); } } }
+    public string RecordHotkey { get => _recordHotkey; set { if (SetProperty(ref _recordHotkey, value)) { LogEvent($"Replay hotkey: {value}"); QueueSettingsUpdate(false); } } }
+    public string ToggleUiHotkey { get => _toggleUiHotkey; set { if (SetProperty(ref _toggleUiHotkey, value)) { LogEvent($"Toggle UI hotkey: {value}"); QueueSettingsUpdate(false); } } }
+    public string StartStopRecordHotkey { get => _startStopRecordHotkey; set { if (SetProperty(ref _startStopRecordHotkey, value)) { LogEvent($"Recording hotkey: {value}"); QueueSettingsUpdate(false); } } }
     public bool IsContinuousRecording
     {
         get => _isContinuousRecording;
@@ -1134,8 +1134,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 string path = await _capture.StopContinuousRecordingAsync();
                 AppLogger.Info($"UI state | Action=StopRecording success-before-ui-state | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
                 IsContinuousRecording = false;
-                LogEvent($"Recording saved : {Path.GetFileName(path)}");
-                _notifications.Show("Recording saved");
+                LogEvent($"Record saved: {Path.GetFileName(path)}");
+                _notifications.Show("Record saved");
                 return;
             }
 
