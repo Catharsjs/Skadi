@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - master
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +23,7 @@ jobs:
       NATIVE_PROJECT: EventCapture.Native\EventCapture.Native.vcxproj
       ISS_SCRIPT: Installer\Skadi.iss
       INSTALLER_OUTPUT_DIR: Installer\Output
+      DIST_DIR: dist
 
     steps:
       - name: Checkout
@@ -69,10 +72,7 @@ jobs:
           }
 
           $publishDir = $exe.Directory.FullName
-          Write-Host "PublishDir=$publishDir"
           "publish_dir=$publishDir" >> $env:GITHUB_OUTPUT
-
-          Get-ChildItem $publishDir
 
       - name: Validate native DLL
         shell: pwsh
@@ -97,17 +97,57 @@ jobs:
             "/DSourceDir=${{ steps.publish.outputs.publish_dir }}" `
             "/DInstallerOutputDir=$env:GITHUB_WORKSPACE\$env:INSTALLER_OUTPUT_DIR"
 
+      - name: Prepare release asset
+        id: asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:DIST_DIR | Out-Null
+
+          $source = Get-ChildItem $env:INSTALLER_OUTPUT_DIR -Filter "*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $source) {
+            Write-Error "Installer .exe was not found."
+          }
+
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $assetName = "SkadiSetup-${{ github.ref_name }}.exe"
+            $releaseTag = "${{ github.ref_name }}"
+            $releaseName = "Skadi ${{ github.ref_name }}"
+            $prerelease = "false"
+          } else {
+            $assetName = "SkadiSetup-dev.exe"
+            $releaseTag = "dev-latest"
+            $releaseName = "Skadi dev latest"
+            $prerelease = "true"
+          }
+
+          $target = Join-Path $env:DIST_DIR $assetName
+          Copy-Item $source.FullName $target -Force
+
+          "asset_path=$target" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: Skadi-Installer
-          path: Installer/Output/*.exe
+          path: dist/*.exe
 
-      - name: Update dev-latest release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dev-latest
-          name: Skadi dev latest
-          prerelease: true
+          tag_name: ${{ steps.asset.outputs.release_tag }}
+          name: ${{ steps.asset.outputs.release_name }}
+          prerelease: ${{ steps.asset.outputs.prerelease }}
           make_latest: false
-          files: Installer/Output/*.exe
+          overwrite_files: true
+          files: dist/*.exe
+          body: |
+            Automated Skadi build.
+
+            Commit: ${{ github.sha }}
+            Branch/Tag: ${{ github.ref_name }}
