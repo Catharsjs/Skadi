@@ -366,31 +366,58 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     }
 
     private static int CalculateVideoBitrateKbps(
-        int width,
-        int height,
-        int fps,
-        int quality)
+    int width,
+    int height,
+    int fps,
+    int quality)
     {
-        const double referencePixels = 1920.0 * 1080.0;
-        double resolutionScale = Math.Max(0.5, (width * height) / referencePixels);
-        double fpsScale = Math.Sqrt(Math.Clamp(fps, 1, 240) / 60.0);
+        int normalizedFps = Math.Clamp(fps, 1, 60);
 
-        int referenceKbps = quality switch
+        int bitrate30;
+        int bitrate60;
+
+        if (height <= 720)
         {
-            <= 50 => 8_000,
-            <= 70 => 14_000,
-            _ => 22_000
-        };
-
-        int bitrate = (int)Math.Round(referenceKbps * resolutionScale * fpsScale);
-        int cap = quality switch
+            (bitrate30, bitrate60) = quality switch
+            {
+                <= 50 => (6_000, 8_000),
+                <= 70 => (10_000, 14_000),
+                _ => (16_000, 22_000)
+            };
+        }
+        else if (height <= 1080)
         {
-            <= 50 => 45_000,
-            <= 70 => 70_000,
-            _ => 95_000
-        };
+            (bitrate30, bitrate60) = quality switch
+            {
+                <= 50 => (8_000, 12_000),
+                <= 70 => (14_000, 20_000),
+                _ => (22_000, 32_000)
+            };
+        }
+        else if (height <= 1440)
+        {
+            (bitrate30, bitrate60) = quality switch
+            {
+                <= 50 => (16_000, 24_000),
+                <= 70 => (28_000, 40_000),
+                _ => (44_000, 64_000)
+            };
+        }
+        else
+        {
+            (bitrate30, bitrate60) = quality switch
+            {
+                <= 50 => (35_000, 50_000),
+                <= 70 => (60_000, 85_000),
+                _ => (95_000, 130_000)
+            };
+        }
 
-        return Math.Clamp(bitrate, 4_000, cap);
+        if (normalizedFps <= 30)
+            return bitrate30;
+
+        double fpsScale = (normalizedFps - 30) / 30.0;
+        return (int)Math.Round(bitrate30 + ((bitrate60 - bitrate30) * fpsScale));
     }
 
     private void StopPipelineCore()
