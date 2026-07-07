@@ -600,10 +600,17 @@ namespace EventCaptureNative
 
         EcResult Start()
         {
-            std::scoped_lock stateLock(stateMutex_);
-            if (running_) return EcResult::Ok;
             try
             {
+                {
+                    std::wstringstream log;
+                    log << L"Implementation::Start pre-lock | This=0x" << std::hex << reinterpret_cast<uintptr_t>(this);
+                    LogNative(log.str());
+                }
+                LogNative(L"Implementation::Start lock begin.");
+                std::scoped_lock stateLock(stateMutex_);
+                LogNative(L"Implementation::Start lock acquired.");
+                if (running_) return EcResult::Ok;
                 LogNative(L"Start entered.");
                 startupStage_ = L"COM initialization";
                 const HRESULT apartmentResult = RoInitialize(RO_INIT_MULTITHREADED);
@@ -3508,7 +3515,19 @@ namespace EventCaptureNative
 
     VideoEngine::VideoEngine(const EcVideoConfig& config) : implementation_(std::make_unique<Implementation>(config)) {}
     VideoEngine::~VideoEngine() = default;
-    EcResult VideoEngine::Start() { return implementation_->Start(); }
+    EcResult VideoEngine::Start()
+    {
+        std::wstringstream log;
+        log << L"VideoEngine::Start wrapper enter | This=0x" << std::hex << reinterpret_cast<uintptr_t>(this)
+            << L" | Implementation=0x" << reinterpret_cast<uintptr_t>(implementation_.get());
+        LogNative(log.str());
+        if (!implementation_)
+        {
+            LogNative(L"VideoEngine::Start wrapper failed | Implementation=null");
+            return EcResult::NativeFailure;
+        }
+        return implementation_->Start();
+    }
     EcResult VideoEngine::Stop() { return implementation_->Stop(); }
     EcResult VideoEngine::SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result) { return implementation_->SaveReplay(path, seconds, result); }
     EcResult VideoEngine::StartRecording(const wchar_t* path) { return implementation_->StartRecording(path); }

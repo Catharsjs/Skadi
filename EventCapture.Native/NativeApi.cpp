@@ -145,7 +145,14 @@ namespace
 
         try
         {
-            EcResult result = ToEngine(handle)->Start();
+            VideoEngine* engine = ToEngine(handle);
+            {
+                std::wstringstream log;
+                log << L"EcStartVideoEngine dispatch | Engine=0x" << std::hex << reinterpret_cast<uintptr_t>(engine);
+                AppendNativeApiLog(log.str());
+            }
+
+            EcResult result = engine->Start();
             std::wstringstream log;
             log << L"EcStartVideoEngine exit | Result=" << static_cast<int32_t>(result);
             AppendNativeApiLog(log.str());
