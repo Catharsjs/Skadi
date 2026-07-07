@@ -193,6 +193,22 @@ namespace EventCaptureNative
                 buildNumber >= 22000;
         }
 
+        bool IsMonitorRotated(HMONITOR monitor)
+        {
+            if (monitor == nullptr) return false;
+
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (!GetMonitorInfoW(monitor, &info)) return false;
+
+            DEVMODEW mode{};
+            mode.dmSize = sizeof(mode);
+            if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return false;
+
+            return mode.dmDisplayOrientation == DMDO_90 ||
+                mode.dmDisplayOrientation == DMDO_270;
+        }
+
         void AbortSignalHandler(int signal)
         {
             std::wstringstream message;
@@ -256,6 +272,120 @@ namespace EventCaptureNative
             __try
             {
                 return transform->ProcessMessage(message, parameter);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeActivateTransform(
+            IMFActivate* activate,
+            IMFTransform** transform,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (transform != nullptr) *transform = nullptr;
+
+            __try
+            {
+                return activate->ActivateObject(__uuidof(IMFTransform), reinterpret_cast<void**>(transform));
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeGetTransformAttributes(
+            IMFTransform* transform,
+            IMFAttributes** attributes,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (attributes != nullptr) *attributes = nullptr;
+
+            __try
+            {
+                return transform->GetAttributes(attributes);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeQueryTransformInterface(
+            IMFTransform* transform,
+            REFIID interfaceId,
+            void** result,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (result != nullptr) *result = nullptr;
+
+            __try
+            {
+                return transform->QueryInterface(interfaceId, result);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeSetTransformOutputType(
+            IMFTransform* transform,
+            IMFMediaType* mediaType,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+
+            __try
+            {
+                return transform->SetOutputType(0, mediaType, 0);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeSetTransformInputType(
+            IMFTransform* transform,
+            IMFMediaType* mediaType,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+
+            __try
+            {
+                return transform->SetInputType(0, mediaType, 0);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                if (exceptionCode != nullptr) *exceptionCode = GetExceptionCode();
+                return E_FAIL;
+            }
+        }
+
+        HRESULT SafeCodecSetValue(
+            ICodecAPI* codec,
+            const GUID* key,
+            VARIANT* value,
+            unsigned long* exceptionCode) noexcept
+        {
+            if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (codec == nullptr) return S_FALSE;
+
+            __try
+            {
+                return codec->SetValue(key, value);
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
             {
@@ -340,7 +470,20 @@ namespace EventCaptureNative
             VariantInit(&variant);
             variant.vt = VT_UI4;
             variant.ulVal = value;
-            codec->SetValue(&key, &variant);
+            unsigned long exceptionCode = 0;
+            HRESULT result = SafeCodecSetValue(codec, &key, &variant, &exceptionCode);
+            if (exceptionCode != 0)
+            {
+                std::wstringstream log;
+                log << L"CodecAPI SetValue UInt32 SEH | Code=0x" << std::hex << exceptionCode;
+                LogNative(log.str());
+            }
+            else if (FAILED(result))
+            {
+                std::wstringstream log;
+                log << L"CodecAPI SetValue UInt32 failed | HRESULT=0x" << std::hex << static_cast<uint32_t>(result);
+                LogNative(log.str());
+            }
             VariantClear(&variant);
         }
 
@@ -351,7 +494,20 @@ namespace EventCaptureNative
             VariantInit(&variant);
             variant.vt = VT_BOOL;
             variant.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
-            codec->SetValue(&key, &variant);
+            unsigned long exceptionCode = 0;
+            HRESULT result = SafeCodecSetValue(codec, &key, &variant, &exceptionCode);
+            if (exceptionCode != 0)
+            {
+                std::wstringstream log;
+                log << L"CodecAPI SetValue Bool SEH | Code=0x" << std::hex << exceptionCode;
+                LogNative(log.str());
+            }
+            else if (FAILED(result))
+            {
+                std::wstringstream log;
+                log << L"CodecAPI SetValue Bool failed | HRESULT=0x" << std::hex << static_cast<uint32_t>(result);
+                LogNative(log.str());
+            }
             VariantClear(&variant);
         }
 
@@ -400,16 +556,19 @@ namespace EventCaptureNative
         explicit Implementation(const EcVideoConfig& config) : config_(config)
         {
             InstallNativeDiagnostics();
-            captureBackend_ =
-                config_.targetKind == EcTargetKind::Monitor && !IsWindows11OrGreater()
-                    ? CaptureBackend::DesktopDuplication
-                    : CaptureBackend::WindowsGraphicsCapture;
+            const bool useDesktopDuplication =
+                config_.targetKind == EcTargetKind::Monitor &&
+                !IsWindows11OrGreater();
+            captureBackend_ = useDesktopDuplication
+                ? CaptureBackend::DesktopDuplication
+                : CaptureBackend::WindowsGraphicsCapture;
 
             std::wstringstream configLog;
             configLog
                 << L"VideoEngine ctor | Pipeline=mp4-encoded-sample-v2"
                 << L" | Backend="
                 << (captureBackend_ == CaptureBackend::DesktopDuplication ? L"DDA" : L"WGC")
+                << L" | MonitorRotated=" << (config_.targetKind == EcTargetKind::Monitor && IsMonitorRotated(static_cast<HMONITOR>(config_.targetHandle)) ? 1 : 0)
                 << L" | TargetKind=" << static_cast<int32_t>(config_.targetKind)
                 << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config_.targetHandle)
                 << std::dec
@@ -1114,25 +1273,38 @@ namespace EventCaptureNative
                 throw std::runtime_error("Desktop Duplication target output was not found on the selected adapter");
             }
 
-            const uint32_t width = static_cast<uint32_t>(
+            const uint32_t logicalWidth = static_cast<uint32_t>(
                 std::max<LONG>(1, selectedDescription.DesktopCoordinates.right - selectedDescription.DesktopCoordinates.left));
-            const uint32_t height = static_cast<uint32_t>(
+            const uint32_t logicalHeight = static_cast<uint32_t>(
                 std::max<LONG>(1, selectedDescription.DesktopCoordinates.bottom - selectedDescription.DesktopCoordinates.top));
+
+            ComPtr<IDXGIOutput1> output1;
+            ThrowIfFailed(selectedOutput.As(&output1));
+            ThrowIfFailed(output1->DuplicateOutput(device_.Get(), &desktopDuplication_));
+
+            DXGI_OUTDUPL_DESC duplicationDescription{};
+            desktopDuplication_->GetDesc(&duplicationDescription);
+            desktopDuplicationRotation_ = duplicationDescription.Rotation;
+
+            const uint32_t surfaceWidth = duplicationDescription.ModeDesc.Width > 0
+                ? duplicationDescription.ModeDesc.Width
+                : logicalWidth;
+            const uint32_t surfaceHeight = duplicationDescription.ModeDesc.Height > 0
+                ? duplicationDescription.ModeDesc.Height
+                : logicalHeight;
 
             {
                 std::wstringstream log;
                 log
                     << L"DDA output selected | DeviceName=" << selectedDescription.DeviceName
                     << L" | Bounds=" << RectToString(selectedDescription.DesktopCoordinates)
-                    << L" | Size=" << width << L"x" << height;
+                    << L" | LogicalSize=" << logicalWidth << L"x" << logicalHeight
+                    << L" | SurfaceSize=" << surfaceWidth << L"x" << surfaceHeight
+                    << L" | Rotation=" << static_cast<uint32_t>(desktopDuplicationRotation_);
                 LogNative(log.str());
             }
 
-            CreateLatestTexture(width, height);
-
-            ComPtr<IDXGIOutput1> output1;
-            ThrowIfFailed(selectedOutput.As(&output1));
-            ThrowIfFailed(output1->DuplicateOutput(device_.Get(), &desktopDuplication_));
+            CreateLatestTexture(surfaceWidth, surfaceHeight);
 
             LogNative(L"CreateDesktopDuplicationCapture completed.");
         }
@@ -1494,6 +1666,21 @@ namespace EventCaptureNative
                 currentMonitor == initialWindowMonitor_;
         }
 
+        D3D11_VIDEO_PROCESSOR_ROTATION GetDesktopDuplicationVideoRotation() const
+        {
+            switch (desktopDuplicationRotation_)
+            {
+            case DXGI_MODE_ROTATION_ROTATE90:
+                return D3D11_VIDEO_PROCESSOR_ROTATION_90;
+            case DXGI_MODE_ROTATION_ROTATE180:
+                return D3D11_VIDEO_PROCESSOR_ROTATION_180;
+            case DXGI_MODE_ROTATION_ROTATE270:
+                return D3D11_VIDEO_PROCESSOR_ROTATION_270;
+            default:
+                return D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+            }
+        }
+
         void CreateVideoProcessor(
             ID3D11Texture2D* latestTexture,
             uint32_t sourceWidth,
@@ -1547,6 +1734,15 @@ namespace EventCaptureNative
             videoContext_->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &sourceRect);
             videoContext_->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &streamDestRect);
             videoContext_->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &outputRect);
+            if (captureBackend_ == CaptureBackend::DesktopDuplication)
+            {
+                const D3D11_VIDEO_PROCESSOR_ROTATION rotation = GetDesktopDuplicationVideoRotation();
+                videoContext_->VideoProcessorSetStreamRotation(
+                    processor.Get(),
+                    0,
+                    rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                    rotation);
+            }
             D3D11_VIDEO_COLOR background{};
             background.RGBA.R = 0.0f;
             background.RGBA.G = 0.0f;
@@ -1978,18 +2174,22 @@ namespace EventCaptureNative
 
                     ComPtr<IMFTransform> candidate;
                     LogNative(L"H.264 MFT ActivateObject begin");
+                    unsigned long activationException = 0;
                     HRESULT activationResult =
-                        activates[index]->ActivateObject(
-                            IID_PPV_ARGS(&candidate));
+                        SafeActivateTransform(
+                            activates[index],
+                            candidate.GetAddressOf(),
+                            &activationException);
                     LogNative(L"H.264 MFT ActivateObject completed");
 
-                    if (FAILED(activationResult))
+                    if (activationException != 0 || FAILED(activationResult))
                     {
                         std::wstringstream log;
                         log
                             << L"H.264 MFT activation failed | Label=" << label
                             << L" | Index=" << index
-                            << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(activationResult);
+                            << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(activationResult)
+                            << L" | SEH=0x" << activationException;
                         LogNative(log.str());
                         continue;
                     }
@@ -2061,7 +2261,18 @@ namespace EventCaptureNative
         {
             ComPtr<IMFAttributes> attributes;
             LogNative(L"ConfigureEncoderTransform GetAttributes begin");
-            if (SUCCEEDED(transform->GetAttributes(&attributes)))
+            unsigned long getAttributesException = 0;
+            HRESULT getAttributesResult = SafeGetTransformAttributes(
+                transform,
+                attributes.GetAddressOf(),
+                &getAttributesException);
+            if (getAttributesException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform GetAttributes SEH | Code=0x" << std::hex << getAttributesException;
+                LogNative(log.str());
+            }
+            if (SUCCEEDED(getAttributesResult) && attributes != nullptr)
             {
                 attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
                 attributes->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
@@ -2076,7 +2287,19 @@ namespace EventCaptureNative
             if (candidateAsync)
             {
                 LogNative(L"ConfigureEncoderTransform QueryInterface IMFMediaEventGenerator begin");
-                ThrowIfFailed(transform->QueryInterface(IID_PPV_ARGS(&candidateEventGenerator)));
+                unsigned long eventGeneratorException = 0;
+                HRESULT eventGeneratorResult = SafeQueryTransformInterface(
+                    transform,
+                    __uuidof(IMFMediaEventGenerator),
+                    reinterpret_cast<void**>(candidateEventGenerator.GetAddressOf()),
+                    &eventGeneratorException);
+                if (eventGeneratorException != 0)
+                {
+                    std::wstringstream log;
+                    log << L"ConfigureEncoderTransform QueryInterface IMFMediaEventGenerator SEH | Code=0x" << std::hex << eventGeneratorException;
+                    LogNative(log.str());
+                }
+                ThrowIfFailed(eventGeneratorResult);
                 LogNative(L"ConfigureEncoderTransform QueryInterface IMFMediaEventGenerator completed");
             }
 
@@ -2111,7 +2334,15 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
             ConfigureSdrBt709ColorMetadata(outputType.Get());
             LogNative(L"ConfigureEncoderTransform SetOutputType begin");
-            ThrowIfFailed(transform->SetOutputType(0, outputType.Get(), 0));
+            unsigned long setOutputTypeException = 0;
+            HRESULT setOutputTypeResult = SafeSetTransformOutputType(transform, outputType.Get(), &setOutputTypeException);
+            if (setOutputTypeException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform SetOutputType SEH | Code=0x" << std::hex << setOutputTypeException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(setOutputTypeResult);
             LogNative(L"ConfigureEncoderTransform SetOutputType completed");
 
             ComPtr<IMFMediaType> inputType;
@@ -2125,11 +2356,36 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeRatio(inputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
             ConfigureSdrBt709ColorMetadata(inputType.Get());
             LogNative(L"ConfigureEncoderTransform SetInputType begin");
-            ThrowIfFailed(transform->SetInputType(0, inputType.Get(), 0));
+            unsigned long setInputTypeException = 0;
+            HRESULT setInputTypeResult = SafeSetTransformInputType(transform, inputType.Get(), &setInputTypeException);
+            if (setInputTypeException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform SetInputType SEH | Code=0x" << std::hex << setInputTypeException;
+                LogNative(log.str());
+            }
+            ThrowIfFailed(setInputTypeResult);
             LogNative(L"ConfigureEncoderTransform SetInputType completed");
 
             LogNative(L"ConfigureEncoderTransform codec API begin");
-            transform->QueryInterface(IID_PPV_ARGS(&candidateCodecApi));
+            unsigned long codecApiException = 0;
+            HRESULT codecApiResult = SafeQueryTransformInterface(
+                transform,
+                __uuidof(ICodecAPI),
+                reinterpret_cast<void**>(candidateCodecApi.GetAddressOf()),
+                &codecApiException);
+            if (codecApiException != 0)
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform QueryInterface ICodecAPI SEH | Code=0x" << std::hex << codecApiException;
+                LogNative(log.str());
+            }
+            else if (FAILED(codecApiResult))
+            {
+                std::wstringstream log;
+                log << L"ConfigureEncoderTransform QueryInterface ICodecAPI failed | HRESULT=0x" << std::hex << static_cast<uint32_t>(codecApiResult);
+                LogNative(log.str());
+            }
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonMeanBitRate, config_.bitrateKbps * 1000);
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncMPVGOPSize, config_.framesPerSecond);
@@ -3195,6 +3451,7 @@ namespace EventCaptureNative
         ComPtr<ID3D11VideoProcessorOutputView> processorOutput_;
         uint32_t sourceWidth_{};
         uint32_t sourceHeight_{};
+        DXGI_MODE_ROTATION desktopDuplicationRotation_{ DXGI_MODE_ROTATION_IDENTITY };
         uint32_t sourceContentWidth_{};
         uint32_t sourceContentHeight_{};
         uint32_t windowFrameWidth_{};

@@ -280,20 +280,31 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
         if (wantsVideo)
         {
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-resolve-begin | Target={_settings.CaptureTarget} | Resolution={_settings.Resolution} | Current={DescribeState()}");
             var (width, height) = ResolveResolution(_settings);
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-resolve-end | Width={width} | Height={height} | Target={_settings.CaptureTarget}");
+
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore fps-resolve-begin | RequestedFps={_settings.Fps} | Target={_settings.CaptureTarget}");
             effectiveFps = ResolveEffectiveFrameRate(_settings);
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore fps-resolve-end | EffectiveFps={effectiveFps}");
+
             videoBitrate = CalculateVideoBitrateKbps(
                 width,
                 height,
                 effectiveFps,
                 _settings.VideoQuality);
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-create-begin | Output={width}x{height} | Fps={effectiveFps} | Bitrate={videoBitrate}kbps | BufferSec={_settings.BufferSeconds} | Buffer={_settings.BufferEnabled} | Mode={_settings.CaptureMode}");
             _videoPipeline = CreateVideoPipeline(
                 _settings,
                 effectiveFps,
                 width,
                 height,
                 videoBitrate);
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-create-end | Type={_videoPipeline.GetType().Name}");
+
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-start-begin | Type={_videoPipeline.GetType().Name}");
             _videoPipeline.Start();
+            AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-start-end | StartTimestamp={_videoPipeline.StartTimestamp} | Frames={_videoPipeline.FramesCaptured}");
             sharedTimestamp = _videoPipeline.StartTimestamp;
         }
 

@@ -85,11 +85,71 @@ namespace
         return EcResult::NativeFailure;
     }
 
-    EcResult EcStartVideoEngineCore(EcEngineHandle handle) noexcept
+    EcResult EcCreateVideoEngineCore(const EcVideoConfig* config, EcEngineHandle* handle) noexcept
     {
+        AppendNativeApiLog(L"EcCreateVideoEngine enter");
+        if (config == nullptr || handle == nullptr || config->structSize != sizeof(EcVideoConfig))
+        {
+            AppendNativeApiLog(L"EcCreateVideoEngine invalid argument");
+            return EcResult::InvalidArgument;
+        }
+
+        {
+            std::wstringstream log;
+            log
+                << L"EcCreateVideoEngine config"
+                << L" | TargetKind=" << static_cast<int32_t>(config->targetKind)
+                << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config->targetHandle)
+                << std::dec
+                << L" | Output=" << config->outputWidth << L"x" << config->outputHeight
+                << L" | FPS=" << config->framesPerSecond
+                << L" | BitrateKbps=" << config->bitrateKbps
+                << L" | ReplaySeconds=" << config->replaySeconds
+                << L" | EnableReplay=" << config->enableReplay;
+            AppendNativeApiLog(log.str());
+        }
+
+        *handle = nullptr;
         try
         {
-            return ToEngine(handle)->Start();
+            *handle = new VideoEngine(*config);
+            std::wstringstream log;
+            log << L"EcCreateVideoEngine exit | Result=Ok | Handle=0x" << std::hex << reinterpret_cast<uintptr_t>(*handle);
+            AppendNativeApiLog(log.str());
+            return EcResult::Ok;
+        }
+        catch (const std::bad_alloc&)
+        {
+            AppendNativeApiLog(L"EcCreateVideoEngine caught bad_alloc");
+            return EcResult::NativeFailure;
+        }
+        catch (const std::exception& error)
+        {
+            AppendNativeApiLog(L"EcCreateVideoEngine caught std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+            return EcResult::NativeFailure;
+        }
+        catch (...)
+        {
+            AppendNativeApiLog(L"EcCreateVideoEngine caught unknown C++ exception");
+            return EcResult::NativeFailure;
+        }
+    }
+
+    EcResult EcStartVideoEngineCore(EcEngineHandle handle) noexcept
+    {
+        {
+            std::wstringstream log;
+            log << L"EcStartVideoEngine enter | Handle=0x" << std::hex << reinterpret_cast<uintptr_t>(handle);
+            AppendNativeApiLog(log.str());
+        }
+
+        try
+        {
+            EcResult result = ToEngine(handle)->Start();
+            std::wstringstream log;
+            log << L"EcStartVideoEngine exit | Result=" << static_cast<int32_t>(result);
+            AppendNativeApiLog(log.str());
+            return result;
         }
         catch (const std::exception& error)
         {
@@ -171,20 +231,13 @@ namespace
 
 EcResult __cdecl EcCreateVideoEngine(const EcVideoConfig* config, EcEngineHandle* handle)
 {
-    if (config == nullptr || handle == nullptr || config->structSize != sizeof(EcVideoConfig)) return EcResult::InvalidArgument;
-    *handle = nullptr;
-    try
+    __try
     {
-        *handle = new VideoEngine(*config);
-        return EcResult::Ok;
+        return EcCreateVideoEngineCore(config, handle);
     }
-    catch (const std::bad_alloc&)
+    __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        return EcResult::NativeFailure;
-    }
-    catch (...)
-    {
-        return EcResult::NativeFailure;
+        return LogSehFailure(L"EcCreateVideoEngine", GetExceptionCode());
     }
 }
 
