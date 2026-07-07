@@ -1,5 +1,4 @@
 #include "VideoEngine.h"
-
 #include <Windows.h>
 #include <avrt.h>
 #include <codecapi.h>
@@ -22,7 +21,6 @@
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/base.h>
-
 #include <algorithm>
 #include <cmath>
 #include <csignal>

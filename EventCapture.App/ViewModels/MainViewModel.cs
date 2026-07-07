@@ -314,13 +314,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _previewPage = 0;
 
-            // РћРґСЂР°Р·Сѓ РїРѕРєР°Р·СѓС”РјРѕ targets С–Р· РєРµС€Сѓ.
             RefreshVisiblePreviews();
             OnPropertyChanged(nameof(IsWindowCaptureUnavailable));
             OnPropertyChanged(nameof(IsPreviewListVisible));
-
-            // РЈ С„РѕРЅС– РѕРЅРѕРІР»СЋС”РјРѕ СЃРїРёСЃРѕРє РІС–РґРєСЂРёС‚РёС…
-            // РІС–РєРѕРЅ Р°Р±Рѕ РїС–РґРєР»СЋС‡РµРЅРёС… РјРѕРЅС–С‚РѕСЂС–РІ.
             _ = RefreshTargetsAsync(value);
 
             LogEvent(
@@ -502,9 +498,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             VisiblePreviews.Add(item);
         }
 
-        // РЁСѓРєР°С”РјРѕ С‚С–Р»СЊРєРё СЂРµР°Р»СЊРЅРѕ Р°РєС‚РёРІРЅРёР№ capture target.
-        // РЇРєС‰Рѕ Р°РєС‚РёРІРЅРёР№ monitor, Сѓ Windows РЅС–С‡РѕРіРѕ
-        // РЅРµ Р±СѓРґРµ РІРёР±СЂР°РЅРѕ, С– РЅР°РІРїР°РєРё.
         CapturePreview? selection =
             CurrentTargets.FirstOrDefault(
                 item =>
@@ -1002,7 +995,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     UseShellExecute = true
                 });
 
-            LogEvent($"Opened folder Р’: {Path.GetFileName(SaveFolder)}");
+            LogEvent($"Opened folder: {Path.GetFileName(SaveFolder)}");
         }
         catch (Exception ex)
         {
@@ -1225,8 +1218,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            // Р—Р±РёСЂР°С”РјРѕ С€РІРёРґРєС– РїРѕСЃР»С–РґРѕРІРЅС– Р·РјС–РЅРё
-            // РІ РѕРґРЅРµ РѕРЅРѕРІР»РµРЅРЅСЏ pipeline.
             await Task.Delay(900, token);
 
             token.ThrowIfCancellationRequested();
@@ -1243,22 +1234,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            // Bindings С– settings РѕРЅРѕРІР»СЋСЋС‚СЊСЃСЏ РІ UI thread.
+            // Bindings UI thread.
             ApplyToSettings();
             _settings.Save();
 
-            // Stop/start capture, encoder С– audio РІРёРєРѕРЅСѓСЋС‚СЊСЃСЏ
-            // РїРѕР·Р° UI thread.
             await Task.Run(
                 () => _capture.ApplySettingsAsync(
                     _settings,
                     restart),
                 token);
         }
-        catch (OperationCanceledException)
-        {
-            // РќР°СЃС‚СѓРїРЅР° Р·РјС–РЅР° Р·Р°РјС–РЅРёР»Р° РїРѕРїРµСЂРµРґРЅСЋ.
-        }
+        catch (OperationCanceledException){}
         catch (Exception ex)
         {
             AppLogger.Error(
@@ -1375,7 +1361,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         int transitionVersion =
             ++_captureSectionTransitionVersion;
 
-        // РђРєС‚РёРІРЅС– СЃРµРєС†С–С— СЂРѕР·Р±Р»РѕРєРѕРІСѓСЋС‚СЊСЃСЏ РїРµСЂРµРґ fade-in.
         if (video)
             IsVideoInputEnabled = true;
 
@@ -1417,7 +1402,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Input Р±Р»РѕРєСѓС”С‚СЊСЃСЏ Р»РёС€Рµ РїС–СЃР»СЏ Р·Р°РІРµСЂС€РµРЅРЅСЏ fade-out.
         IsVideoInputEnabled = video;
         IsAudioInputEnabled = audio;
     }

@@ -27,8 +27,8 @@ public sealed class CaptureTargetService
         foreach (DisplayMonitor screen in DisplayMonitorService.GetAll())
         {
             string target = screen.IsPrimary ? "PrimaryMonitor" : $"Monitor|{screen.DeviceName}";
-            string title = screen.IsPrimary ? $"Display {index} В· Primary" : $"Display {index}";
-            string subtitle = $"{screen.Bounds.Width} Г— {screen.Bounds.Height}";
+            string title = screen.IsPrimary ? $"Display {index} Primary" : $"Display {index}";
+            string subtitle = $"{screen.Bounds.Width}x{screen.Bounds.Height}";
             result.Add(new CapturePreview(
                 $"monitor-{index}", title, subtitle, "в–Ј", target,
                 CaptureMonitorPreview(screen)));
