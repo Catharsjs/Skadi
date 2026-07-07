@@ -618,6 +618,7 @@ namespace EventCaptureNative
 
                 recordingPath_ = path;
                 recordingFrames_.clear();
+                CreateRecordingWriter(path);
 
                 recordingPending_ = true;
                 recording_ = false;
@@ -631,7 +632,7 @@ namespace EventCaptureNative
 
                 {
                     std::wstringstream message;
-                    message << L"Native state | Action=StartRecording armed-buffered"
+                    message << L"Native state | Action=StartRecording armed-streaming"
                         << L" | ReplayEnabled=" << ReplayEnabled()
                         << L" | Packets=" << packets_.size()
                         << L" | Captured=" << capturedFrames_.load()
@@ -652,6 +653,7 @@ namespace EventCaptureNative
                 SetError(message.str());
                 LogNative(L"StartRecording failed | " + message.str());
 
+                ReleaseRecordingWriterNoThrow();
                 recording_ = false;
                 recordingPending_ = false;
                 recordingFrames_.clear();
@@ -663,6 +665,7 @@ namespace EventCaptureNative
                 SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                 LogNative(L"StartRecording failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
 
+                ReleaseRecordingWriterNoThrow();
                 recording_ = false;
                 recordingPending_ = false;
                 recordingFrames_.clear();
@@ -674,6 +677,7 @@ namespace EventCaptureNative
                 SetError(L"Unknown StartRecording failure.");
                 LogNative(L"StartRecording failed | unknown exception");
 
+                ReleaseRecordingWriterNoThrow();
                 recording_ = false;
                 recordingPending_ = false;
                 recordingFrames_.clear();
@@ -684,7 +688,7 @@ namespace EventCaptureNative
 
         EcResult StopRecording(EcExportResult& result)
         {
-            std::vector<EncodedFrame> frames;
+            ComPtr<IMFSinkWriter> writer;
             std::wstring outputPath;
             int64_t start100ns = 0;
             int64_t end100ns = 0;
@@ -700,8 +704,9 @@ namespace EventCaptureNative
                     recordingPending_ = false;
                     recording_ = false;
 
-                    frames = std::move(recordingFrames_);
                     recordingFrames_.clear();
+                    writer = recordingWriter_;
+                    recordingWriter_.Reset();
 
                     outputPath = recordingPath_;
 
@@ -715,19 +720,18 @@ namespace EventCaptureNative
                     recordingEnd100ns_ = 0;
                     recordingLastTimestamp100ns_ = -1;
                     recordingFrameCount_ = 0;
-
-                    ReleaseRecordingWriterNoThrow();
                 }
 
-                if (frames.empty() || outputPath.empty())
+                if (frameCount == 0 || outputPath.empty() || writer == nullptr)
                 {
+                    if (writer != nullptr)
+                    {
+                        try { writer->Finalize(); } catch (...) {}
+                    }
                     return EcResult::InvalidState;
                 }
 
-                if (!WriteFramesToMp4(outputPath.c_str(), frames, start100ns, end100ns))
-                {
-                    return EcResult::NativeFailure;
-                }
+                ThrowIfFailed(writer->Finalize());
 
                 result.startTimestamp100ns = start100ns;
                 result.endTimestamp100ns = end100ns;
@@ -735,13 +739,12 @@ namespace EventCaptureNative
 
                 {
                     std::wstringstream message;
-                    message << L"Native state | Action=StopRecording exit-buffered"
+                    message << L"Native state | Action=StopRecording exit-streaming"
                         << L" | Result=Ok"
                         << L" | Frames=" << frameCount
                         << L" | Start=" << result.startTimestamp100ns
                         << L" | End=" << result.endTimestamp100ns
                         << L" | DurationMs=" << ((result.endTimestamp100ns - result.startTimestamp100ns) / 10000)
-                        << L" | WrittenFrames=" << frames.size()
                         << L" | ReplayEnabled=" << ReplayEnabled()
                         << L" | Packets=" << packets_.size()
                         << L" | Captured=" << capturedFrames_.load()
@@ -756,7 +759,7 @@ namespace EventCaptureNative
             catch (const winrt::hresult_error& error)
             {
                 std::wstringstream message;
-                message << L"StopRecording buffered export failed with HRESULT 0x" << std::hex
+                message << L"StopRecording streaming finalize failed with HRESULT 0x" << std::hex
                     << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
 
                 SetError(message.str());
@@ -2208,6 +2211,17 @@ namespace EventCaptureNative
             catch (...) {}
         }
 
+        static void SetStreamingSampleTiming(
+            IMFSample* sample,
+            int64_t sampleTime100ns,
+            int64_t sampleDuration100ns,
+            bool keyFrame)
+        {
+            ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
+            ThrowIfFailed(sample->SetSampleDuration(sampleDuration100ns));
+            ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, keyFrame ? TRUE : FALSE));
+        }
+
         EncodedFrame CreateEncodedFrameFromSample(
             IMFSample* sample,
             int64_t timestamp100ns,
@@ -2290,13 +2304,14 @@ namespace EventCaptureNative
                 ? std::max<int64_t>(1, fallbackDuration100ns)
                 : std::max<int64_t>(1, nativeTimestamp100ns - recordingLastTimestamp100ns_);
 
-            EncodedFrame frame = CreateEncodedFrameFromSample(
-                sourceSample,
-                nativeTimestamp100ns,
-                sampleDuration,
-                keyFrame);
+            if (recordingWriter_ == nullptr)
+            {
+                throw std::runtime_error("Recording writer is not available.");
+            }
 
-            recordingFrames_.push_back(std::move(frame));
+            const int64_t sampleTime100ns = std::max<int64_t>(0, nativeTimestamp100ns - recordingStart100ns_);
+            SetStreamingSampleTiming(sourceSample, sampleTime100ns, sampleDuration, keyFrame);
+            ThrowIfFailed(recordingWriter_->WriteSample(recordingStreamIndex_, sourceSample));
 
             recordingLastTimestamp100ns_ = nativeTimestamp100ns;
             recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
@@ -2306,13 +2321,13 @@ namespace EventCaptureNative
                 recordingFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond) == 0)
             {
                 std::wstringstream message;
-                message << L"Native state | Action=Recording buffered-sample"
+                message << L"Native state | Action=Recording streamed-sample"
                     << L" | Frames=" << recordingFrameCount_
                     << L" | NativeTimestamp=" << nativeTimestamp100ns
+                    << L" | SampleTime=" << sampleTime100ns
                     << L" | SampleDuration=" << sampleDuration
                     << L" | RecordingStart=" << recordingStart100ns_
                     << L" | RecordingEnd=" << recordingEnd100ns_
-                    << L" | BufferedFrames=" << recordingFrames_.size()
                     << L" | ReplayEnabled=" << ReplayEnabled();
 
                 LogNative(message.str());
