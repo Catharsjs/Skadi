@@ -1,4 +1,4 @@
-﻿using EventCapture.Core.Capture;
+using EventCapture.Core.Capture;
 using EventCapture.Core.Diagnostics;
 using System.IO;
 
@@ -16,6 +16,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private AppSettings? _settings;
     private CancellationTokenSource? _recordingDiskMonitorCts;
     private Task? _recordingDiskMonitorTask;
+    private bool _continuousNativeCombined;
 
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
@@ -129,12 +130,27 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
                 bool wantsAudio = _settings.CaptureMode != "Video" && (_settings.RecordSystemAudio || _settings.RecordMicrophone);
 
-                if (wantsAudio)
-                    (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
-                        .StartContinuousRecording();
-                if (wantsVideo)
-                    (_videoPipeline ?? throw new InvalidOperationException("Video pipeline is unavailable."))
-                        .StartContinuousRecording();
+                _continuousNativeCombined = false;
+                if (_settings.CaptureMode == "VideoAudio")
+                {
+                    if (!wantsVideo || !wantsAudio || _videoPipeline is not GpuCapturePipeline gpuPipeline || _audioRecorder is null)
+                        throw new InvalidOperationException("Native combined recording is unavailable.");
+
+                    gpuPipeline.StartContinuousRecording(
+                        _audioRecorder.SystemFormat,
+                        _audioRecorder.MicrophoneFormat);
+                    _audioRecorder.StartContinuousNativeStreaming(gpuPipeline);
+                    _continuousNativeCombined = true;
+                }
+                else
+                {
+                    if (wantsAudio)
+                        (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
+                            .StartContinuousRecording();
+                    if (wantsVideo)
+                        (_videoPipeline ?? throw new InvalidOperationException("Video pipeline is unavailable."))
+                            .StartContinuousRecording();
+                }
 
                 IsContinuousRecording = true;
                 StartRecordingDiskSpaceMonitor();
@@ -176,27 +192,23 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             ContinuousVideoResult? video = null;
             (string? AudioPath, long StartTimestamp, long EndTimestamp)? audio = null;
 
+            if (_settings.CaptureMode == "VideoAudio")
+            {
+                if (!_continuousNativeCombined || _audioRecorder is null)
+                    throw new InvalidOperationException("Native combined recording is not active.");
+
+                _audioRecorder.StopContinuousNativeStreaming();
+                audio = null;
+            }
+
             if (_settings.CaptureMode != "Audio" && _videoPipeline is not null)
                 video = await _videoPipeline.StopContinuousRecordingAsync(_settings.SaveFolder);
-            if (_settings.CaptureMode != "Video" && _audioRecorder is not null &&
+            if (_settings.CaptureMode != "VideoAudio" && _settings.CaptureMode != "Video" && _audioRecorder is not null &&
                 (_settings.RecordSystemAudio || _settings.RecordMicrophone))
                 audio = await _audioRecorder.StopContinuousRecordingAsync();
 
             string result;
-            if (video is not null && audio?.AudioPath is not null)
-            {
-                result = await AudioRecorder.MergeContinuousWithVideoAsync(
-                    video.VideoPath,
-                    audio.Value.AudioPath,
-                    _settings.SaveFolder,
-                    video.StartTimestamp,
-                    video.EndTimestamp,
-                    audio.Value.StartTimestamp);
-                if (!string.Equals(result, video.VideoPath, StringComparison.OrdinalIgnoreCase))
-                    TryDelete(video.VideoPath);
-                TryDelete(audio.Value.AudioPath);
-            }
-            else if (video is not null)
+            if (video is not null)
             {
                 result = video.VideoPath;
             }
@@ -213,6 +225,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             }
 
             IsContinuousRecording = false;
+            _continuousNativeCombined = false;
             AppLogger.Info($"Continuous recording saved | Path={result}");
             AppLogger.Info($"Coordinator state | Action=StopRecording media-saved | Result={Path.GetFileName(result)} | Current={DescribeState()}");
 
@@ -228,6 +241,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         catch
         {
             IsContinuousRecording = false;
+            _continuousNativeCombined = false;
 
             if (_settings is not null && !_settings.BufferEnabled)
             {
@@ -586,6 +600,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { _videoPipeline?.Dispose(); } catch { }
         StopRecordingDiskSpaceMonitor();
         IsContinuousRecording = false;
+        _continuousNativeCombined = false;
         _audioRecorder = null;
         _videoPipeline = null;
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore exit | Current={DescribeState()}");

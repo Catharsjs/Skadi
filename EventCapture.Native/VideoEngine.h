@@ -42,6 +42,8 @@ namespace EventCaptureNative
         EcResult Stop();
         EcResult SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result);
         EcResult StartRecording(const wchar_t* path);
+        EcResult StartRecordingWithAudio(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio);
+        EcResult WriteRecordingAudio(EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns);
         EcResult StopRecording(EcExportResult& result);
         EcResult GetStats(EcVideoStats& stats) const;
         std::wstring LastError() const;

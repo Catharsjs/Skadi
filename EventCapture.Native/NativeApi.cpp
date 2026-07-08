@@ -196,6 +196,33 @@ namespace
         }
     }
 
+
+    EcResult EcStartRecordingWithAudioCore(EcEngineHandle handle, const wchar_t* h264Path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio) noexcept
+    {
+        try
+        {
+            return ToEngine(handle)->StartRecordingWithAudio(h264Path, systemAudio, microphoneAudio);
+        }
+        catch (...)
+        {
+            AppendNativeApiLog(L"EcStartRecordingWithAudio caught C++ exception");
+            return EcResult::NativeFailure;
+        }
+    }
+
+    EcResult EcWriteRecordingAudioCore(EcEngineHandle handle, EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns) noexcept
+    {
+        try
+        {
+            return ToEngine(handle)->WriteRecordingAudio(streamKind, data, byteCount, timestamp100ns, duration100ns);
+        }
+        catch (...)
+        {
+            AppendNativeApiLog(L"EcWriteRecordingAudio caught C++ exception");
+            return EcResult::NativeFailure;
+        }
+    }
+
     EcResult EcStopRecordingCore(EcEngineHandle handle, EcExportResult* result) noexcept
     {
         try
@@ -288,6 +315,35 @@ EcResult __cdecl EcStartRecording(EcEngineHandle handle, const wchar_t* h264Path
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         return LogSehFailure(L"EcStartRecording", GetExceptionCode());
+    }
+}
+
+
+EcResult __cdecl EcStartRecordingWithAudio(EcEngineHandle handle, const wchar_t* h264Path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio)
+{
+    if (handle == nullptr || h264Path == nullptr) return EcResult::InvalidArgument;
+
+    __try
+    {
+        return EcStartRecordingWithAudioCore(handle, h264Path, systemAudio, microphoneAudio);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return LogSehFailure(L"EcStartRecordingWithAudio", GetExceptionCode());
+    }
+}
+
+EcResult __cdecl EcWriteRecordingAudio(EcEngineHandle handle, EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns)
+{
+    if (handle == nullptr || data == nullptr || byteCount == 0) return EcResult::InvalidArgument;
+
+    __try
+    {
+        return EcWriteRecordingAudioCore(handle, streamKind, data, byteCount, timestamp100ns, duration100ns);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return LogSehFailure(L"EcWriteRecordingAudio", GetExceptionCode());
     }
 }
 

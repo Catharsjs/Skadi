@@ -784,7 +784,7 @@ namespace EventCaptureNative
 
                 recordingPath_ = path;
                 recordingFrames_.clear();
-                CreateRecordingWriter(path);
+                CreateRecordingWriter(path, nullptr, nullptr);
 
                 recordingPending_ = true;
                 recording_ = false;
@@ -848,6 +848,138 @@ namespace EventCaptureNative
                 recordingPending_ = false;
                 recordingFrames_.clear();
 
+                return EcResult::NativeFailure;
+            }
+        }
+
+
+        EcResult StartRecordingWithAudio(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio)
+        {
+            if (path == nullptr || *path == L'\0') return EcResult::InvalidArgument;
+
+            try
+            {
+                std::scoped_lock lock(packetMutex_);
+
+                if (recording_ || recordingPending_) return EcResult::InvalidState;
+
+                ReleaseRecordingWriterNoThrow();
+
+                recordingPath_ = path;
+                recordingFrames_.clear();
+                CreateRecordingWriter(path, systemAudio, microphoneAudio);
+
+                recordingPending_ = true;
+                recording_ = false;
+
+                recordingStart100ns_ = -1;
+                recordingEnd100ns_ = 0;
+                recordingLastTimestamp100ns_ = -1;
+                recordingFrameCount_ = 0;
+                recordingAudioLastTimestamp100ns_[0] = -1;
+                recordingAudioLastTimestamp100ns_[1] = -1;
+
+                ForceKeyFrame();
+                LogNative(L"Native state | Action=StartRecordingWithAudio armed-streaming");
+                return EcResult::Ok;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"StartRecordingWithAudio failed with HRESULT 0x" << std::hex
+                    << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+                SetError(message.str());
+                LogNative(L"StartRecordingWithAudio failed | " + message.str());
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                recordingFrames_.clear();
+                return EcResult::NativeFailure;
+            }
+            catch (const std::exception& error)
+            {
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"StartRecordingWithAudio failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                recordingFrames_.clear();
+                return EcResult::NativeFailure;
+            }
+            catch (...)
+            {
+                SetError(L"Unknown StartRecordingWithAudio failure.");
+                LogNative(L"StartRecordingWithAudio failed | unknown exception");
+                ReleaseRecordingWriterNoThrow();
+                recording_ = false;
+                recordingPending_ = false;
+                recordingFrames_.clear();
+                return EcResult::NativeFailure;
+            }
+        }
+
+        EcResult WriteRecordingAudio(EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns)
+        {
+            if (data == nullptr || byteCount == 0 || duration100ns <= 0) return EcResult::InvalidArgument;
+            int index = streamKind == EcAudioStreamKind::Microphone ? 1 : 0;
+
+            try
+            {
+                std::scoped_lock lock(packetMutex_);
+                if ((!recording_ && !recordingPending_) || recordingWriter_ == nullptr) return EcResult::InvalidState;
+                if (!recordingAudioEnabled_[index] || recordingAudioStreamIndex_[index] == static_cast<DWORD>(-1)) return EcResult::InvalidState;
+                if (recordingStart100ns_ < 0) return EcResult::Ok;
+
+                int64_t sampleTime100ns = timestamp100ns - recordingStart100ns_;
+                if (sampleTime100ns < 0)
+                {
+                    duration100ns += sampleTime100ns;
+                    sampleTime100ns = 0;
+                }
+                if (duration100ns <= 0) return EcResult::Ok;
+
+                if (recordingAudioLastTimestamp100ns_[index] >= 0 && sampleTime100ns <= recordingAudioLastTimestamp100ns_[index])
+                    sampleTime100ns = recordingAudioLastTimestamp100ns_[index] + 1;
+
+                ComPtr<IMFMediaBuffer> buffer;
+                ThrowIfFailed(MFCreateMemoryBuffer(byteCount, &buffer));
+                BYTE* destination = nullptr;
+                DWORD maxLength = 0;
+                DWORD currentLength = 0;
+                ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
+                std::memcpy(destination, data, byteCount);
+                ThrowIfFailed(buffer->Unlock());
+                ThrowIfFailed(buffer->SetCurrentLength(byteCount));
+
+                ComPtr<IMFSample> sample;
+                ThrowIfFailed(MFCreateSample(&sample));
+                ThrowIfFailed(sample->AddBuffer(buffer.Get()));
+                ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
+                ThrowIfFailed(sample->SetSampleDuration(duration100ns));
+                ThrowIfFailed(recordingWriter_->WriteSample(recordingAudioStreamIndex_[index], sample.Get()));
+
+                recordingAudioLastTimestamp100ns_[index] = sampleTime100ns;
+                return EcResult::Ok;
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"WriteRecordingAudio failed with HRESULT 0x" << std::hex
+                    << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+                SetError(message.str());
+                LogNative(L"WriteRecordingAudio failed | " + message.str());
+                return EcResult::NativeFailure;
+            }
+            catch (const std::exception& error)
+            {
+                SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                LogNative(L"WriteRecordingAudio failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                return EcResult::NativeFailure;
+            }
+            catch (...)
+            {
+                SetError(L"Unknown WriteRecordingAudio failure.");
+                LogNative(L"WriteRecordingAudio failed | unknown exception");
                 return EcResult::NativeFailure;
             }
         }
@@ -2432,7 +2564,7 @@ namespace EventCaptureNative
             LogNative(L"ConfigureEncoderTransform stream messages completed");
         }
 
-        void CreateRecordingWriter(const wchar_t* path)
+        void CreateRecordingWriter(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio)
         {
             ComPtr<IMFAttributes> attributes;
             ThrowIfFailed(MFCreateAttributes(&attributes, 1));
@@ -2455,11 +2587,66 @@ namespace EventCaptureNative
             DWORD streamIndex = 0;
             ThrowIfFailed(writer->AddStream(outputType.Get(), &streamIndex));
             ThrowIfFailed(writer->SetInputMediaType(streamIndex, outputType.Get(), nullptr));
+
+            recordingAudioEnabled_[0] = false;
+            recordingAudioEnabled_[1] = false;
+            recordingAudioStreamIndex_[0] = static_cast<DWORD>(-1);
+            recordingAudioStreamIndex_[1] = static_cast<DWORD>(-1);
+            AddRecordingAudioStream(writer.Get(), systemAudio, 0);
+            AddRecordingAudioStream(writer.Get(), microphoneAudio, 1);
+
             ThrowIfFailed(writer->BeginWriting());
 
             recordingWriter_ = writer;
             recordingStreamIndex_ = streamIndex;
             LogNative(L"MP4 encoded sample writer started.");
+        }
+
+
+        void AddRecordingAudioStream(IMFSinkWriter* writer, const EcAudioStreamConfig* config, int index)
+        {
+            if (writer == nullptr || config == nullptr || config->enabled == 0) return;
+            if (config->sampleRate == 0 || config->channels == 0 || config->bitsPerSample == 0) return;
+
+            const UINT32 sampleRate = config->sampleRate;
+            const UINT32 channels = config->channels;
+            const UINT32 bitsPerSample = config->bitsPerSample;
+            const UINT32 blockAlign = channels * bitsPerSample / 8;
+            const UINT32 avgBytesPerSecond = sampleRate * blockAlign;
+
+            ComPtr<IMFMediaType> outputType;
+            ThrowIfFailed(MFCreateMediaType(&outputType));
+            ThrowIfFailed(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
+            ThrowIfFailed(outputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16));
+            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24'000));
+
+            DWORD streamIndex = 0;
+            ThrowIfFailed(writer->AddStream(outputType.Get(), &streamIndex));
+
+            ComPtr<IMFMediaType> inputType;
+            ThrowIfFailed(MFCreateMediaType(&inputType));
+            ThrowIfFailed(inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
+            ThrowIfFailed(inputType->SetGUID(MF_MT_SUBTYPE, bitsPerSample == 32 ? MFAudioFormat_Float : MFAudioFormat_PCM));
+            ThrowIfFailed(inputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels));
+            ThrowIfFailed(inputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate));
+            ThrowIfFailed(inputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bitsPerSample));
+            ThrowIfFailed(inputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign));
+            ThrowIfFailed(inputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, avgBytesPerSecond));
+
+            ThrowIfFailed(writer->SetInputMediaType(streamIndex, inputType.Get(), nullptr));
+            recordingAudioStreamIndex_[index] = streamIndex;
+            recordingAudioEnabled_[index] = true;
+
+            std::wstringstream message;
+            message << L"MP4 audio stream configured | Index=" << index
+                << L" | Stream=" << streamIndex
+                << L" | SampleRate=" << sampleRate
+                << L" | Channels=" << channels
+                << L" | Bits=" << bitsPerSample;
+            LogNative(message.str());
         }
 
         void ReleaseRecordingWriterNoThrow()
@@ -3485,6 +3672,9 @@ namespace EventCaptureNative
         std::ofstream recordingStream_;
         ComPtr<IMFSinkWriter> recordingWriter_;
         DWORD recordingStreamIndex_{};
+        DWORD recordingAudioStreamIndex_[2]{ static_cast<DWORD>(-1), static_cast<DWORD>(-1) };
+        bool recordingAudioEnabled_[2]{ false, false };
+        int64_t recordingAudioLastTimestamp100ns_[2]{ -1, -1 };
         std::filesystem::path spoolDirectory_;
         std::shared_ptr<EncodedStorageFile> activeSpool_;
         std::ofstream activeSpoolStream_;
@@ -3531,6 +3721,8 @@ namespace EventCaptureNative
     EcResult VideoEngine::Stop() { return implementation_->Stop(); }
     EcResult VideoEngine::SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result) { return implementation_->SaveReplay(path, seconds, result); }
     EcResult VideoEngine::StartRecording(const wchar_t* path) { return implementation_->StartRecording(path); }
+    EcResult VideoEngine::StartRecordingWithAudio(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio) { return implementation_->StartRecordingWithAudio(path, systemAudio, microphoneAudio); }
+    EcResult VideoEngine::WriteRecordingAudio(EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns) { return implementation_->WriteRecordingAudio(streamKind, data, byteCount, timestamp100ns, duration100ns); }
     EcResult VideoEngine::StopRecording(EcExportResult& result) { return implementation_->StopRecording(result); }
     EcResult VideoEngine::GetStats(EcVideoStats& stats) const { return implementation_->GetStats(stats); }
     std::wstring VideoEngine::LastError() const { return implementation_->LastError(); }

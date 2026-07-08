@@ -60,10 +60,26 @@ struct EcVideoStats
 
 using EcEngineHandle = void*;
 
+enum class EcAudioStreamKind : int32_t
+{
+    System = 0,
+    Microphone = 1
+};
+
+struct EcAudioStreamConfig
+{
+    uint32_t sampleRate;
+    uint32_t channels;
+    uint32_t bitsPerSample;
+    int32_t enabled;
+};
+
 EC_API EcResult __cdecl EcCreateVideoEngine(const EcVideoConfig* config, EcEngineHandle* handle);
 EC_API EcResult __cdecl EcStartVideoEngine(EcEngineHandle handle);
 EC_API EcResult __cdecl EcSaveReplay(EcEngineHandle handle, const wchar_t* h264Path, uint32_t seconds, EcExportResult* result);
 EC_API EcResult __cdecl EcStartRecording(EcEngineHandle handle, const wchar_t* h264Path);
+EC_API EcResult __cdecl EcStartRecordingWithAudio(EcEngineHandle handle, const wchar_t* h264Path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio);
+EC_API EcResult __cdecl EcWriteRecordingAudio(EcEngineHandle handle, EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns);
 EC_API EcResult __cdecl EcStopRecording(EcEngineHandle handle, EcExportResult* result);
 EC_API EcResult __cdecl EcGetVideoStats(EcEngineHandle handle, EcVideoStats* stats);
 EC_API EcResult __cdecl EcStopVideoEngine(EcEngineHandle handle);

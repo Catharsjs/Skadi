@@ -3,11 +3,12 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using EventCapture.Core.Diagnostics;
+using NAudio.Wave;
 using Microsoft.Win32.SafeHandles;
 
 namespace EventCapture.Core.Capture;
 
-public sealed class GpuCapturePipeline : IVideoCapturePipeline
+public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudioSink
 {
     private const int DwmwaExtendedFrameBounds = 9;
     private const int MonitorIntersectionTolerancePixels = 16;
@@ -90,6 +91,19 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline
         return (outputPath, elapsedMilliseconds, _startTimestamp + startMilliseconds);
     }
 
+    public void StartContinuousRecording(WaveFormat? systemAudioFormat, WaveFormat? microphoneAudioFormat)
+    {
+        ThrowIfDisposed();
+        if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
+        if (_continuousRawPath is not null)
+            throw new InvalidOperationException("Continuous video recording is already active.");
+        string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.mp4");
+        NativeAudioStreamConfig systemConfig = NativeAudioStreamConfig.From(systemAudioFormat);
+        NativeAudioStreamConfig microphoneConfig = NativeAudioStreamConfig.From(microphoneAudioFormat);
+        ThrowIfFailed(NativeMethods.StartRecordingWithAudio(_handle, path, ref systemConfig, ref microphoneConfig), _handle);
+        _continuousRawPath = path;
+    }
+
     public void StartContinuousRecording()
     {
         ThrowIfDisposed();
@@ -127,6 +141,19 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline
             export.FrameCount);
     }
 
+
+    public void WriteContinuousAudio(ContinuousAudioSource source, WaveFormat format, byte[] buffer, int count, long packetStartTimestamp, long packetDurationMilliseconds)
+    {
+        if (_continuousRawPath is null || count <= 0 || packetDurationMilliseconds <= 0) return;
+        long timestamp100ns = Math.Max(0, packetStartTimestamp - _startTimestamp) * 10_000L;
+        long duration100ns = Math.Max(1, packetDurationMilliseconds) * 10_000L;
+        NativeAudioStreamKind kind = source == ContinuousAudioSource.Microphone
+            ? NativeAudioStreamKind.Microphone
+            : NativeAudioStreamKind.System;
+        NativeResult result = NativeMethods.WriteRecordingAudio(_handle, kind, buffer, (uint)count, timestamp100ns, duration100ns);
+        if (result != NativeResult.Ok && result != NativeResult.InvalidState)
+            ThrowIfFailed(result, _handle);
+    }
     public GpuCaptureStats GetStats()
     {
         if (_handle.IsInvalid || _handle.IsClosed) return default;
@@ -386,6 +413,31 @@ public readonly record struct GpuCaptureStats(
     bool IsRunning,
     bool IsRecording);
 
+
+internal enum NativeAudioStreamKind { System = 0, Microphone = 1 }
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeAudioStreamConfig
+{
+    public uint SampleRate;
+    public uint Channels;
+    public uint BitsPerSample;
+    public int Enabled;
+
+    public static NativeAudioStreamConfig From(WaveFormat? format)
+    {
+        if (format is null) return default;
+        int bits = format.Encoding == WaveFormatEncoding.IeeeFloat ? 16 : format.BitsPerSample;
+        if (format.SampleRate <= 0 || format.Channels <= 0 || bits <= 0) return default;
+        return new NativeAudioStreamConfig
+        {
+            SampleRate = (uint)format.SampleRate,
+            Channels = (uint)format.Channels,
+            BitsPerSample = (uint)bits,
+            Enabled = 1
+        };
+    }
+}
 internal enum NativeResult { Ok, InvalidArgument, InvalidState, NotSupported, Timeout, NativeFailure }
 internal enum NativeTargetKind { Monitor, Window }
 
@@ -464,6 +516,10 @@ internal static class NativeMethods
     internal static extern NativeResult SaveReplay(SafeVideoEngineHandle handle, string path, uint seconds, ref NativeExportResult result);
     [DllImport(Library, EntryPoint = "EcStartRecording", CharSet = CharSet.Unicode)]
     internal static extern NativeResult StartRecording(SafeVideoEngineHandle handle, string path);
+    [DllImport(Library, EntryPoint = "EcStartRecordingWithAudio", CharSet = CharSet.Unicode)]
+    internal static extern NativeResult StartRecordingWithAudio(SafeVideoEngineHandle handle, string path, ref NativeAudioStreamConfig systemAudio, ref NativeAudioStreamConfig microphoneAudio);
+    [DllImport(Library, EntryPoint = "EcWriteRecordingAudio")]
+    internal static extern NativeResult WriteRecordingAudio(SafeVideoEngineHandle handle, NativeAudioStreamKind streamKind, byte[] data, uint byteCount, long timestamp100ns, long duration100ns);
     [DllImport(Library, EntryPoint = "EcStopRecording")]
     internal static extern NativeResult StopRecording(SafeVideoEngineHandle handle, ref NativeExportResult result);
     [DllImport(Library, EntryPoint = "EcGetVideoStats")]

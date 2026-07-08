@@ -41,6 +41,7 @@ public sealed class AudioRecorder : IDisposable
     private long _continuousStartTimestamp;
     private long _continuousSystemWrittenBytes;
     private long _continuousMicrophoneWrittenBytes;
+    private IContinuousAudioSink? _continuousAudioSink;
     private bool _continuousRecording;
     private bool _disposed;
 
@@ -56,6 +57,8 @@ public sealed class AudioRecorder : IDisposable
     public bool IsRecordingMic { get; private set; }
     public bool UseDefaultSystemDevice { get; private set; } = true;
     public bool UseDefaultMicDevice { get; private set; } = true;
+    public WaveFormat? SystemFormat => _systemFormat;
+    public WaveFormat? MicrophoneFormat => _microphoneFormat;
 
     public void SetSystemVolume(double percent) =>
         Volatile.Write(ref _systemGain, Math.Clamp(percent, 0, 100) / 100.0);
@@ -213,6 +216,7 @@ public sealed class AudioRecorder : IDisposable
                 _continuousSystemWriter.Write(buffer, 0, count);
                 _continuousSystemWrittenBytes += count;
             }
+            TryWriteContinuousAudio(_continuousAudioSink, ContinuousAudioSource.System, format, buffer, count, packetStart, packetDuration);
             _systemWrittenBytes += count;
             _systemLastPacketEnd = packetEnd;
         }
@@ -253,6 +257,7 @@ public sealed class AudioRecorder : IDisposable
                 _continuousMicrophoneWriter.Write(buffer, 0, count);
                 _continuousMicrophoneWrittenBytes += count;
             }
+            TryWriteContinuousAudio(_continuousAudioSink, ContinuousAudioSource.Microphone, format, buffer, count, packetStart, packetDuration);
             _microphoneWrittenBytes += count;
             _microphoneLastPacketEnd = packetEnd;
         }
@@ -315,6 +320,31 @@ public sealed class AudioRecorder : IDisposable
         }
     }
 
+
+    public void StartContinuousNativeStreaming(IContinuousAudioSink sink)
+    {
+        ThrowIfDisposed();
+        if (_continuousRecording)
+            throw new InvalidOperationException("Continuous audio recording is already active.");
+
+        _continuousStartTimestamp = Environment.TickCount64;
+        _continuousSystemWrittenBytes = 0;
+        _continuousMicrophoneWrittenBytes = 0;
+        _continuousSystemPath = null;
+        _continuousMicrophonePath = null;
+        _continuousAudioSink = sink;
+        _continuousRecording = true;
+    }
+
+    public (long StartTimestamp, long EndTimestamp) StopContinuousNativeStreaming()
+    {
+        if (!_continuousRecording)
+            throw new InvalidOperationException("Continuous audio recording is not active.");
+
+        _continuousRecording = false;
+        _continuousAudioSink = null;
+        return (_continuousStartTimestamp, Environment.TickCount64);
+    }
     public void StartContinuousRecording()
     {
         ThrowIfDisposed();
@@ -432,54 +462,6 @@ public sealed class AudioRecorder : IDisposable
         {
             foreach (string source in sources) TryDelete(source);
         }
-    }
-
-    public static async Task<string> MergeContinuousWithVideoAsync(
-        string videoPath,
-        string audioPath,
-        string outputFolder,
-        long videoStartTimestamp,
-        long videoEndTimestamp,
-        long audioStartTimestamp)
-    {
-        Directory.CreateDirectory(outputFolder);
-        string outputPath = IsInsideFolder(videoPath, outputFolder)
-            ? videoPath
-            : OutputFileName.Create(outputFolder, "Record", ".mp4");
-        string mergeOutputPath = Path.Combine(
-            outputFolder,
-            $".record-merge-{Guid.NewGuid():N}.tmp.mp4");
-        long offsetMilliseconds = audioStartTimestamp - videoStartTimestamp;
-        double duration = Math.Max(0.001, (videoEndTimestamp - videoStartTimestamp) / 1000.0);
-        string audioFilter = offsetMilliseconds >= 0
-            ? $"[1:a]adelay={offsetMilliseconds}:all=1,apad[a]"
-            : $"[1:a]atrim=start={FormatSeconds(-offsetMilliseconds / 1000.0)},asetpts=PTS-STARTPTS,apad[a]";
-        string arguments =
-            $"-y -i \"{videoPath}\" -i \"{audioPath}\" " +
-            $"-filter_complex \"{audioFilter}\" " +
-            "-map 0:v:0 -map \"[a]\" -c:v copy -c:a aac -b:a 192k " +
-            $"-t {FormatSeconds(duration)} -movflags +faststart \"{mergeOutputPath}\"";
-
-        AppLogger.Info(
-            $"Continuous merge diagnostics | VideoStart={videoStartTimestamp} | " +
-            $"VideoEnd={videoEndTimestamp} | AudioStart={audioStartTimestamp} | " +
-            $"OffsetMs={offsetMilliseconds} | DurationSec={FormatSeconds(duration)}");
-
-        try
-        {
-            await RunFfmpegAsync(arguments, "Continuous audio/video merge");
-
-            if (File.Exists(outputPath))
-                File.Delete(outputPath);
-
-            File.Move(mergeOutputPath, outputPath, overwrite: true);
-        }
-        finally
-        {
-            TryDelete(mergeOutputPath);
-        }
-
-        return outputPath;
     }
 
     public static async Task<string> EncodeContinuousAudioAsMp3Async(
@@ -728,7 +710,52 @@ public sealed class AudioRecorder : IDisposable
         await FfmpegLocator.RunAsync(arguments, operation);
     }
 
-    private static long CalculateBufferDurationMs(WaveFormat format, int bytesRecorded)
+
+    private static void TryWriteContinuousAudio(
+        IContinuousAudioSink? sink,
+        ContinuousAudioSource source,
+        WaveFormat format,
+        byte[] buffer,
+        int count,
+        long packetStartTimestamp,
+        long packetDurationMilliseconds)
+    {
+        if (sink is null) return;
+        try
+        {
+            if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+            {
+                byte[] pcm16 = ConvertFloat32ToPcm16(buffer, count);
+                var pcmFormat = new WaveFormat(format.SampleRate, 16, format.Channels);
+                sink.WriteContinuousAudio(source, pcmFormat, pcm16, pcm16.Length, packetStartTimestamp, packetDurationMilliseconds);
+            }
+            else
+            {
+                sink.WriteContinuousAudio(source, format, buffer, count, packetStartTimestamp, packetDurationMilliseconds);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(AudioRecorder), $"Continuous native audio write failed: {ex}");
+        }
+    }
+private static byte[] ConvertFloat32ToPcm16(byte[] buffer, int count)
+    {
+        int samples = count / 4;
+        byte[] output = new byte[samples * 2];
+        for (int i = 0; i < samples; i++)
+        {
+            float sample = BitConverter.ToSingle(buffer, i * 4);
+            short pcm = (short)Math.Clamp(
+                (int)Math.Round(sample * short.MaxValue),
+                short.MinValue,
+                short.MaxValue);
+            BitConverter.TryWriteBytes(output.AsSpan(i * 2, 2), pcm);
+        }
+        return output;
+    }
+
+private static long CalculateBufferDurationMs(WaveFormat format, int bytesRecorded)
     {
         return format.AverageBytesPerSecond <= 0
             ? 0
