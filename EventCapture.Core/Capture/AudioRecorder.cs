@@ -51,6 +51,13 @@ public sealed class AudioRecorder : IDisposable
     private bool _nativeMixSystemEnabled;
     private bool _nativeMixMicrophoneEnabled;
     private long _nativeMixNextTimestamp;
+    private long _nativeMixSystemPackets;
+    private long _nativeMixMicrophonePackets;
+    private long _nativeMixSystemFrames;
+    private long _nativeMixMicrophoneFrames;
+    private long _nativeMixChunks;
+    private long _nativeMixWrittenFrames;
+    private long _nativeMixLastLogTimestamp;
     private bool _continuousRecording;
     private bool _disposed;
 
@@ -350,7 +357,15 @@ public sealed class AudioRecorder : IDisposable
             _nativeMixSystemEnabled = IsRecordingSystem;
             _nativeMixMicrophoneEnabled = IsRecordingMic;
             _nativeMixNextTimestamp = _continuousStartTimestamp;
+            _nativeMixSystemPackets = 0;
+            _nativeMixMicrophonePackets = 0;
+            _nativeMixSystemFrames = 0;
+            _nativeMixMicrophoneFrames = 0;
+            _nativeMixChunks = 0;
+            _nativeMixWrittenFrames = 0;
+            _nativeMixLastLogTimestamp = 0;
         }
+        AppLogger.Info($"Continuous native audio mix started | SystemEnabled={IsRecordingSystem} | MicrophoneEnabled={IsRecordingMic} | SystemFormat={_systemFormat} | MicrophoneFormat={_microphoneFormat} | MixFormat={NativeContinuousMixFormat}");
         _continuousRecording = true;
     }
 
@@ -362,6 +377,7 @@ public sealed class AudioRecorder : IDisposable
         lock (_nativeMixLock)
         {
             FlushNativeMixedAudioLocked(force: true);
+            AppLogger.Info($"Continuous native audio mix stopped | SystemPackets={_nativeMixSystemPackets} | MicrophonePackets={_nativeMixMicrophonePackets} | SystemFrames={_nativeMixSystemFrames} | MicrophoneFrames={_nativeMixMicrophoneFrames} | MixedChunks={_nativeMixChunks} | MixedFrames={_nativeMixWrittenFrames} | RemainingSystemSamples={_nativeSystemMix?.Count ?? 0} | RemainingMicrophoneSamples={_nativeMicrophoneMix?.Count ?? 0} | NextTimestamp={_nativeMixNextTimestamp}");
             _continuousAudioSink = null;
             _nativeSystemMix = null;
             _nativeMicrophoneMix = null;
@@ -736,6 +752,7 @@ public sealed class AudioRecorder : IDisposable
     {
         await FfmpegLocator.RunAsync(arguments, operation);
     }
+
     private void QueueNativeContinuousAudio(
         ContinuousAudioSource source,
         WaveFormat format,
@@ -747,7 +764,11 @@ public sealed class AudioRecorder : IDisposable
         try
         {
             float[] stereoSamples = ConvertToNativeMixSamples(format, buffer, count);
-            if (stereoSamples.Length == 0) return;
+            if (stereoSamples.Length == 0)
+            {
+                AppLogger.Info($"Continuous native audio packet skipped | Source={source} | Format={format} | Bytes={count}");
+                return;
+            }
 
             lock (_nativeMixLock)
             {
@@ -759,6 +780,19 @@ public sealed class AudioRecorder : IDisposable
                 foreach (float sample in stereoSamples)
                     queue.Enqueue(sample);
 
+                int frames = stereoSamples.Length / NativeMixChannels;
+                if (source == ContinuousAudioSource.Microphone)
+                {
+                    _nativeMixMicrophonePackets++;
+                    _nativeMixMicrophoneFrames += frames;
+                }
+                else
+                {
+                    _nativeMixSystemPackets++;
+                    _nativeMixSystemFrames += frames;
+                }
+
+                LogNativeMixStatusLocked($"packet-{source}", force: false);
                 FlushNativeMixedAudioLocked(force: false);
             }
         }
@@ -811,7 +845,22 @@ public sealed class AudioRecorder : IDisposable
                 _nativeMixNextTimestamp,
                 durationMs);
             _nativeMixNextTimestamp += durationMs;
+            _nativeMixChunks++;
+            _nativeMixWrittenFrames += frames;
+            LogNativeMixStatusLocked(force ? "flush-force" : "flush", force);
         }
+    }
+
+    private void LogNativeMixStatusLocked(string reason, bool force)
+    {
+        long now = Environment.TickCount64;
+        if (!force && _nativeMixChunks > 1 && now - _nativeMixLastLogTimestamp < 2_000) return;
+        _nativeMixLastLogTimestamp = now;
+        int systemSamples = _nativeSystemMix?.Count ?? 0;
+        int microphoneSamples = _nativeMicrophoneMix?.Count ?? 0;
+        long systemQueueMs = systemSamples / NativeMixChannels * 1000L / NativeMixSampleRate;
+        long microphoneQueueMs = microphoneSamples / NativeMixChannels * 1000L / NativeMixSampleRate;
+        AppLogger.Info($"Continuous native audio mix status | Reason={reason} | Force={force} | SystemEnabled={_nativeMixSystemEnabled} | MicrophoneEnabled={_nativeMixMicrophoneEnabled} | SystemPackets={_nativeMixSystemPackets} | MicrophonePackets={_nativeMixMicrophonePackets} | SystemQueueSamples={systemSamples} | MicrophoneQueueSamples={microphoneSamples} | SystemQueueMs={systemQueueMs} | MicrophoneQueueMs={microphoneQueueMs} | MixedChunks={_nativeMixChunks} | MixedFrames={_nativeMixWrittenFrames} | NextTimestamp={_nativeMixNextTimestamp}");
     }
 
     private static float[] ConvertToNativeMixSamples(WaveFormat format, byte[] buffer, int count)

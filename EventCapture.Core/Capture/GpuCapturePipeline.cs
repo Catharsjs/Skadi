@@ -19,6 +19,10 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
     private readonly string _sessionDirectory;
     private long _startTimestamp;
     private string? _continuousRawPath;
+    private long _continuousAudioWriteCount;
+    private long _continuousAudioWriteBytes;
+    private long _continuousAudioLastTimestamp100ns = -1;
+    private long _continuousAudioLastLogTimestamp;
     private bool _disposed;
 
     public GpuCapturePipeline(
@@ -101,6 +105,11 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         NativeAudioStreamConfig audioConfig = NativeAudioStreamConfig.From(audioFormat);
         NativeAudioStreamConfig disabledConfig = default;
         ThrowIfFailed(NativeMethods.StartRecordingWithAudio(_handle, path, ref audioConfig, ref disabledConfig), _handle);
+        _continuousAudioWriteCount = 0;
+        _continuousAudioWriteBytes = 0;
+        _continuousAudioLastTimestamp100ns = -1;
+        _continuousAudioLastLogTimestamp = 0;
+        AppLogger.Info($"Native combined recording audio stream started | Path={path} | AudioFormat={audioFormat}");
         _continuousRawPath = path;
     }
 
@@ -123,6 +132,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             ?? throw new InvalidOperationException("Continuous video recording is not active.");
         var export = NativeExportResult.Create();
         ThrowIfFailed(NativeMethods.StopRecording(_handle, ref export), _handle);
+        AppLogger.Info($"Native combined recording audio stream stopped | Writes={_continuousAudioWriteCount} | Bytes={_continuousAudioWriteBytes} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns}");
         _continuousRawPath = null;
         string outputPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
         double exportFps = CalculateExportFps(export);
@@ -147,8 +157,28 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         if (_continuousRawPath is null || count <= 0 || packetDurationMilliseconds <= 0) return;
         long timestamp100ns = Math.Max(0, packetStartTimestamp - _startTimestamp) * 10_000L;
         long duration100ns = Math.Max(1, packetDurationMilliseconds) * 10_000L;
+        if (_continuousAudioLastTimestamp100ns >= 0 && timestamp100ns <= _continuousAudioLastTimestamp100ns)
+        {
+            AppLogger.Info($"Native combined audio timestamp adjusted by native writer | Source={source} | Timestamp100ns={timestamp100ns} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns} | Duration100ns={duration100ns} | Bytes={count}");
+        }
+
         NativeResult result = NativeMethods.WriteRecordingAudio(_handle, NativeAudioStreamKind.System, buffer, (uint)count, timestamp100ns, duration100ns);
-        if (result != NativeResult.Ok && result != NativeResult.InvalidState)
+        if (result == NativeResult.Ok)
+        {
+            _continuousAudioWriteCount++;
+            _continuousAudioWriteBytes += count;
+            _continuousAudioLastTimestamp100ns = timestamp100ns;
+            long now = Environment.TickCount64;
+            if (_continuousAudioWriteCount <= 3 || now - _continuousAudioLastLogTimestamp >= 2_000)
+            {
+                _continuousAudioLastLogTimestamp = now;
+                AppLogger.Info($"Native combined audio write | Source={source} | Count={_continuousAudioWriteCount} | Bytes={count} | TotalBytes={_continuousAudioWriteBytes} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format}");
+            }
+            return;
+        }
+
+        AppLogger.Info($"Native combined audio write skipped | Source={source} | Result={result} | Bytes={count} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format} | Path={_continuousRawPath}");
+        if (result != NativeResult.InvalidState)
             ThrowIfFailed(result, _handle);
     }
     public GpuCaptureStats GetStats()
