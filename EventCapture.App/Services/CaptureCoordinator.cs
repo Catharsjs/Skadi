@@ -1,5 +1,7 @@
 using EventCapture.Core.Capture;
 using EventCapture.Core.Diagnostics;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 
 namespace EventCapture.App.Services;
@@ -16,6 +18,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private AppSettings? _settings;
     private CancellationTokenSource? _recordingDiskMonitorCts;
     private Task? _recordingDiskMonitorTask;
+    private CancellationTokenSource? _recordingPerformanceCts;
+    private Task? _recordingPerformanceTask;
     private bool _continuousNativeCombined;
 
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
@@ -152,6 +156,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
                 IsContinuousRecording = true;
                 StartRecordingDiskSpaceMonitor();
+                StartRecordingPerformanceMonitor();
                 AppLogger.Info($"Continuous recording started | Mode={_settings.CaptureMode}");
                 AppLogger.Info($"Coordinator state | Action=StartRecording exit | Current={DescribeState()}");
             }
@@ -254,6 +259,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         {
             if (stopDiskMonitor)
                 StopRecordingDiskSpaceMonitor();
+            StopRecordingPerformanceMonitor();
             _continuousLock.Release();
         }
     }
@@ -415,6 +421,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                             Path: path,
                             Error: failure));
                     StopRecordingDiskSpaceMonitor();
+                    StopRecordingPerformanceMonitor();
                 }
 
                 break;
@@ -590,6 +597,119 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         return (int)Math.Round(bitrate30 + ((bitrate60 - bitrate30) * fpsScale));
     }
 
+
+    private void StartRecordingPerformanceMonitor()
+    {
+        StopRecordingPerformanceMonitor();
+        _recordingPerformanceCts = new CancellationTokenSource();
+        CancellationToken token = _recordingPerformanceCts.Token;
+        _recordingPerformanceTask = Task.Run(() => MonitorRecordingPerformanceAsync(token), token);
+    }
+
+    private void StopRecordingPerformanceMonitor()
+    {
+        try { _recordingPerformanceCts?.Cancel(); } catch { }
+        _recordingPerformanceCts?.Dispose();
+        _recordingPerformanceCts = null;
+        _recordingPerformanceTask = null;
+    }
+
+    private async Task MonitorRecordingPerformanceAsync(CancellationToken token)
+    {
+        ulong lastCaptured = 0;
+        ulong lastEncoded = 0;
+        ulong lastDropped = 0;
+        long lastTicks = Stopwatch.GetTimestamp();
+        Process process = Process.GetCurrentProcess();
+        TimeSpan lastCpu = process.TotalProcessorTime;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), token);
+                if (token.IsCancellationRequested || !IsContinuousRecording)
+                    continue;
+
+                long nowTicks = Stopwatch.GetTimestamp();
+                double elapsedSeconds = Math.Max(0.001, (nowTicks - lastTicks) / (double)Stopwatch.Frequency);
+                lastTicks = nowTicks;
+
+                process.Refresh();
+                TimeSpan cpu = process.TotalProcessorTime;
+                double cpuPercent = Math.Max(0, (cpu - lastCpu).TotalMilliseconds / (elapsedSeconds * Environment.ProcessorCount * 1000.0) * 100.0);
+                lastCpu = cpu;
+
+                string videoDetail;
+                if (_videoPipeline is GpuCapturePipeline gpu)
+                {
+                    GpuCaptureStats stats = gpu.GetStats();
+                    ulong capturedDelta = stats.CapturedFrames >= lastCaptured ? stats.CapturedFrames - lastCaptured : 0;
+                    ulong encodedDelta = stats.EncodedFrames >= lastEncoded ? stats.EncodedFrames - lastEncoded : 0;
+                    ulong droppedDelta = stats.DroppedFrames >= lastDropped ? stats.DroppedFrames - lastDropped : 0;
+                    double capturedFps = capturedDelta / elapsedSeconds;
+                    double encodedFps = encodedDelta / elapsedSeconds;
+                    lastCaptured = stats.CapturedFrames;
+                    lastEncoded = stats.EncodedFrames;
+                    lastDropped = stats.DroppedFrames;
+
+                    videoDetail =
+                        $"VideoType=Gpu | Running={stats.IsRunning} | Recording={stats.IsRecording} | " +
+                        $"Captured={stats.CapturedFrames} | Encoded={stats.EncodedFrames} | Dropped={stats.DroppedFrames} | " +
+                        $"CapturedDelta={capturedDelta} | EncodedDelta={encodedDelta} | DroppedDelta={droppedDelta} | " +
+                        $"CapturedFps={capturedFps.ToString("0.##", CultureInfo.InvariantCulture)} | " +
+                        $"EncodedFps={encodedFps.ToString("0.##", CultureInfo.InvariantCulture)} | " +
+                        $"BufferedFrames={stats.BufferedFrames} | BufferedBytes={stats.BufferedBytes}";
+                }
+                else if (_videoPipeline is not null)
+                {
+                    long frames = _videoPipeline.FramesCaptured;
+                    videoDetail = $"VideoType={_videoPipeline.GetType().Name} | Frames={frames} | Running={_videoPipeline.IsRunning} | Recording={_videoPipeline.IsContinuousRecording}";
+                }
+                else
+                {
+                    videoDetail = "Video=null";
+                }
+
+                long managedBytes = GC.GetTotalMemory(forceFullCollection: false);
+                long workingSet = Environment.WorkingSet;
+                long privateBytes = process.PrivateMemorySize64;
+                int threadCount = process.Threads.Count;
+                ThreadPool.GetAvailableThreads(out int workerAvailable, out int completionAvailable);
+                ThreadPool.GetMaxThreads(out int workerMax, out int completionMax);
+                long diskFreeBytes = GetCurrentRecordingFreeDiskBytes();
+
+                AppLogger.Info(
+                    $"Recording performance | IntervalSec={elapsedSeconds.ToString("0.###", CultureInfo.InvariantCulture)} | " +
+                    $"CpuPercent={cpuPercent.ToString("0.##", CultureInfo.InvariantCulture)} | Threads={threadCount} | " +
+                    $"WorkerThreads={workerMax - workerAvailable}/{workerMax} | IoThreads={completionMax - completionAvailable}/{completionMax} | " +
+                    $"WorkingSetBytes={workingSet} | PrivateBytes={privateBytes} | ManagedBytes={managedBytes} | DiskFreeBytes={diskFreeBytes} | " +
+                    videoDetail);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(CaptureCoordinator), $"Recording performance monitor failed: {ex}");
+        }
+    }
+
+    private long GetCurrentRecordingFreeDiskBytes()
+    {
+        if (_settings is null) return -1;
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(_settings.SaveFolder));
+            if (string.IsNullOrWhiteSpace(root)) return -1;
+            return new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
     private void StopPipelineCore()
     {
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore enter | Current={DescribeState()}");
@@ -597,6 +717,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { _videoPipeline?.Stop(); } catch { }
         try { _videoPipeline?.Dispose(); } catch { }
         StopRecordingDiskSpaceMonitor();
+        StopRecordingPerformanceMonitor();
         IsContinuousRecording = false;
         _continuousNativeCombined = false;
         _audioRecorder = null;
@@ -640,6 +761,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     {
         await StopAllAsync();
         StopRecordingDiskSpaceMonitor();
+        StopRecordingPerformanceMonitor();
         _pipelineLock.Dispose();
         _saveLock.Dispose();
         _continuousLock.Dispose();

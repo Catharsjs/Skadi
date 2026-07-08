@@ -38,6 +38,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private AudioDeviceNotificationClient? _audioDeviceNotificationClient;
     private DispatcherTimer? _audioLevelTimer;
     private DispatcherTimer? _recordingTimer;
+    private readonly Stopwatch _recordingStopwatch = new();
+    private long _recordingTimerLastTickTimestamp;
+    private long _recordingTimerLastLogTimestamp;
+    private long _recordingTimerTickCount;
     private MMDevice? _systemAudioMeterDevice;
     private MMDevice? _microphoneMeterDevice;
     private bool _restartPending;
@@ -813,6 +817,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private void StartRecordingTimer()
     {
         _recordingStartedAt = DateTimeOffset.Now;
+        _recordingStopwatch.Restart();
+        _recordingTimerLastTickTimestamp = Stopwatch.GetTimestamp();
+        _recordingTimerLastLogTimestamp = 0;
+        _recordingTimerTickCount = 0;
         _recordingElapsed = TimeSpan.Zero;
 
         _recordingTimer ??= new DispatcherTimer
@@ -832,14 +840,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (_recordingTimer is not null)
             _recordingTimer.Stop();
 
+        _recordingStopwatch.Reset();
         _recordingElapsed = TimeSpan.Zero;
         OnPropertyChanged(nameof(StartStopRecordText));
     }
 
     private void OnRecordingTimerTick(object? sender, EventArgs e)
     {
-        _recordingElapsed = DateTimeOffset.Now - _recordingStartedAt;
+        long nowTicks = Stopwatch.GetTimestamp();
+        double tickGapMs = _recordingTimerLastTickTimestamp == 0
+            ? 0
+            : (nowTicks - _recordingTimerLastTickTimestamp) * 1000.0 / Stopwatch.Frequency;
+        _recordingTimerLastTickTimestamp = nowTicks;
+        _recordingTimerTickCount++;
+
+        TimeSpan stopwatchElapsed = _recordingStopwatch.Elapsed;
+        TimeSpan wallElapsed = DateTimeOffset.Now - _recordingStartedAt;
+        double driftMs = wallElapsed.TotalMilliseconds - stopwatchElapsed.TotalMilliseconds;
+        _recordingElapsed = stopwatchElapsed;
         OnPropertyChanged(nameof(StartStopRecordText));
+
+        bool shouldLog = tickGapMs > 750 || Math.Abs(driftMs) > 750 || nowTicks - _recordingTimerLastLogTimestamp > Stopwatch.Frequency * 5;
+        if (shouldLog)
+        {
+            _recordingTimerLastLogTimestamp = nowTicks;
+            AppLogger.Info($"UI recording timer diagnostics | Tick={_recordingTimerTickCount} | TickGapMs={tickGapMs:0.##} | StopwatchElapsedMs={stopwatchElapsed.TotalMilliseconds:0.##} | WallElapsedMs={wallElapsed.TotalMilliseconds:0.##} | DriftMs={driftMs:0.##} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
+        }
     }
 
     private void StartAudioDeviceMonitoring()
