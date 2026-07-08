@@ -12,7 +12,7 @@ public sealed class AudioRecorder : IDisposable
     private const int GapThresholdMilliseconds = 100;
     private const int NativeMixSampleRate = 48_000;
     private const int NativeMixChannels = 2;
-    private const int NativeMixChunkMilliseconds = 10;
+    private const int NativeMixChunkMilliseconds = 50;
 
     private readonly object _systemLock = new();
     private readonly object _microphoneLock = new();
