@@ -5,7 +5,8 @@ namespace EventCapture.Core.Capture;
 public enum ContinuousAudioSource
 {
     System,
-    Microphone
+    Microphone,
+    Mixed
 }
 
 public interface IContinuousAudioSink

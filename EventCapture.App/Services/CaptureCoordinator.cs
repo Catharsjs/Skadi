@@ -136,9 +136,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                     if (!wantsVideo || !wantsAudio || _videoPipeline is not GpuCapturePipeline gpuPipeline || _audioRecorder is null)
                         throw new InvalidOperationException("Native combined recording is unavailable.");
 
-                    gpuPipeline.StartContinuousRecording(
-                        _audioRecorder.SystemFormat,
-                        _audioRecorder.MicrophoneFormat);
+                    gpuPipeline.StartContinuousRecording(AudioRecorder.NativeContinuousMixFormat);
                     _audioRecorder.StartContinuousNativeStreaming(gpuPipeline);
                     _continuousNativeCombined = true;
                 }

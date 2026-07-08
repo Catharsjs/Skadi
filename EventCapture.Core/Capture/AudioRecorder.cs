@@ -10,6 +10,9 @@ public sealed class AudioRecorder : IDisposable
 {
     private const int SegmentMilliseconds = 2_000;
     private const int GapThresholdMilliseconds = 100;
+    private const int NativeMixSampleRate = 48_000;
+    private const int NativeMixChannels = 2;
+    private const int NativeMixChunkMilliseconds = 10;
 
     private readonly object _systemLock = new();
     private readonly object _microphoneLock = new();
@@ -42,6 +45,12 @@ public sealed class AudioRecorder : IDisposable
     private long _continuousSystemWrittenBytes;
     private long _continuousMicrophoneWrittenBytes;
     private IContinuousAudioSink? _continuousAudioSink;
+    private readonly object _nativeMixLock = new();
+    private Queue<float>? _nativeSystemMix;
+    private Queue<float>? _nativeMicrophoneMix;
+    private bool _nativeMixSystemEnabled;
+    private bool _nativeMixMicrophoneEnabled;
+    private long _nativeMixNextTimestamp;
     private bool _continuousRecording;
     private bool _disposed;
 
@@ -59,6 +68,7 @@ public sealed class AudioRecorder : IDisposable
     public bool UseDefaultMicDevice { get; private set; } = true;
     public WaveFormat? SystemFormat => _systemFormat;
     public WaveFormat? MicrophoneFormat => _microphoneFormat;
+    public static WaveFormat NativeContinuousMixFormat { get; } = new(NativeMixSampleRate, 16, NativeMixChannels);
 
     public void SetSystemVolume(double percent) =>
         Volatile.Write(ref _systemGain, Math.Clamp(percent, 0, 100) / 100.0);
@@ -216,7 +226,7 @@ public sealed class AudioRecorder : IDisposable
                 _continuousSystemWriter.Write(buffer, 0, count);
                 _continuousSystemWrittenBytes += count;
             }
-            TryWriteContinuousAudio(_continuousAudioSink, ContinuousAudioSource.System, format, buffer, count, packetStart, packetDuration);
+            QueueNativeContinuousAudio(ContinuousAudioSource.System, format, buffer, count);
             _systemWrittenBytes += count;
             _systemLastPacketEnd = packetEnd;
         }
@@ -257,7 +267,7 @@ public sealed class AudioRecorder : IDisposable
                 _continuousMicrophoneWriter.Write(buffer, 0, count);
                 _continuousMicrophoneWrittenBytes += count;
             }
-            TryWriteContinuousAudio(_continuousAudioSink, ContinuousAudioSource.Microphone, format, buffer, count, packetStart, packetDuration);
+            QueueNativeContinuousAudio(ContinuousAudioSource.Microphone, format, buffer, count);
             _microphoneWrittenBytes += count;
             _microphoneLastPacketEnd = packetEnd;
         }
@@ -332,7 +342,15 @@ public sealed class AudioRecorder : IDisposable
         _continuousMicrophoneWrittenBytes = 0;
         _continuousSystemPath = null;
         _continuousMicrophonePath = null;
-        _continuousAudioSink = sink;
+        lock (_nativeMixLock)
+        {
+            _continuousAudioSink = sink;
+            _nativeSystemMix = new Queue<float>();
+            _nativeMicrophoneMix = new Queue<float>();
+            _nativeMixSystemEnabled = IsRecordingSystem;
+            _nativeMixMicrophoneEnabled = IsRecordingMic;
+            _nativeMixNextTimestamp = _continuousStartTimestamp;
+        }
         _continuousRecording = true;
     }
 
@@ -341,10 +359,19 @@ public sealed class AudioRecorder : IDisposable
         if (!_continuousRecording)
             throw new InvalidOperationException("Continuous audio recording is not active.");
 
+        lock (_nativeMixLock)
+        {
+            FlushNativeMixedAudioLocked(force: true);
+            _continuousAudioSink = null;
+            _nativeSystemMix = null;
+            _nativeMicrophoneMix = null;
+            _nativeMixSystemEnabled = false;
+            _nativeMixMicrophoneEnabled = false;
+        }
         _continuousRecording = false;
-        _continuousAudioSink = null;
         return (_continuousStartTimestamp, Environment.TickCount64);
     }
+
     public void StartContinuousRecording()
     {
         ThrowIfDisposed();
@@ -709,53 +736,134 @@ public sealed class AudioRecorder : IDisposable
     {
         await FfmpegLocator.RunAsync(arguments, operation);
     }
-
-
-    private static void TryWriteContinuousAudio(
-        IContinuousAudioSink? sink,
+    private void QueueNativeContinuousAudio(
         ContinuousAudioSource source,
         WaveFormat format,
         byte[] buffer,
-        int count,
-        long packetStartTimestamp,
-        long packetDurationMilliseconds)
+        int count)
     {
-        if (sink is null) return;
+        if (_continuousAudioSink is null || count <= 0) return;
+
         try
         {
-            if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+            float[] stereoSamples = ConvertToNativeMixSamples(format, buffer, count);
+            if (stereoSamples.Length == 0) return;
+
+            lock (_nativeMixLock)
             {
-                byte[] pcm16 = ConvertFloat32ToPcm16(buffer, count);
-                var pcmFormat = new WaveFormat(format.SampleRate, 16, format.Channels);
-                sink.WriteContinuousAudio(source, pcmFormat, pcm16, pcm16.Length, packetStartTimestamp, packetDurationMilliseconds);
-            }
-            else
-            {
-                sink.WriteContinuousAudio(source, format, buffer, count, packetStartTimestamp, packetDurationMilliseconds);
+                Queue<float>? queue = source == ContinuousAudioSource.Microphone
+                    ? _nativeMicrophoneMix
+                    : _nativeSystemMix;
+                if (queue is null) return;
+
+                foreach (float sample in stereoSamples)
+                    queue.Enqueue(sample);
+
+                FlushNativeMixedAudioLocked(force: false);
             }
         }
         catch (Exception ex)
         {
-            AppLogger.Error(nameof(AudioRecorder), $"Continuous native audio write failed: {ex}");
+            AppLogger.Error(nameof(AudioRecorder), $"Continuous native audio mix failed: {ex}");
         }
     }
-private static byte[] ConvertFloat32ToPcm16(byte[] buffer, int count)
+
+    private void FlushNativeMixedAudioLocked(bool force)
     {
-        int samples = count / 4;
-        byte[] output = new byte[samples * 2];
-        for (int i = 0; i < samples; i++)
+        IContinuousAudioSink? sink = _continuousAudioSink;
+        Queue<float>? system = _nativeSystemMix;
+        Queue<float>? microphone = _nativeMicrophoneMix;
+        if (sink is null || system is null || microphone is null) return;
+
+        int chunkSamples = NativeMixSampleRate * NativeMixChannels * NativeMixChunkMilliseconds / 1000;
+        while (true)
         {
-            float sample = BitConverter.ToSingle(buffer, i * 4);
-            short pcm = (short)Math.Clamp(
-                (int)Math.Round(sample * short.MaxValue),
-                short.MinValue,
-                short.MaxValue);
-            BitConverter.TryWriteBytes(output.AsSpan(i * 2, 2), pcm);
+            bool systemReady = !_nativeMixSystemEnabled || system.Count >= chunkSamples;
+            bool microphoneReady = !_nativeMixMicrophoneEnabled || microphone.Count >= chunkSamples;
+            int maxAvailable = Math.Max(system.Count, microphone.Count);
+            int samplesToWrite = force
+                ? Math.Min(chunkSamples, maxAvailable - (maxAvailable % NativeMixChannels))
+                : chunkSamples;
+
+            if ((!force && (!systemReady || !microphoneReady)) || samplesToWrite <= 0)
+                break;
+
+            int frames = samplesToWrite / NativeMixChannels;
+            byte[] pcm = new byte[frames * NativeMixChannels * sizeof(short)];
+            for (int sampleIndex = 0; sampleIndex < frames * NativeMixChannels; sampleIndex++)
+            {
+                float mixed = 0;
+                if (system.Count > 0) mixed += system.Dequeue();
+                if (microphone.Count > 0) mixed += microphone.Dequeue();
+                short pcmSample = (short)Math.Clamp(
+                    (int)Math.Round(Math.Clamp(mixed, -1.0f, 1.0f) * short.MaxValue),
+                    short.MinValue,
+                    short.MaxValue);
+                BitConverter.TryWriteBytes(pcm.AsSpan(sampleIndex * sizeof(short), sizeof(short)), pcmSample);
+            }
+
+            long durationMs = Math.Max(1, frames * 1000L / NativeMixSampleRate);
+            sink.WriteContinuousAudio(
+                ContinuousAudioSource.Mixed,
+                NativeContinuousMixFormat,
+                pcm,
+                pcm.Length,
+                _nativeMixNextTimestamp,
+                durationMs);
+            _nativeMixNextTimestamp += durationMs;
         }
+    }
+
+    private static float[] ConvertToNativeMixSamples(WaveFormat format, byte[] buffer, int count)
+    {
+        int blockAlign = Math.Max(1, format.BlockAlign);
+        int inputFrames = count / blockAlign;
+        if (inputFrames <= 0 || format.SampleRate <= 0 || format.Channels <= 0)
+            return [];
+
+        int outputFrames = Math.Max(1, (int)Math.Round(inputFrames * (NativeMixSampleRate / (double)format.SampleRate)));
+        float[] output = new float[outputFrames * NativeMixChannels];
+        for (int frame = 0; frame < outputFrames; frame++)
+        {
+            int sourceFrame = Math.Min(inputFrames - 1, (int)(frame * (format.SampleRate / (double)NativeMixSampleRate)));
+            float left = ReadSampleAsFloat(format, buffer, count, sourceFrame, 0);
+            float right = format.Channels == 1
+                ? left
+                : ReadSampleAsFloat(format, buffer, count, sourceFrame, 1);
+            output[frame * NativeMixChannels] = left;
+            output[frame * NativeMixChannels + 1] = right;
+        }
+
         return output;
     }
 
-private static long CalculateBufferDurationMs(WaveFormat format, int bytesRecorded)
+    private static float ReadSampleAsFloat(WaveFormat format, byte[] buffer, int count, int frame, int channel)
+    {
+        int bytesPerSample = Math.Max(1, format.BitsPerSample / 8);
+        int offset = frame * Math.Max(1, format.BlockAlign) + Math.Min(channel, format.Channels - 1) * bytesPerSample;
+        if (offset < 0 || offset + bytesPerSample > count)
+            return 0;
+
+        if (format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32)
+            return Math.Clamp(BitConverter.ToSingle(buffer, offset), -1.0f, 1.0f);
+
+        if (format.BitsPerSample == 16)
+            return BitConverter.ToInt16(buffer, offset) / 32768f;
+
+        if (format.BitsPerSample == 24)
+        {
+            int sample = buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+            if ((sample & 0x800000) != 0) sample |= unchecked((int)0xFF000000);
+            return Math.Clamp(sample / 8388608f, -1.0f, 1.0f);
+        }
+
+        if (format.BitsPerSample == 32)
+            return Math.Clamp(BitConverter.ToInt32(buffer, offset) / 2147483648f, -1.0f, 1.0f);
+
+        return 0;
+    }
+
+    private static long CalculateBufferDurationMs(WaveFormat format, int bytesRecorded)
     {
         return format.AverageBytesPerSecond <= 0
             ? 0

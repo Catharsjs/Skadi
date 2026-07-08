@@ -91,16 +91,16 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         return (outputPath, elapsedMilliseconds, _startTimestamp + startMilliseconds);
     }
 
-    public void StartContinuousRecording(WaveFormat? systemAudioFormat, WaveFormat? microphoneAudioFormat)
+    public void StartContinuousRecording(WaveFormat? audioFormat)
     {
         ThrowIfDisposed();
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
         if (_continuousRawPath is not null)
             throw new InvalidOperationException("Continuous video recording is already active.");
         string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.mp4");
-        NativeAudioStreamConfig systemConfig = NativeAudioStreamConfig.From(systemAudioFormat);
-        NativeAudioStreamConfig microphoneConfig = NativeAudioStreamConfig.From(microphoneAudioFormat);
-        ThrowIfFailed(NativeMethods.StartRecordingWithAudio(_handle, path, ref systemConfig, ref microphoneConfig), _handle);
+        NativeAudioStreamConfig audioConfig = NativeAudioStreamConfig.From(audioFormat);
+        NativeAudioStreamConfig disabledConfig = default;
+        ThrowIfFailed(NativeMethods.StartRecordingWithAudio(_handle, path, ref audioConfig, ref disabledConfig), _handle);
         _continuousRawPath = path;
     }
 
@@ -147,10 +147,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         if (_continuousRawPath is null || count <= 0 || packetDurationMilliseconds <= 0) return;
         long timestamp100ns = Math.Max(0, packetStartTimestamp - _startTimestamp) * 10_000L;
         long duration100ns = Math.Max(1, packetDurationMilliseconds) * 10_000L;
-        NativeAudioStreamKind kind = source == ContinuousAudioSource.Microphone
-            ? NativeAudioStreamKind.Microphone
-            : NativeAudioStreamKind.System;
-        NativeResult result = NativeMethods.WriteRecordingAudio(_handle, kind, buffer, (uint)count, timestamp100ns, duration100ns);
+        NativeResult result = NativeMethods.WriteRecordingAudio(_handle, NativeAudioStreamKind.System, buffer, (uint)count, timestamp100ns, duration100ns);
         if (result != NativeResult.Ok && result != NativeResult.InvalidState)
             ThrowIfFailed(result, _handle);
     }
