@@ -1,4 +1,4 @@
-using EventCapture.Core.Capture;
+﻿using EventCapture.Core.Capture;
 using EventCapture.Core.Diagnostics;
 using System.IO;
 
@@ -6,13 +6,18 @@ namespace EventCapture.App.Services;
 
 public sealed class CaptureCoordinator : IAsyncDisposable
 {
+    private const long MinimumRecordingFreeDiskBytes = 2L * 1024 * 1024 * 1024;
+    private static readonly TimeSpan RecordingDiskMonitorInterval = TimeSpan.FromSeconds(5);
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private readonly SemaphoreSlim _continuousLock = new(1, 1);
     private IVideoCapturePipeline? _videoPipeline;
     private AudioRecorder? _audioRecorder;
     private AppSettings? _settings;
+    private CancellationTokenSource? _recordingDiskMonitorCts;
+    private Task? _recordingDiskMonitorTask;
 
+    public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
     public bool IsCapturingWindow =>
         _settings?.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) == true;
@@ -103,6 +108,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             if (IsContinuousRecording)
                 throw new InvalidOperationException("Continuous recording is already active.");
 
+            EnsureSufficientRecordingDiskSpace(_settings, "StartRecording");
+
             await _pipelineLock.WaitAsync();
             try
             {
@@ -130,6 +137,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                         .StartContinuousRecording();
 
                 IsContinuousRecording = true;
+                StartRecordingDiskSpaceMonitor();
                 AppLogger.Info($"Continuous recording started | Mode={_settings.CaptureMode}");
                 AppLogger.Info($"Coordinator state | Action=StartRecording exit | Current={DescribeState()}");
             }
@@ -149,7 +157,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
-    public async Task<string> StopContinuousRecordingAsync()
+    public Task<string> StopContinuousRecordingAsync() =>
+        StopContinuousRecordingCoreAsync(stopDiskMonitor: true);
+
+    private async Task<string> StopContinuousRecordingCoreAsync(bool stopDiskMonitor)
     {
         AppLogger.Info($"Coordinator state | Action=StopRecording enter | Current={DescribeState()}");
         if (_settings is null)
@@ -229,6 +240,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
         finally
         {
+            if (stopDiskMonitor)
+                StopRecordingDiskSpaceMonitor();
             _continuousLock.Release();
         }
     }
@@ -325,6 +338,140 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             $"Video pipeline started | Type={_videoPipeline?.GetType().Name} | Mode={_settings.CaptureMode} | " +
             $"Target={_settings.CaptureTarget} | FPS={effectiveFps} | Bitrate={videoBitrate}kbps");
         AppLogger.Info($"Coordinator state | Action=StartPipelineCore exit | WantsVideo={wantsVideo} | WantsAudio={wantsAudio} | SharedTimestamp={sharedTimestamp} | Current={DescribeState()}");
+    }
+
+    private void StartRecordingDiskSpaceMonitor()
+    {
+        StopRecordingDiskSpaceMonitor();
+        if (_settings is null) return;
+
+        _recordingDiskMonitorCts = new CancellationTokenSource();
+        CancellationToken token = _recordingDiskMonitorCts.Token;
+        _recordingDiskMonitorTask = Task.Run(() => MonitorRecordingDiskSpaceAsync(token), token);
+    }
+
+    private void StopRecordingDiskSpaceMonitor()
+    {
+        try { _recordingDiskMonitorCts?.Cancel(); } catch { }
+        _recordingDiskMonitorCts?.Dispose();
+        _recordingDiskMonitorCts = null;
+        _recordingDiskMonitorTask = null;
+    }
+
+    private async Task MonitorRecordingDiskSpaceAsync(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                await Task.Delay(RecordingDiskMonitorInterval, token);
+                if (token.IsCancellationRequested || !IsContinuousRecording || _settings is null)
+                    continue;
+
+                if (HasSufficientRecordingDiskSpace(_settings, out string detail))
+                    continue;
+
+                AppLogger.Info($"Recording stopped, disk is full | {detail}");
+                string? path = null;
+                Exception? failure = null;
+
+                try
+                {
+                    path = await StopContinuousRecordingCoreAsync(stopDiskMonitor: false);
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                    AppLogger.Error(nameof(CaptureCoordinator), $"Forced recording stop failed after low disk detection: {ex}");
+                    IsContinuousRecording = false;
+                    if (_settings is not null && !_settings.BufferEnabled)
+                    {
+                        await _pipelineLock.WaitAsync(token);
+                        try { StopPipelineCore(); }
+                        finally { _pipelineLock.Release(); }
+                    }
+                }
+                finally
+                {
+                    if (_settings is not null)
+                        CleanupRecordingTempFiles(_settings.SaveFolder);
+                    ContinuousRecordingStopped?.Invoke(
+                        this,
+                        new ContinuousRecordingStoppedEventArgs(
+                            Forced: true,
+                            Message: "Recording stopped, disk is full",
+                            Path: path,
+                            Error: failure));
+                    StopRecordingDiskSpaceMonitor();
+                }
+
+                break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(CaptureCoordinator), $"Disk space monitor failed: {ex}");
+        }
+    }
+
+    private static void EnsureSufficientRecordingDiskSpace(AppSettings settings, string action)
+    {
+        if (HasSufficientRecordingDiskSpace(settings, out string detail))
+            return;
+
+        AppLogger.Info($"Disk is full | Action={action} | {detail}");
+        throw new InvalidOperationException("Disk is full");
+    }
+
+    private static bool HasSufficientRecordingDiskSpace(AppSettings settings, out string detail)
+    {
+        List<string> low = [];
+        foreach (string path in GetRecordingStoragePaths(settings))
+        {
+            try
+            {
+                Directory.CreateDirectory(path);
+                string? root = Path.GetPathRoot(Path.GetFullPath(path));
+                if (string.IsNullOrWhiteSpace(root))
+                    continue;
+
+                var drive = new DriveInfo(root);
+                long available = drive.AvailableFreeSpace;
+                if (available < MinimumRecordingFreeDiskBytes)
+                {
+                    low.Add($"Path={path} | Drive={drive.Name} | AvailableBytes={available} | RequiredBytes={MinimumRecordingFreeDiskBytes}");
+                }
+            }
+            catch (Exception ex)
+            {
+                low.Add($"Path={path} | Error={ex.Message} | RequiredBytes={MinimumRecordingFreeDiskBytes}");
+            }
+        }
+
+        detail = low.Count == 0
+            ? "Disk space is sufficient"
+            : string.Join("; ", low);
+        return low.Count == 0;
+    }
+
+    private static IEnumerable<string> GetRecordingStoragePaths(AppSettings settings)
+    {
+        yield return settings.SaveFolder;
+        yield return Path.GetTempPath();
+    }
+
+    private static void CleanupRecordingTempFiles(string folder)
+    {
+        try
+        {
+            if (!Directory.Exists(folder)) return;
+            foreach (string path in Directory.EnumerateFiles(folder, ".record-merge-*.tmp.mp4"))
+                TryDelete(path);
+        }
+        catch { }
     }
 
     private static IVideoCapturePipeline CreateVideoPipeline(
@@ -437,6 +584,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { _audioRecorder?.Dispose(); } catch { }
         try { _videoPipeline?.Stop(); } catch { }
         try { _videoPipeline?.Dispose(); } catch { }
+        StopRecordingDiskSpaceMonitor();
         IsContinuousRecording = false;
         _audioRecorder = null;
         _videoPipeline = null;
@@ -478,8 +626,15 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAllAsync();
+        StopRecordingDiskSpaceMonitor();
         _pipelineLock.Dispose();
         _saveLock.Dispose();
         _continuousLock.Dispose();
     }
 }
+
+public sealed record ContinuousRecordingStoppedEventArgs(
+    bool Forced,
+    string Message,
+    string? Path,
+    Exception? Error);

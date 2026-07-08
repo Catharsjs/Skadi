@@ -102,6 +102,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _hotkeys = hotkeys;
         _notifications = notifications;
         _overlay = overlay;
+        _capture.ContinuousRecordingStopped += OnContinuousRecordingStopped;
         _toggleUi = toggleUi;
         _ = exit;
         _updateTrayHotkeys = updateTrayHotkeys;
@@ -1108,6 +1109,23 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private void OnContinuousRecordingStopped(object? sender, ContinuousRecordingStoppedEventArgs eventArgs)
+    {
+        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            _isRecordStateChanging = false;
+            IsContinuousRecording = false;
+
+            AppLogger.Info(
+                $"UI state | Action=Recording forced-stop | Message={eventArgs.Message} | " +
+                $"Path={Path.GetFileName(eventArgs.Path ?? string.Empty)} | " +
+                $"Error={eventArgs.Error?.Message} | Buffer={BufferEnabled} | " +
+                $"CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
+
+            LogEvent(eventArgs.Message, warning: true);
+            _notifications.Show(eventArgs.Message);
+        });
+    }
     private async Task ToggleContinuousRecordingAsync()
     {
         if (_isRecordStateChanging)
@@ -1154,7 +1172,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     ? wasRecording ? "Recording stop failed" : "Recording start failed"
                     : ex.Message,
                 warning: true);
-            _notifications.Show(wasRecording ? "Recording stop failed" : "Recording start failed");
+                        _notifications.Show(
+                string.Equals(ex.Message, "Disk is full", StringComparison.Ordinal)
+                    ? "Disk is full"
+                    : wasRecording ? "Recording stop failed" : "Recording start failed");
         }
         finally
         {
@@ -1580,6 +1601,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _recordingTimer.Tick -= OnRecordingTimerTick;
             _recordingTimer = null;
         }
+
+        _capture.ContinuousRecordingStopped -= OnContinuousRecordingStopped;
 
         StopAudioDeviceMonitoring();
 
