@@ -812,14 +812,12 @@ public sealed class AudioRecorder : IDisposable
         int chunkSamples = NativeMixSampleRate * NativeMixChannels * NativeMixChunkMilliseconds / 1000;
         while (true)
         {
-            bool systemReady = !_nativeMixSystemEnabled || system.Count >= chunkSamples;
-            bool microphoneReady = !_nativeMixMicrophoneEnabled || microphone.Count >= chunkSamples;
             int maxAvailable = Math.Max(system.Count, microphone.Count);
             int samplesToWrite = force
                 ? Math.Min(chunkSamples, maxAvailable - (maxAvailable % NativeMixChannels))
-                : chunkSamples;
+                : maxAvailable >= chunkSamples ? chunkSamples : 0;
 
-            if ((!force && (!systemReady || !microphoneReady)) || samplesToWrite <= 0)
+            if (samplesToWrite <= 0)
                 break;
 
             int frames = samplesToWrite / NativeMixChannels;
@@ -854,7 +852,7 @@ public sealed class AudioRecorder : IDisposable
     private void LogNativeMixStatusLocked(string reason, bool force)
     {
         long now = Environment.TickCount64;
-        if (!force && _nativeMixChunks > 1 && now - _nativeMixLastLogTimestamp < 2_000) return;
+        if (_nativeMixChunks > 3 && now - _nativeMixLastLogTimestamp < 2_000) return;
         _nativeMixLastLogTimestamp = now;
         int systemSamples = _nativeSystemMix?.Count ?? 0;
         int microphoneSamples = _nativeMicrophoneMix?.Count ?? 0;
