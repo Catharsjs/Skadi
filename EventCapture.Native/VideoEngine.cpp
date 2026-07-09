@@ -170,6 +170,30 @@ namespace EventCaptureNative
             OutputDebugStringW((message + L"\n").c_str());
         }
 
+        double ElapsedMilliseconds(
+            const std::chrono::steady_clock::time_point& start,
+            const std::chrono::steady_clock::time_point& end = std::chrono::steady_clock::now())
+        {
+            return std::chrono::duration<double, std::milli>(end - start).count();
+        }
+
+        void LogNativeTimingIfSlow(
+            const wchar_t* operation,
+            double elapsedMilliseconds,
+            double thresholdMilliseconds,
+            const std::wstring& details = L"")
+        {
+            if (elapsedMilliseconds < thresholdMilliseconds) return;
+
+            std::wstringstream message;
+            message
+                << L"Native timing slow | Operation=" << operation
+                << L" | ElapsedMs=" << std::fixed << std::setprecision(2) << elapsedMilliseconds
+                << L" | ThresholdMs=" << thresholdMilliseconds;
+            if (!details.empty()) message << L" | " << details;
+            LogNative(message.str());
+        }
+
         bool TryGetWindowsBuildNumber(uint32_t& buildNumber)
         {
             buildNumber = 0;
@@ -925,7 +949,10 @@ namespace EventCaptureNative
 
             try
             {
-                std::scoped_lock lock(packetMutex_);
+                const auto callStart = std::chrono::steady_clock::now();
+                const auto lockStart = std::chrono::steady_clock::now();
+                std::unique_lock lock(packetMutex_);
+                const double lockMs = ElapsedMilliseconds(lockStart);
                 if ((!recording_ && !recordingPending_) || recordingWriter_ == nullptr) return EcResult::InvalidState;
                 if (!recordingAudioEnabled_[index] || recordingAudioStreamIndex_[index] == static_cast<DWORD>(-1)) return EcResult::InvalidState;
                 if (recordingStart100ns_ < 0) return EcResult::Ok;
@@ -956,9 +983,24 @@ namespace EventCaptureNative
                 ThrowIfFailed(sample->AddBuffer(buffer.Get()));
                 ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
                 ThrowIfFailed(sample->SetSampleDuration(duration100ns));
+                const auto writeStart = std::chrono::steady_clock::now();
                 ThrowIfFailed(recordingWriter_->WriteSample(recordingAudioStreamIndex_[index], sample.Get()));
+                const double writeMs = ElapsedMilliseconds(writeStart);
 
                 recordingAudioLastTimestamp100ns_[index] = sampleTime100ns;
+                const double totalMs = ElapsedMilliseconds(callStart);
+                if (lockMs >= 5.0 || writeMs >= 10.0 || totalMs >= 20.0)
+                {
+                    std::wstringstream details;
+                    details << L"Stream=" << index
+                        << L" | Bytes=" << byteCount
+                        << L" | SampleTime100ns=" << sampleTime100ns
+                        << L" | Duration100ns=" << duration100ns
+                        << L" | LockMs=" << std::fixed << std::setprecision(2) << lockMs
+                        << L" | WriteMs=" << writeMs
+                        << L" | TotalMs=" << totalMs;
+                    LogNativeTimingIfSlow(L"Audio WriteRecordingAudio", totalMs, 5.0, details.str());
+                }
                 return EcResult::Ok;
             }
             catch (const winrt::hresult_error& error)
@@ -1538,11 +1580,22 @@ namespace EventCaptureNative
             {
                 DXGI_OUTDUPL_FRAME_INFO frameInfo{};
                 ComPtr<IDXGIResource> resource;
+                const auto acquireStart = std::chrono::steady_clock::now();
                 const HRESULT result = desktopDuplication_->AcquireNextFrame(timeoutMilliseconds, &frameInfo, &resource);
+                const double acquireMs = ElapsedMilliseconds(acquireStart);
 
                 if (result == DXGI_ERROR_WAIT_TIMEOUT)
                 {
+                    std::wstringstream details;
+                    details << L"TimeoutMs=" << timeoutMilliseconds << L" | Result=WAIT_TIMEOUT";
+                    LogNativeTimingIfSlow(L"DDA AcquireNextFrame timeout", acquireMs, timeoutMilliseconds == 0 ? 5.0 : timeoutMilliseconds + 12.0, details.str());
                     return false;
+                }
+
+                {
+                    std::wstringstream details;
+                    details << L"TimeoutMs=" << timeoutMilliseconds << L" | Result=0x" << std::hex << static_cast<uint32_t>(result);
+                    LogNativeTimingIfSlow(L"DDA AcquireNextFrame", acquireMs, timeoutMilliseconds == 0 ? 5.0 : timeoutMilliseconds + 12.0, details.str());
                 }
 
                 if (result == DXGI_ERROR_ACCESS_LOST)
@@ -1556,9 +1609,11 @@ namespace EventCaptureNative
                 ThrowIfFailed(result);
                 frameAcquired = true;
 
+                const auto updateStart = std::chrono::steady_clock::now();
                 ComPtr<ID3D11Texture2D> texture;
                 ThrowIfFailed(resource.As(&texture));
                 UpdateDesktopDuplicationLatestFrame(texture.Get());
+                LogNativeTimingIfSlow(L"DDA update latest frame", ElapsedMilliseconds(updateStart), 10.0);
                 frameUpdated = true;
             }
             catch (const winrt::hresult_error& error)
@@ -1605,7 +1660,9 @@ namespace EventCaptureNative
             if (texture == nullptr) return;
 
             const int64_t captureTimestamp100ns = CurrentTimestamp100ns();
+            const auto lockStart = std::chrono::steady_clock::now();
             std::unique_lock lock(textureMutex_);
+            const double lockMs = ElapsedMilliseconds(lockStart);
 
             if (monitorFrameSlots_.empty())
             {
@@ -1613,7 +1670,17 @@ namespace EventCaptureNative
                 return;
             }
 
+            const auto copyStart = std::chrono::steady_clock::now();
             context_->CopyResource(monitorFrameSlots_[0].texture.Get(), texture);
+            const double copyMs = ElapsedMilliseconds(copyStart);
+            if (lockMs >= 5.0 || copyMs >= 5.0)
+            {
+                std::wstringstream details;
+                details << L"LockMs=" << std::fixed << std::setprecision(2) << lockMs
+                    << L" | CopyMs=" << copyMs
+                    << L" | TextureVersion=" << textureVersion_;
+                LogNativeTimingIfSlow(L"DDA latest frame lock/copy", lockMs + copyMs, 5.0, details.str());
+            }
             monitorFrameSlots_[0].captureTimestamp100ns = captureTimestamp100ns;
 
             hasTexture_ = true;
@@ -2712,7 +2779,10 @@ namespace EventCaptureNative
             int64_t fallbackDuration100ns,
             bool keyFrame)
         {
-            std::scoped_lock lock(packetMutex_);
+            const auto callStart = std::chrono::steady_clock::now();
+            const auto lockStart = std::chrono::steady_clock::now();
+            std::unique_lock lock(packetMutex_);
+            const double lockMs = ElapsedMilliseconds(lockStart);
 
             if ((!recording_ && !recordingPending_) || sourceSample == nullptr)
             {
@@ -2761,7 +2831,22 @@ namespace EventCaptureNative
 
             const int64_t sampleTime100ns = std::max<int64_t>(0, nativeTimestamp100ns - recordingStart100ns_);
             SetStreamingSampleTiming(sourceSample, sampleTime100ns, sampleDuration, keyFrame);
+            const auto writeStart = std::chrono::steady_clock::now();
             ThrowIfFailed(recordingWriter_->WriteSample(recordingStreamIndex_, sourceSample));
+            const double writeMs = ElapsedMilliseconds(writeStart);
+            const double totalMs = ElapsedMilliseconds(callStart);
+            if (lockMs >= 5.0 || writeMs >= 10.0 || totalMs >= 20.0)
+            {
+                std::wstringstream details;
+                details << L"Frame=" << recordingFrameCount_
+                    << L" | KeyFrame=" << keyFrame
+                    << L" | SampleTime100ns=" << sampleTime100ns
+                    << L" | SampleDuration100ns=" << sampleDuration
+                    << L" | LockMs=" << std::fixed << std::setprecision(2) << lockMs
+                    << L" | WriteMs=" << writeMs
+                    << L" | TotalMs=" << totalMs;
+                LogNativeTimingIfSlow(L"Video WriteRecordingSample", totalMs, 5.0, details.str());
+            }
 
             recordingLastTimestamp100ns_ = nativeTimestamp100ns;
             recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
@@ -2902,7 +2987,10 @@ namespace EventCaptureNative
                             D3D11_VIDEO_PROCESSOR_STREAM stream{};
                             stream.Enable = TRUE;
                             stream.pInputSurface = selectedProcessorInput.Get();
+                            const auto blitStart = std::chrono::steady_clock::now();
                             const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
+                            const double blitMs = ElapsedMilliseconds(blitStart);
+                            LogNativeTimingIfSlow(L"VideoProcessorBlt", blitMs, 10.0);
                             if (FAILED(blit))
                             {
                                 SetError(HResultMessage(blit));
@@ -2910,7 +2998,11 @@ namespace EventCaptureNative
                             }
                         }
 
-                        preparedEncoderTexture = PrepareEncoderInputTexture();
+                        {
+                            const auto prepareStart = std::chrono::steady_clock::now();
+                            preparedEncoderTexture = PrepareEncoderInputTexture();
+                            LogNativeTimingIfSlow(L"PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
+                        }
 
                         framePrepared = true;
                     }
@@ -2945,9 +3037,25 @@ namespace EventCaptureNative
                             const int64_t submitTimestamp = useFixedDesktopDuplicationClock
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
+                            const auto submitStart = std::chrono::steady_clock::now();
                             SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration);
+                            const double submitMs = ElapsedMilliseconds(submitStart);
+                            const auto drainStart = std::chrono::steady_clock::now();
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
+                            const double drainMs = ElapsedMilliseconds(drainStart);
+                            if (submitMs >= 10.0 || drainMs >= 10.0)
+                            {
+                                std::wstringstream details;
+                                details << L"SubmitMs=" << std::fixed << std::setprecision(2) << submitMs
+                                    << L" | DrainMs=" << drainMs
+                                    << L" | Async=" << asyncEncoder_
+                                    << L" | Submitted=" << submittedFrames_.load()
+                                    << L" | Encoded=" << encodedFrames_.load()
+                                    << L" | Captured=" << capturedFrames_.load()
+                                    << L" | TextureVersion=" << preparedTextureVersion;
+                                LogNativeTimingIfSlow(L"Encode submit/drain", submitMs + drainMs, 10.0, details.str());
+                            }
                             lastEncodedTextureVersion = preparedTextureVersion;
                         }
                         catch (const winrt::hresult_error& error)
