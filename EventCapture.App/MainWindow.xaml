@@ -285,42 +285,19 @@
                                        Foreground="{StaticResource SecondaryTextBrush}"
                                        Margin="6,0,0,5"/>
 
-                                    <UniformGrid Columns="2"
-                                         Margin="0,0,0,6">
-
-                                        <RadioButton GroupName="TargetType"
-                                             Content="Monitors"
-                                             FontSize="17"
-                                             Style="{StaticResource SegmentStyle}"
-                                             IsChecked="{Binding CaptureTargetType,
-                                                                 Converter={StaticResource EqualityConverter},
-                                                                 ConverterParameter=Monitors,
-                                                                 Mode=TwoWay}"/>
-
-                                        <RadioButton GroupName="TargetType"
-                                             Content="Windows"
-                                             FontSize="17"
-                                             Style="{StaticResource SegmentStyle}"
-                                             IsChecked="{Binding CaptureTargetType,
-                                                                 Converter={StaticResource EqualityConverter},
-                                                                 ConverterParameter=Windows,
-                                                                 Mode=TwoWay}"/>
-                                    </UniformGrid>
-
                                     <ListBox Height="350"
                                      ItemsSource="{Binding VisiblePreviews}"
                                      SelectedItem="{Binding SelectedPreview}"
+                                     Opacity="{Binding TargetPreviewOpacity}"
                                      Background="Transparent"
                                      BorderThickness="0"
-                                     Visibility="{Binding IsPreviewListVisible,
-                                                          Converter={StaticResource BooleanToVisibilityConverter}}"
                                      ScrollViewer.VerticalScrollBarVisibility="Disabled"
                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
 
                                         <ListBox.ItemsPanel>
                                             <ItemsPanelTemplate>
-                                                <UniformGrid Columns="2"
-                                                     Rows="2"/>
+                                                <UniformGrid Columns="{Binding PreviewGridColumns}"
+                                                     Rows="{Binding PreviewGridRows}"/>
                                             </ItemsPanelTemplate>
                                         </ListBox.ItemsPanel>
 
@@ -451,33 +428,12 @@
                                         </ListBox.ItemTemplate>
                                     </ListBox>
 
-                                    <Border Height="350"
-                                            Background="{StaticResource SurfaceBrush}"
-                                            BorderBrush="{StaticResource BorderBrush}"
-                                            BorderThickness="1"
-                                            CornerRadius="3"
-                                            Margin="4"
-                                            Visibility="{Binding IsWindowCaptureUnavailable,
-                                                                 Converter={StaticResource BooleanToVisibilityConverter}}">
-
-                                        <TextBlock Text="This feature is unavailable on your OS."
-                                                   FontSize="17"
-                                                   Foreground="{StaticResource SecondaryTextBrush}"
-                                                   TextAlignment="Center"
-                                                   TextWrapping="Wrap"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"
-                                                   Margin="24,0"/>
-                                    </Border>
-
                                     <Button Style="{StaticResource BaseButtonStyle}"
                                     Height="30"
                                     Width="84"
                                     HorizontalAlignment="Center"
                                     Command="{Binding NextPreviewPageCommand}"
                                     IsEnabled="{Binding HasNextPreviewPage}"
-                                    Visibility="{Binding IsPreviewListVisible,
-                                                         Converter={StaticResource BooleanToVisibilityConverter}}"
                                     Margin="0,4,0,6"
                                     Background="Transparent"
                                     BorderThickness="0">

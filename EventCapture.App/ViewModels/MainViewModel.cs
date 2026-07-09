@@ -1,9 +1,10 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using EventCapture.App.Infrastructure;
 using EventCapture.App.Models;
 using EventCapture.App.Services;
@@ -28,12 +29,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly Dictionary<string, string?> _systemDeviceIds = [];
     private readonly Dictionary<string, string?> _microphoneDeviceIds = [];
     private IReadOnlyList<CapturePreview> _monitors = [];
-    private IReadOnlyList<CapturePreview> _windows = [];
     private CancellationTokenSource? _settingsCts;
     private CancellationTokenSource? _eventCts;
     private CancellationTokenSource? _systemVolumeAnimationCts;
     private CancellationTokenSource? _microphoneVolumeAnimationCts;
     private CancellationTokenSource? _audioDeviceRefreshCts;
+    private CancellationTokenSource? _targetRefreshCts;
     private MMDeviceEnumerator? _audioDeviceEnumerator;
     private AudioDeviceNotificationClient? _audioDeviceNotificationClient;
     private DispatcherTimer? _audioLevelTimer;
@@ -52,7 +53,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _bufferEnabled;
     private bool _isAdvanced;
     private string _captureMode;
-    private string _captureTargetType;
     private CapturePreview? _selectedPreview;
     private string _selectedTargetValue;
     private int _previewPage;
@@ -88,6 +88,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private TimeSpan _recordingElapsed;
     private string _eventMessage = "Initializing captureвЂ¦";
     private bool _isEventVisible = true;
+    private double _targetPreviewOpacity = 1.0;
 
     public MainViewModel(
         AppSettings settings,
@@ -113,16 +114,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         _bufferEnabled = settings.BufferEnabled;
         _captureMode = FromStoredMode(settings.CaptureMode);
-        if (IsWindows10() && settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
-        {
-            _captureTargetType = "Monitors";
-            _selectedTargetValue = "PrimaryMonitor";
-        }
-        else
-        {
-            _captureTargetType = settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) ? "Windows" : "Monitors";
-            _selectedTargetValue = settings.CaptureTarget;
-        }
+        _selectedTargetValue = NormalizeCaptureTarget(settings.CaptureTarget);
         _resolution = FromStoredResolution(settings.Resolution);
         _quality = settings.VideoQuality switch { <= 50 => "Low", <= 70 => "Medium", _ => "High" };
         _frameRate = NormalizeFrameRate(settings.Fps);
@@ -230,12 +222,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public async Task InitializeAsync()
     {
+        StartDisplayChangeMonitoring();
         StartAudioDeviceMonitoring();
         LoadAudioDevices();
         StartAudioLevelMonitoring();
-        await Task.WhenAll(
-        RefreshTargetsAsync("Monitors"),
-        RefreshTargetsAsync("Windows"));
+        await RefreshTargetsAsync();
 
         _previewPage = 0;
         RefreshVisiblePreviews();
@@ -304,31 +295,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string CaptureTargetType
-    {
-        get => _captureTargetType;
-
-        set
-        {
-            if (!SetProperty(
-                    ref _captureTargetType,
-                    value))
-            {
-                return;
-            }
-
-            _previewPage = 0;
-
-            RefreshVisiblePreviews();
-            OnPropertyChanged(nameof(IsWindowCaptureUnavailable));
-            OnPropertyChanged(nameof(IsPreviewListVisible));
-            _ = RefreshTargetsAsync(value);
-
-            LogEvent(
-                $"Capture target: {value}");
-        }
-    }
-
     public CapturePreview? SelectedPreview
     {
         get => _selectedPreview;
@@ -362,6 +328,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool IsVideoInputEnabled { get => _isVideoInputEnabled; private set => SetProperty(ref _isVideoInputEnabled, value); }
     public bool IsAudioInputEnabled { get => _isAudioInputEnabled; private set => SetProperty(ref _isAudioInputEnabled, value); }
     public bool HasNextPreviewPage => CurrentTargets.Count > 4;
+    public int PreviewGridColumns => CurrentTargets.Count <= 1 ? 1 : 2;
+    public int PreviewGridRows => CurrentTargets.Count <= 1 ? 1 : 2;
     public string PreviewPageLabel => $"{_previewPage + 1} / {Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d))}";
 
     public string Resolution { get => _resolution; set { if (SetProperty(ref _resolution, value)) { LogEvent($"Resolution: {value}"); QueueSettingsUpdate(true); } } }
@@ -455,10 +423,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             : "Start Recording";
     public string EventMessage { get => _eventMessage; private set => SetProperty(ref _eventMessage, value); }
     public bool IsEventVisible { get => _isEventVisible; private set => SetProperty(ref _isEventVisible, value); }
+    public double TargetPreviewOpacity { get => _targetPreviewOpacity; private set => SetProperty(ref _targetPreviewOpacity, value); }
     public bool CanEditSettings => !BufferEnabled && !IsContinuousRecording;
     public bool IsSettingsLocked => !CanEditSettings;
-    public bool IsWindowCaptureUnavailable => IsWindows10() && _captureTargetType == "Windows";
-    public bool IsPreviewListVisible => !IsWindowCaptureUnavailable;
 
     public bool EventIsWarning
     {
@@ -466,23 +433,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _eventIsWarning, value);
     }
 
-    private IReadOnlyList<CapturePreview> CurrentTargets =>
-        _captureTargetType == "Monitors"
-            ? _monitors
-            : IsWindows10()
-                ? []
-                : _windows;
+    private IReadOnlyList<CapturePreview> CurrentTargets => _monitors;
 
-    private async Task RefreshTargetsAsync(string type)
+    private async Task RefreshTargetsAsync()
     {
         try
         {
-            if (type == "Monitors") _monitors = await _targets.GetMonitorsAsync();
-            else if (IsWindows10()) _windows = [];
-            else _windows = await _targets.GetWindowsAsync();
-            if (_captureTargetType != type) return;
+            _monitors = await _targets.GetMonitorsAsync();
             _previewPage = 0;
-            RefreshVisiblePreviews(selectStoredTarget: true);
+            RefreshVisiblePreviews(selectStoredTarget: true, preserveMissingSelection: !CanEditSettings);
         }
         catch (Exception ex)
         {
@@ -491,8 +450,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private static string NormalizeCaptureTarget(string captureTarget)
+    {
+        return captureTarget.StartsWith("Window|", StringComparison.Ordinal)
+            ? "PrimaryMonitor"
+            : captureTarget;
+    }
     private void RefreshVisiblePreviews(
-    bool selectStoredTarget = false)
+    bool selectStoredTarget = false,
+    bool preserveMissingSelection = false)
     {
         VisiblePreviews.Clear();
 
@@ -509,6 +475,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     item.TargetValue ==
                     _selectedTargetValue);
 
+        if (selection is null && !preserveMissingSelection && CurrentTargets.Count > 0)
+        {
+            selection = CurrentTargets[0];
+            _selectedTargetValue = selection.TargetValue;
+        }
+
         _selectedPreview =
             selection;
 
@@ -522,6 +494,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         OnPropertyChanged(
             nameof(PreviewPageLabel));
+
+        OnPropertyChanged(
+            nameof(PreviewGridColumns));
+
+        OnPropertyChanged(
+            nameof(PreviewGridRows));
     }
 
     private void RefreshNativeResolutionLabel()
@@ -549,13 +527,103 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void NextPreviewPage()
     {
-        if (IsWindowCaptureUnavailable) return;
         int pages = Math.Max(1, (int)Math.Ceiling(CurrentTargets.Count / 4d));
         _previewPage = (_previewPage + 1) % pages;
         RefreshVisiblePreviews();
         LogEvent($"Preview page: {_previewPage + 1}");
     }
 
+    private void StartDisplayChangeMonitoring()
+    {
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+    }
+
+    private void StopDisplayChangeMonitoring()
+    {
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        _targetRefreshCts?.Cancel();
+        _targetRefreshCts?.Dispose();
+        _targetRefreshCts = null;
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        QueueTargetRefresh("Display settings changed");
+    }
+
+    private void QueueTargetRefresh(string reason)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted)
+            return;
+
+        dispatcher.BeginInvoke(() =>
+        {
+            _targetRefreshCts?.Cancel();
+            _targetRefreshCts?.Dispose();
+            _targetRefreshCts = new CancellationTokenSource();
+            _ = RefreshTargetsAfterDisplayChangeAsync(reason, _targetRefreshCts.Token);
+        });
+    }
+
+    private async Task RefreshTargetsAfterDisplayChangeAsync(string reason, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(450, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            AppLogger.Info($"Display topology changed | Reason={reason} | Recording={IsContinuousRecording} | Buffer={BufferEnabled} | CanEdit={CanEditSettings} | Target={_selectedTargetValue}");
+
+            await AnimateTargetPreviewOpacityAsync(0.0, cancellationToken);
+            IReadOnlyList<CapturePreview> nextTargets = await _targets.GetMonitorsAsync();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            _monitors = nextTargets;
+            _previewPage = 0;
+            RefreshVisiblePreviews(selectStoredTarget: true, preserveMissingSelection: !CanEditSettings);
+            await AnimateTargetPreviewOpacityAsync(1.0, cancellationToken);
+
+            LogEvent("Reload (Targets updated)", warning: IsContinuousRecording);
+
+            if (!CanEditSettings)
+            {
+                AppLogger.Info($"Reload (Targets updated) | Selection locked | Recording={IsContinuousRecording} | Buffer={BufferEnabled} | Target={_selectedTargetValue}");
+                _notifications.Show("Reload (Targets updated)");
+                await _capture.HandleDisplayTopologyChangedAsync();
+                return;
+            }
+
+            ApplyToSettings();
+            await _capture.ApplySettingsAsync(_settings, restartPipeline: true);
+            _settings.Save();
+            AppLogger.Info($"Reload (Targets updated) | Applied | Target={_settings.CaptureTarget}");
+            _notifications.Show("Reload (Targets updated)");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainViewModel), $"Target reload failed after display change: {ex}");
+            TargetPreviewOpacity = 1.0;
+            LogEvent("Reload failed", warning: true);
+            _notifications.Show("Reload failed");
+        }
+    }
+
+    private async Task AnimateTargetPreviewOpacityAsync(double target, CancellationToken cancellationToken)
+    {
+        double start = TargetPreviewOpacity;
+        for (int frame = 1; frame <= 10; frame++)
+        {
+            await Task.Delay(TransitionMilliseconds / 10, cancellationToken);
+            double progress = frame / 10d;
+            double smooth = progress * progress * (3 - 2 * progress);
+            TargetPreviewOpacity = start + ((target - start) * smooth);
+        }
+    }
     private void LoadAudioDevices()
     {
         bool previousSuppressAudioDeviceChangeEvents =
@@ -1374,7 +1442,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.Resolution = ToStoredResolution(Resolution);
         _settings.BufferEnabled = BufferEnabled;
         _settings.CaptureMode = ToStoredMode(CaptureMode);
-        _settings.CaptureTarget = _selectedTargetValue;
+        _settings.CaptureTarget = NormalizeCaptureTarget(_selectedTargetValue);
         _settings.VideoQuality = Quality switch { "Low" => 50, "Medium" => 70, _ => 90 };
         _settings.RecordSystemAudio = SystemAudioEnabled;
         _settings.RecordMicrophone = MicrophoneEnabled;
@@ -1628,6 +1696,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _recordingTimer = null;
         }
 
+        StopDisplayChangeMonitoring();
         _capture.ContinuousRecordingStopped -= OnContinuousRecordingStopped;
 
         StopAudioDeviceMonitoring();

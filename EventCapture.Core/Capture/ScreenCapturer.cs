@@ -1,4 +1,4 @@
-﻿using EventCapture.Core.Diagnostics;
+using EventCapture.Core.Diagnostics;
 using SharpDX;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -19,10 +19,6 @@ namespace EventCapture.Core.Capture;
 [ComVisible(true)]
 interface IGraphicsCaptureItemInterop
 {
-    IntPtr CreateForWindow(
-        [In] IntPtr window,
-        [In] ref Guid iid);
-
     IntPtr CreateForMonitor(
         [In] IntPtr monitor,
         [In] ref Guid iid);
@@ -43,8 +39,6 @@ public class ScreenCapturer : IDisposable
 {
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
-    private const uint MONITOR_DEFAULTTONEAREST = 2;
-    private const int DwmwaExtendedFrameBounds = 9;
     private static readonly Guid GraphicsCaptureItemGuid = new("79C3F95B-31F7-4EC2-A464-632EF5D30760");
     private readonly VideoEncoder _encoder;
     private readonly int _fps;
@@ -409,11 +403,7 @@ public class ScreenCapturer : IDisposable
     // Створення GraphicsCaptureItem (...
     private static GraphicsCaptureItem CreateCaptureItem(string captureTarget)
     {
-        bool captureWindow = TryResolveWindowHandle(captureTarget, out var windowHandle);
-        var monitorHandle = captureWindow
-            ? IntPtr.Zero
-            : ResolveMonitorHandle(captureTarget);
-
+        var monitorHandle = ResolveMonitorHandle(NormalizeCaptureTarget(captureTarget));
         string className = "Windows.Graphics.Capture.GraphicsCaptureItem";
 
         WindowsCreateString(
@@ -435,13 +425,11 @@ public class ScreenCapturer : IDisposable
             {
                 var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPointer);
                 var itemGuid = GraphicsCaptureItemGuid;
-                var itemPointer = captureWindow
-                    ? interop.CreateForWindow(windowHandle, ref itemGuid)
-                    : interop.CreateForMonitor(monitorHandle, ref itemGuid);
+                var itemPointer = interop.CreateForMonitor(monitorHandle, ref itemGuid);
 
                 try
                 {
-                    return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPointer) 
+                    return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemPointer)
                         ?? throw new Exception("Failed to create GraphicsCaptureItem");
                 }
                 finally
@@ -465,18 +453,7 @@ public class ScreenCapturer : IDisposable
 
     public static (int Width, int Height) GetTargetSize(string captureTarget)
     {
-        if (TryResolveWindowHandle(captureTarget, out var windowHandle))
-        {
-            var screen =
-                DisplayMonitorService.FromWindow(
-                    windowHandle);
-
-            return (screen.Bounds.Width, screen.Bounds.Height);
-        }
-
-        var monitorScreen =
-            DisplayMonitorService.Resolve(captureTarget);
-
+        var monitorScreen = DisplayMonitorService.Resolve(NormalizeCaptureTarget(captureTarget));
         return (monitorScreen.Bounds.Width, monitorScreen.Bounds.Height);
     }
 
@@ -484,21 +461,7 @@ public class ScreenCapturer : IDisposable
     {
         try
         {
-            DisplayMonitor screen;
-
-            if (TryResolveWindowHandle(captureTarget, out var windowHandle))
-            {
-                screen =
-                    DisplayMonitorService.FromWindow(
-                        windowHandle);
-            }
-            else
-            {
-                screen =
-                    DisplayMonitorService.Resolve(
-                        captureTarget);
-            }
-
+            DisplayMonitor screen = DisplayMonitorService.Resolve(NormalizeCaptureTarget(captureTarget));
             var deviceMode = new DEVMODE
             {
                 dmSize = (short)Marshal.SizeOf<DEVMODE>()
@@ -530,27 +493,11 @@ public class ScreenCapturer : IDisposable
             monitor.Bounds.Top + 1);
     }
 
-    private static bool TryResolveWindowHandle(
-        string captureTarget,
-        out IntPtr windowHandle)
+    private static string NormalizeCaptureTarget(string captureTarget)
     {
-        windowHandle = IntPtr.Zero;
-        if (!captureTarget.StartsWith("Window|", StringComparison.Ordinal))
-            return false;
-
-        string[] parts = captureTarget.Split('|', 3);
-        if (parts.Length < 2 ||
-            !long.TryParse(
-                parts[1],
-                System.Globalization.NumberStyles.HexNumber,
-                null,
-                out long handleValue))
-        {
-            return false;
-        }
-
-        windowHandle = new IntPtr(handleValue);
-        return IsWindow(windowHandle);
+        return captureTarget.StartsWith("Window|", StringComparison.Ordinal)
+            ? "PrimaryMonitor"
+            : captureTarget;
     }
     // ...) Створення GraphicsCaptureItem
 
@@ -694,179 +641,7 @@ public class ScreenCapturer : IDisposable
 
     private static Bitmap CropWindowToVisibleBounds(
     Bitmap bitmap,
-    string captureTarget)
-    {
-        if (!TryResolveWindowHandle(
-                captureTarget,
-                out IntPtr windowHandle))
-        {
-            return bitmap;
-        }
-
-        if (!GetWindowRect(
-                windowHandle,
-                out RECT windowRectangle))
-        {
-            return bitmap;
-        }
-
-        RECT visibleRectangle =
-            windowRectangle;
-
-        DwmGetWindowAttribute(
-            windowHandle,
-            DwmwaExtendedFrameBounds,
-            out visibleRectangle,
-            Marshal.SizeOf<RECT>());
-
-        if (IsZoomed(windowHandle))
-        {
-            IntPtr monitorHandle =
-                MonitorFromWindow(
-                    windowHandle,
-                    MONITOR_DEFAULTTONEAREST);
-
-            var monitorInfo =
-                new MONITORINFO
-                {
-                    Size = Marshal.SizeOf<MONITORINFO>()
-                };
-
-            if (GetMonitorInfo(
-                    monitorHandle,
-                    ref monitorInfo))
-            {
-                visibleRectangle.Left = Math.Max(
-                    visibleRectangle.Left,
-                    monitorInfo.Monitor.Left);
-
-                visibleRectangle.Top = Math.Max(
-                    visibleRectangle.Top,
-                    monitorInfo.Monitor.Top);
-
-                visibleRectangle.Right = Math.Min(
-                    visibleRectangle.Right,
-                    monitorInfo.Monitor.Right);
-
-                visibleRectangle.Bottom = Math.Min(
-                    visibleRectangle.Bottom,
-                    monitorInfo.Monitor.Bottom);
-            }
-        }
-
-        int windowWidth =
-            windowRectangle.Right -
-            windowRectangle.Left;
-
-        int windowHeight =
-            windowRectangle.Bottom -
-            windowRectangle.Top;
-
-        int visibleWidth =
-            visibleRectangle.Right -
-            visibleRectangle.Left;
-
-        int visibleHeight =
-            visibleRectangle.Bottom -
-            visibleRectangle.Top;
-
-        if (windowWidth <= 0 ||
-            windowHeight <= 0 ||
-            visibleWidth <= 0 ||
-            visibleHeight <= 0)
-        {
-            return bitmap;
-        }
-
-        bool bitmapAlreadyVisible =
-            Math.Abs(bitmap.Width - visibleWidth) <= 2 &&
-            Math.Abs(bitmap.Height - visibleHeight) <= 2;
-
-        if (bitmapAlreadyVisible)
-        {
-            return bitmap;
-        }
-
-        bool bitmapMatchesWindow =
-            Math.Abs(bitmap.Width - windowWidth) <= 2 &&
-            Math.Abs(bitmap.Height - windowHeight) <= 2;
-
-        if (!bitmapMatchesWindow)
-        {
-            return bitmap;
-        }
-
-        double scaleX =
-            (double)bitmap.Width /
-            windowWidth;
-
-        double scaleY =
-            (double)bitmap.Height /
-            windowHeight;
-
-        int cropLeft =
-            (int)Math.Round(
-                (visibleRectangle.Left -
-                 windowRectangle.Left) *
-                scaleX);
-
-        int cropTop =
-            (int)Math.Round(
-                (visibleRectangle.Top -
-                 windowRectangle.Top) *
-                scaleY);
-
-        int cropWidth =
-            (int)Math.Round(
-                visibleWidth *
-                scaleX);
-
-        int cropHeight =
-            (int)Math.Round(
-                visibleHeight *
-                scaleY);
-
-        cropLeft = Math.Clamp(
-            cropLeft,
-            0,
-            bitmap.Width - 1);
-
-        cropTop = Math.Clamp(
-            cropTop,
-            0,
-            bitmap.Height - 1);
-
-        cropWidth = Math.Clamp(
-            cropWidth,
-            1,
-            bitmap.Width - cropLeft);
-
-        cropHeight = Math.Clamp(
-            cropHeight,
-            1,
-            bitmap.Height - cropTop);
-
-        if (cropLeft == 0 &&
-            cropTop == 0 &&
-            cropWidth == bitmap.Width &&
-            cropHeight == bitmap.Height)
-        {
-            return bitmap;
-        }
-
-        Bitmap croppedBitmap =
-            bitmap.Clone(
-                new Rectangle(
-                    cropLeft,
-                    cropTop,
-                    cropWidth,
-                    cropHeight),
-                PixelFormat.Format32bppArgb);
-
-        bitmap.Dispose();
-
-        return croppedBitmap;
-    }
+    string captureTarget) => bitmap;
 
     private static Bitmap CopyTextureToBitmap(
         SharpDX.Direct3D11.Device d3dDevice,
@@ -1067,61 +842,14 @@ public class ScreenCapturer : IDisposable
     private static extern int WindowsDeleteString(
         IntPtr hstring);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromPoint(
-        POINT point,
-        uint flags);
 
-    [DllImport("user32.dll")]
-    private static extern bool IsWindow(IntPtr windowHandle);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromWindow(
-        IntPtr windowHandle,
-        uint flags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool EnumDisplaySettings(
         string deviceName,
         int modeNum,
         ref DEVMODE deviceMode);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(
-        IntPtr windowHandle,
-        out RECT rectangle);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmGetWindowAttribute(
-    IntPtr windowHandle,
-    int attribute,
-    out RECT attributeValue,
-    int attributeSize);
-
-    [DllImport("user32.dll")]
-    private static extern bool IsZoomed(
-        IntPtr windowHandle);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern bool GetMonitorInfo(
-        IntPtr monitorHandle,
-        ref MONITORINFO monitorInfo);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MONITORINFO
-    {
-        public int Size;
-        public RECT Monitor;
-        public RECT WorkArea;
-        public uint Flags;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int x;
-        public int y;
-    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct DEVMODE
@@ -1161,15 +889,6 @@ public class ScreenCapturer : IDisposable
         public int dmReserved2;
         public int dmPanningWidth;
         public int dmPanningHeight;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
     }
     // ...) WinAPI
 }

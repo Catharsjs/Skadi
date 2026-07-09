@@ -24,12 +24,15 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
-    public bool IsCapturingWindow =>
-        _settings?.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal) == true;
+    public bool IsCapturingWindow => false;
     public bool IsContinuousRecording { get; private set; }
 
     public async Task ApplySettingsAsync(AppSettings settings, bool restartPipeline)
     {
+        if (settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
+        {
+            settings.CaptureTarget = "PrimaryMonitor";
+        }
         AppLogger.Info($"Coordinator state | Action=ApplySettings enter | Restart={restartPipeline} | NewBuffer={settings.BufferEnabled} | NewMode={settings.CaptureMode} | NewTarget={settings.CaptureTarget} | Current={DescribeState()}");
         _settings = settings;
         _audioRecorder?.SetSystemVolume(settings.SystemAudioVolume);
@@ -189,6 +192,36 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
     public Task<string> StopContinuousRecordingAsync() =>
         StopContinuousRecordingCoreAsync(stopDiskMonitor: true);
+
+    public async Task HandleDisplayTopologyChangedAsync()
+    {
+        AppLogger.Info($"Reload (Targets updated) | Action=DisplayTopologyChanged | Current={DescribeState()}");
+
+        if (!IsContinuousRecording || _videoPipeline is null)
+            return;
+
+        bool videoUnavailable = !_videoPipeline.IsRunning;
+        if (_videoPipeline is GpuCapturePipeline gpu)
+        {
+            try
+            {
+                GpuCaptureStats stats = gpu.GetStats();
+                videoUnavailable = !stats.IsRunning && stats.IsRecording;
+            }
+            catch (Exception ex)
+            {
+                videoUnavailable = true;
+                AppLogger.Error(nameof(CaptureCoordinator), $"Reload (Targets updated) | Failed to read native stats after display change: {ex}");
+            }
+        }
+
+        if (!videoUnavailable)
+            return;
+
+        await ForceStopContinuousRecordingAsync(
+            "Reload (Targets updated)",
+            "Display topology changed and the active recording pipeline stopped.");
+    }
 
     private async Task<string> StopContinuousRecordingCoreAsync(bool stopDiskMonitor)
     {
@@ -714,6 +747,15 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                         $"CapturedFps={capturedFps.ToString("0.##", CultureInfo.InvariantCulture)} | " +
                         $"EncodedFps={encodedFps.ToString("0.##", CultureInfo.InvariantCulture)} | " +
                         $"BufferedFrames={stats.BufferedFrames} | BufferedBytes={stats.BufferedBytes}";
+
+                    if (!stats.IsRunning && stats.IsRecording)
+                    {
+                        AppLogger.Info($"Reload (Targets updated) | Active recording pipeline stopped | {videoDetail}");
+                        await ForceStopContinuousRecordingAsync(
+                            "Reload (Targets updated)",
+                            "The active recording pipeline stopped after display topology changed.");
+                        break;
+                    }
                 }
                 else if (_videoPipeline is not null)
                 {
@@ -750,6 +792,52 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    private async Task ForceStopContinuousRecordingAsync(string message, string detail)
+    {
+        if (!IsContinuousRecording)
+            return;
+
+        AppLogger.Info($"{message} | Forced recording stop requested | {detail} | Current={DescribeState()}");
+
+        string? path = null;
+        Exception? failure = null;
+
+        try
+        {
+            path = await StopContinuousRecordingCoreAsync(stopDiskMonitor: false);
+            AppLogger.Info($"{message} | Forced recording stop saved | Path={Path.GetFileName(path)}");
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+            AppLogger.Error(nameof(CaptureCoordinator), $"{message} | Forced recording stop failed: {ex}");
+            IsContinuousRecording = false;
+            _continuousNativeCombined = false;
+
+            if (_settings is not null && !_settings.BufferEnabled)
+            {
+                await _pipelineLock.WaitAsync();
+                try { StopPipelineCore(); }
+                finally { _pipelineLock.Release(); }
+            }
+        }
+        finally
+        {
+            if (_settings is not null)
+                CleanupRecordingTempFiles(_settings.SaveFolder);
+
+            ContinuousRecordingStopped?.Invoke(
+                this,
+                new ContinuousRecordingStoppedEventArgs(
+                    Forced: true,
+                    Message: message,
+                    Path: path,
+                    Error: failure));
+
+            StopRecordingDiskSpaceMonitor();
+            StopRecordingPerformanceMonitor();
+        }
+    }
     private long GetCurrentRecordingFreeDiskBytes()
     {
         if (_settings is null) return -1;
