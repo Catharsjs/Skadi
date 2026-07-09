@@ -3980,7 +3980,7 @@ namespace EventCaptureNative
         std::deque<RecordingAudioSample> recordingAudioQueue_;
         uint64_t recordingAudioQueuedBytes_{};
         uint64_t recordingAudioDroppedSamples_{};
-        static constexpr uint64_t MaxRecordingAudioQueueBytes = 4ull * 1024ull * 1024ull;
+        static constexpr uint64_t MaxRecordingAudioQueueBytes = 64ull * 1024ull * 1024ull;
         static constexpr int64_t RecordingAudioLead100ns = 2'500'000;
         std::filesystem::path spoolDirectory_;
         std::shared_ptr<EncodedStorageFile> activeSpool_;
