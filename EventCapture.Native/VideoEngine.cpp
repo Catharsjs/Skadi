@@ -3225,7 +3225,9 @@ namespace EventCaptureNative
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
                             AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
-                            const int64_t submitTimestamp = static_cast<int64_t>(submittedIndex) * frameDuration;
+                            const int64_t submitTimestamp = useFixedDesktopDuplicationClock
+                                ? CurrentTimestamp100ns()
+                                : static_cast<int64_t>(submittedIndex) * frameDuration;
                             const auto submitStart = std::chrono::steady_clock::now();
                             SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration);
                             const double submitMs = ElapsedMilliseconds(submitStart);
