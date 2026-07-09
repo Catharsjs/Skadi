@@ -577,6 +577,14 @@ namespace EventCaptureNative
     class VideoEngine::Implementation final
     {
     public:
+        struct RecordingAudioSample
+        {
+            int index{};
+            std::vector<uint8_t> bytes;
+            int64_t sampleTime100ns{};
+            int64_t duration100ns{};
+        };
+
         explicit Implementation(const EcVideoConfig& config) : config_(config)
         {
             InstallNativeDiagnostics();
@@ -808,6 +816,7 @@ namespace EventCaptureNative
 
                 recordingPath_ = path;
                 recordingFrames_.clear();
+                ClearRecordingAudioQueueNoLock();
                 CreateRecordingWriter(path, nullptr, nullptr);
 
                 recordingPending_ = true;
@@ -891,6 +900,7 @@ namespace EventCaptureNative
 
                 recordingPath_ = path;
                 recordingFrames_.clear();
+                ClearRecordingAudioQueueNoLock();
                 CreateRecordingWriter(path, systemAudio, microphoneAudio);
 
                 recordingPending_ = true;
@@ -902,6 +912,8 @@ namespace EventCaptureNative
                 recordingFrameCount_ = 0;
                 recordingAudioLastTimestamp100ns_[0] = -1;
                 recordingAudioLastTimestamp100ns_[1] = -1;
+                recordingAudioQueuedLastTimestamp100ns_[0] = -1;
+                recordingAudioQueuedLastTimestamp100ns_[1] = -1;
 
                 ForceKeyFrame();
                 LogNative(L"Native state | Action=StartRecordingWithAudio armed-streaming");
@@ -950,57 +962,78 @@ namespace EventCaptureNative
             try
             {
                 const auto callStart = std::chrono::steady_clock::now();
-                const auto lockStart = std::chrono::steady_clock::now();
-                std::unique_lock lock(packetMutex_);
-                const double lockMs = ElapsedMilliseconds(lockStart);
-                if ((!recording_ && !recordingPending_) || recordingWriter_ == nullptr) return EcResult::InvalidState;
-                if (!recordingAudioEnabled_[index] || recordingAudioStreamIndex_[index] == static_cast<DWORD>(-1)) return EcResult::InvalidState;
-                if (recordingStart100ns_ < 0) return EcResult::Ok;
+                std::vector<uint8_t> bytes(data, data + byteCount);
+                uint64_t droppedSamples = 0;
+                uint64_t queuedBytes = 0;
+                size_t queuedSamples = 0;
+                int64_t sampleTime100ns = 0;
 
-                int64_t sampleTime100ns = timestamp100ns - recordingStart100ns_;
-                if (sampleTime100ns < 0)
                 {
-                    duration100ns += sampleTime100ns;
-                    sampleTime100ns = 0;
+                    const auto lockStart = std::chrono::steady_clock::now();
+                    std::unique_lock lock(packetMutex_);
+                    const double lockMs = ElapsedMilliseconds(lockStart);
+                    if ((!recording_ && !recordingPending_) || recordingWriter_ == nullptr) return EcResult::InvalidState;
+                    if (!recordingAudioEnabled_[index] || recordingAudioStreamIndex_[index] == static_cast<DWORD>(-1)) return EcResult::InvalidState;
+                    if (recordingStart100ns_ < 0) return EcResult::Ok;
+
+                    sampleTime100ns = timestamp100ns - recordingStart100ns_;
+                    if (sampleTime100ns < 0)
+                    {
+                        duration100ns += sampleTime100ns;
+                        sampleTime100ns = 0;
+                    }
+                    if (duration100ns <= 0) return EcResult::Ok;
+
+                    if (recordingAudioQueuedLastTimestamp100ns_[index] >= 0 && sampleTime100ns <= recordingAudioQueuedLastTimestamp100ns_[index])
+                        sampleTime100ns = recordingAudioQueuedLastTimestamp100ns_[index] + 1;
+
+                    while (!recordingAudioQueue_.empty() &&
+                        recordingAudioQueuedBytes_ + byteCount > MaxRecordingAudioQueueBytes)
+                    {
+                        recordingAudioQueuedBytes_ -= recordingAudioQueue_.front().bytes.size();
+                        recordingAudioQueue_.pop_front();
+                        ++recordingAudioDroppedSamples_;
+                        ++droppedSamples;
+                    }
+
+                    recordingAudioQueue_.push_back(RecordingAudioSample{
+                        index,
+                        std::move(bytes),
+                        sampleTime100ns,
+                        duration100ns });
+                    recordingAudioQueuedBytes_ += byteCount;
+                    recordingAudioQueuedLastTimestamp100ns_[index] = sampleTime100ns;
+                    queuedBytes = recordingAudioQueuedBytes_;
+                    queuedSamples = recordingAudioQueue_.size();
+
+                    if (lockMs >= 5.0)
+                    {
+                        std::wstringstream details;
+                        details << L"Stream=" << index
+                            << L" | Bytes=" << byteCount
+                            << L" | LockMs=" << std::fixed << std::setprecision(2) << lockMs
+                            << L" | QueueSamples=" << queuedSamples
+                            << L" | QueueBytes=" << queuedBytes;
+                        LogNativeTimingIfSlow(L"Audio queue lock", lockMs, 5.0, details.str());
+                    }
                 }
-                if (duration100ns <= 0) return EcResult::Ok;
 
-                if (recordingAudioLastTimestamp100ns_[index] >= 0 && sampleTime100ns <= recordingAudioLastTimestamp100ns_[index])
-                    sampleTime100ns = recordingAudioLastTimestamp100ns_[index] + 1;
-
-                ComPtr<IMFMediaBuffer> buffer;
-                ThrowIfFailed(MFCreateMemoryBuffer(byteCount, &buffer));
-                BYTE* destination = nullptr;
-                DWORD maxLength = 0;
-                DWORD currentLength = 0;
-                ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
-                std::memcpy(destination, data, byteCount);
-                ThrowIfFailed(buffer->Unlock());
-                ThrowIfFailed(buffer->SetCurrentLength(byteCount));
-
-                ComPtr<IMFSample> sample;
-                ThrowIfFailed(MFCreateSample(&sample));
-                ThrowIfFailed(sample->AddBuffer(buffer.Get()));
-                ThrowIfFailed(sample->SetSampleTime(sampleTime100ns));
-                ThrowIfFailed(sample->SetSampleDuration(duration100ns));
-                const auto writeStart = std::chrono::steady_clock::now();
-                ThrowIfFailed(recordingWriter_->WriteSample(recordingAudioStreamIndex_[index], sample.Get()));
-                const double writeMs = ElapsedMilliseconds(writeStart);
-
-                recordingAudioLastTimestamp100ns_[index] = sampleTime100ns;
                 const double totalMs = ElapsedMilliseconds(callStart);
-                if (lockMs >= 5.0 || writeMs >= 10.0 || totalMs >= 20.0)
+                if (droppedSamples > 0 || totalMs >= 20.0)
                 {
                     std::wstringstream details;
                     details << L"Stream=" << index
                         << L" | Bytes=" << byteCount
                         << L" | SampleTime100ns=" << sampleTime100ns
                         << L" | Duration100ns=" << duration100ns
-                        << L" | LockMs=" << std::fixed << std::setprecision(2) << lockMs
-                        << L" | WriteMs=" << writeMs
-                        << L" | TotalMs=" << totalMs;
-                    LogNativeTimingIfSlow(L"Audio WriteRecordingAudio", totalMs, 5.0, details.str());
+                        << L" | QueueSamples=" << queuedSamples
+                        << L" | QueueBytes=" << queuedBytes
+                        << L" | DroppedNow=" << droppedSamples
+                        << L" | DroppedTotal=" << recordingAudioDroppedSamples_
+                        << L" | TotalMs=" << std::fixed << std::setprecision(2) << totalMs;
+                    LogNative(L"Audio queued for recording | " + details.str());
                 }
+
                 return EcResult::Ok;
             }
             catch (const winrt::hresult_error& error)
@@ -1036,6 +1069,8 @@ namespace EventCaptureNative
 
             try
             {
+                std::unique_lock writerLock(recordingWriterMutex_);
+
                 {
                     std::scoped_lock lock(packetMutex_);
 
@@ -1044,32 +1079,39 @@ namespace EventCaptureNative
                     recordingPending_ = false;
                     recording_ = false;
 
-                    recordingFrames_.clear();
-                    writer = recordingWriter_;
-                    recordingWriter_.Reset();
-
-                    outputPath = recordingPath_;
-
                     start100ns = recordingStart100ns_ >= 0 ? recordingStart100ns_ : 0;
                     end100ns = recordingEnd100ns_;
                     frameCount = recordingFrameCount_;
+                    outputPath = recordingPath_;
+                }
 
+                if (frameCount == 0 || outputPath.empty() || recordingWriter_ == nullptr)
+                {
+                    if (recordingWriter_ != nullptr)
+                    {
+                        try { recordingWriter_->Finalize(); } catch (...) {}
+                    }
+                    ClearRecordingAudioQueue();
+                    return EcResult::InvalidState;
+                }
+
+                const int64_t recordingDuration100ns = std::max<int64_t>(0, end100ns - start100ns);
+                DrainRecordingAudioQueue(recordingDuration100ns);
+                ClearRecordingAudioQueue();
+
+                {
+                    std::scoped_lock lock(packetMutex_);
+                    recordingFrames_.clear();
+                    writer = recordingWriter_;
+                    recordingWriter_.Reset();
                     recordingPath_.clear();
-
                     recordingStart100ns_ = -1;
                     recordingEnd100ns_ = 0;
                     recordingLastTimestamp100ns_ = -1;
                     recordingFrameCount_ = 0;
                 }
 
-                if (frameCount == 0 || outputPath.empty() || writer == nullptr)
-                {
-                    if (writer != nullptr)
-                    {
-                        try { writer->Finalize(); } catch (...) {}
-                    }
-                    return EcResult::InvalidState;
-                }
+                writerLock.unlock();
 
                 ThrowIfFailed(writer->Finalize());
 
@@ -1106,6 +1148,7 @@ namespace EventCaptureNative
                 LogNative(L"StopRecording failed | " + message.str());
 
                 ReleaseRecordingWriterNoThrow();
+                ClearRecordingAudioQueue();
                 recordingPath_.clear();
                 recordingFrames_.clear();
 
@@ -1115,22 +1158,20 @@ namespace EventCaptureNative
             {
                 SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                 LogNative(L"StopRecording failed | std::exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
-
                 ReleaseRecordingWriterNoThrow();
+                ClearRecordingAudioQueue();
                 recordingPath_.clear();
                 recordingFrames_.clear();
-
                 return EcResult::NativeFailure;
             }
             catch (...)
             {
                 SetError(L"Unknown buffered recording export failure.");
                 LogNative(L"StopRecording failed | unknown exception");
-
                 ReleaseRecordingWriterNoThrow();
+                ClearRecordingAudioQueue();
                 recordingPath_.clear();
                 recordingFrames_.clear();
-
                 return EcResult::NativeFailure;
             }
         }
@@ -2739,6 +2780,125 @@ namespace EventCaptureNative
             ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, keyFrame ? TRUE : FALSE));
         }
 
+        static ComPtr<IMFSample> CreateAudioSample(const RecordingAudioSample& queued)
+        {
+            ComPtr<IMFMediaBuffer> buffer;
+            ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(queued.bytes.size()), &buffer));
+            BYTE* destination = nullptr;
+            DWORD maxLength = 0;
+            DWORD currentLength = 0;
+            ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
+            if (!queued.bytes.empty())
+            {
+                std::memcpy(destination, queued.bytes.data(), queued.bytes.size());
+            }
+            ThrowIfFailed(buffer->Unlock());
+            ThrowIfFailed(buffer->SetCurrentLength(static_cast<DWORD>(queued.bytes.size())));
+
+            ComPtr<IMFSample> sample;
+            ThrowIfFailed(MFCreateSample(&sample));
+            ThrowIfFailed(sample->AddBuffer(buffer.Get()));
+            ThrowIfFailed(sample->SetSampleTime(queued.sampleTime100ns));
+            ThrowIfFailed(sample->SetSampleDuration(queued.duration100ns));
+            return sample;
+        }
+
+        void ClearRecordingAudioQueueNoLock()
+        {
+            recordingAudioQueue_.clear();
+            recordingAudioQueuedBytes_ = 0;
+            recordingAudioDroppedSamples_ = 0;
+            recordingAudioQueuedLastTimestamp100ns_[0] = -1;
+            recordingAudioQueuedLastTimestamp100ns_[1] = -1;
+            recordingAudioLastTimestamp100ns_[0] = -1;
+            recordingAudioLastTimestamp100ns_[1] = -1;
+        }
+
+        void ClearRecordingAudioQueue()
+        {
+            std::scoped_lock lock(packetMutex_);
+            ClearRecordingAudioQueueNoLock();
+        }
+
+        void DrainRecordingAudioQueue(int64_t maxAudioEnd100ns)
+        {
+            uint64_t writtenSamples = 0;
+            uint64_t trimmedSamples = 0;
+            uint64_t droppedSamples = 0;
+
+            for (;;)
+            {
+                RecordingAudioSample queued;
+                DWORD streamIndex = static_cast<DWORD>(-1);
+                bool hasSample = false;
+
+                {
+                    std::scoped_lock lock(packetMutex_);
+                    if (recordingWriter_ == nullptr || recordingAudioQueue_.empty()) break;
+
+                    RecordingAudioSample& front = recordingAudioQueue_.front();
+                    if (front.sampleTime100ns >= maxAudioEnd100ns) break;
+
+                    queued = std::move(front);
+                    recordingAudioQueuedBytes_ -= queued.bytes.size();
+                    recordingAudioQueue_.pop_front();
+
+                    const int64_t sampleEnd100ns = queued.sampleTime100ns + queued.duration100ns;
+                    if (sampleEnd100ns > maxAudioEnd100ns)
+                    {
+                        queued.duration100ns = maxAudioEnd100ns - queued.sampleTime100ns;
+                        ++trimmedSamples;
+                    }
+
+                    if (queued.duration100ns <= 0 ||
+                        queued.index < 0 || queued.index > 1 ||
+                        !recordingAudioEnabled_[queued.index] ||
+                        recordingAudioStreamIndex_[queued.index] == static_cast<DWORD>(-1))
+                    {
+                        ++droppedSamples;
+                        continue;
+                    }
+
+                    streamIndex = recordingAudioStreamIndex_[queued.index];
+                    hasSample = true;
+                }
+
+                if (!hasSample) continue;
+
+                const auto writeStart = std::chrono::steady_clock::now();
+                ComPtr<IMFSample> sample = CreateAudioSample(queued);
+                ThrowIfFailed(recordingWriter_->WriteSample(streamIndex, sample.Get()));
+                const double writeMs = ElapsedMilliseconds(writeStart);
+                ++writtenSamples;
+
+                {
+                    std::scoped_lock lock(packetMutex_);
+                    recordingAudioLastTimestamp100ns_[queued.index] = queued.sampleTime100ns;
+                }
+
+                if (writeMs >= 10.0)
+                {
+                    std::wstringstream details;
+                    details << L"Stream=" << queued.index
+                        << L" | Bytes=" << queued.bytes.size()
+                        << L" | SampleTime100ns=" << queued.sampleTime100ns
+                        << L" | Duration100ns=" << queued.duration100ns
+                        << L" | WriteMs=" << std::fixed << std::setprecision(2) << writeMs;
+                    LogNativeTimingIfSlow(L"Audio drain WriteSample", writeMs, 10.0, details.str());
+                }
+            }
+
+            if (writtenSamples > 0 || trimmedSamples > 0 || droppedSamples > 0)
+            {
+                std::wstringstream details;
+                details << L"Written=" << writtenSamples
+                    << L" | Trimmed=" << trimmedSamples
+                    << L" | Dropped=" << droppedSamples
+                    << L" | MaxAudioEnd100ns=" << maxAudioEnd100ns;
+                LogNative(L"Audio queue drained | " + details.str());
+            }
+        }
+
         EncodedFrame CreateEncodedFrameFromSample(
             IMFSample* sample,
             int64_t timestamp100ns,
@@ -2780,65 +2940,93 @@ namespace EventCaptureNative
             bool keyFrame)
         {
             const auto callStart = std::chrono::steady_clock::now();
-            const auto lockStart = std::chrono::steady_clock::now();
-            std::unique_lock lock(packetMutex_);
-            const double lockMs = ElapsedMilliseconds(lockStart);
+            std::unique_lock writerLock(recordingWriterMutex_);
 
-            if ((!recording_ && !recordingPending_) || sourceSample == nullptr)
+            ComPtr<IMFSinkWriter> writer;
+            DWORD streamIndex = 0;
+            uint64_t frameNumber = 0;
+            int64_t sampleDuration = 0;
+            int64_t sampleTime100ns = 0;
+            int64_t audioDrainEnd100ns = 0;
+            double lockMs = 0;
+
             {
-                return;
+                const auto lockStart = std::chrono::steady_clock::now();
+                std::unique_lock lock(packetMutex_);
+                lockMs = ElapsedMilliseconds(lockStart);
+
+                if ((!recording_ && !recordingPending_) || sourceSample == nullptr)
+                {
+                    return;
+                }
+
+                if (recordingPending_ && !keyFrame)
+                {
+                    return;
+                }
+
+                if (recordingStart100ns_ < 0)
+                {
+                    recordingPending_ = false;
+                    recording_ = true;
+                    recordingStart100ns_ = nativeTimestamp100ns;
+                    recordingLastTimestamp100ns_ = nativeTimestamp100ns - fallbackDuration100ns;
+
+                    std::wstringstream message;
+                    message << L"Native state | Action=Recording first-buffered-sample"
+                        << L" | Timestamp=" << nativeTimestamp100ns
+                        << L" | Duration=" << fallbackDuration100ns
+                        << L" | KeyFrame=" << keyFrame
+                        << L" | ReplayEnabled=" << ReplayEnabled()
+                        << L" | Packets=" << packets_.size()
+                        << L" | Captured=" << capturedFrames_.load()
+                        << L" | Submitted=" << submittedFrames_.load()
+                        << L" | Encoded=" << encodedFrames_.load();
+
+                    LogNative(message.str());
+                }
+
+                if (nativeTimestamp100ns <= recordingLastTimestamp100ns_)
+                {
+                    nativeTimestamp100ns = recordingLastTimestamp100ns_ + 1;
+                }
+
+                sampleDuration = recordingFrameCount_ == 0
+                    ? std::max<int64_t>(1, fallbackDuration100ns)
+                    : std::max<int64_t>(1, nativeTimestamp100ns - recordingLastTimestamp100ns_);
+
+                if (recordingWriter_ == nullptr)
+                {
+                    throw std::runtime_error("Recording writer is not available.");
+                }
+
+                sampleTime100ns = std::max<int64_t>(0, nativeTimestamp100ns - recordingStart100ns_);
+                SetStreamingSampleTiming(sourceSample, sampleTime100ns, sampleDuration, keyFrame);
+                writer = recordingWriter_;
+                streamIndex = recordingStreamIndex_;
+                frameNumber = recordingFrameCount_;
             }
 
-            if (recordingPending_ && !keyFrame)
-            {
-                return;
-            }
-
-            if (recordingStart100ns_ < 0)
-            {
-                recordingPending_ = false;
-                recording_ = true;
-                recordingStart100ns_ = nativeTimestamp100ns;
-                recordingLastTimestamp100ns_ = nativeTimestamp100ns - fallbackDuration100ns;
-
-                std::wstringstream message;
-                message << L"Native state | Action=Recording first-buffered-sample"
-                    << L" | Timestamp=" << nativeTimestamp100ns
-                    << L" | Duration=" << fallbackDuration100ns
-                    << L" | KeyFrame=" << keyFrame
-                    << L" | ReplayEnabled=" << ReplayEnabled()
-                    << L" | Packets=" << packets_.size()
-                    << L" | Captured=" << capturedFrames_.load()
-                    << L" | Submitted=" << submittedFrames_.load()
-                    << L" | Encoded=" << encodedFrames_.load();
-
-                LogNative(message.str());
-            }
-
-            if (nativeTimestamp100ns <= recordingLastTimestamp100ns_)
-            {
-                nativeTimestamp100ns = recordingLastTimestamp100ns_ + 1;
-            }
-
-            const int64_t sampleDuration = recordingFrameCount_ == 0
-                ? std::max<int64_t>(1, fallbackDuration100ns)
-                : std::max<int64_t>(1, nativeTimestamp100ns - recordingLastTimestamp100ns_);
-
-            if (recordingWriter_ == nullptr)
-            {
-                throw std::runtime_error("Recording writer is not available.");
-            }
-
-            const int64_t sampleTime100ns = std::max<int64_t>(0, nativeTimestamp100ns - recordingStart100ns_);
-            SetStreamingSampleTiming(sourceSample, sampleTime100ns, sampleDuration, keyFrame);
             const auto writeStart = std::chrono::steady_clock::now();
-            ThrowIfFailed(recordingWriter_->WriteSample(recordingStreamIndex_, sourceSample));
+            ThrowIfFailed(writer->WriteSample(streamIndex, sourceSample));
             const double writeMs = ElapsedMilliseconds(writeStart);
+
+            {
+                std::scoped_lock lock(packetMutex_);
+                if (recordingWriter_ == writer && (recording_ || recordingPending_))
+                {
+                    recordingLastTimestamp100ns_ = nativeTimestamp100ns;
+                    recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
+                    ++recordingFrameCount_;
+                    audioDrainEnd100ns = std::max<int64_t>(0, recordingEnd100ns_ - recordingStart100ns_) + RecordingAudioLead100ns;
+                }
+            }
+
             const double totalMs = ElapsedMilliseconds(callStart);
             if (lockMs >= 5.0 || writeMs >= 10.0 || totalMs >= 20.0)
             {
                 std::wstringstream details;
-                details << L"Frame=" << recordingFrameCount_
+                details << L"Frame=" << frameNumber
                     << L" | KeyFrame=" << keyFrame
                     << L" | SampleTime100ns=" << sampleTime100ns
                     << L" | SampleDuration100ns=" << sampleDuration
@@ -2848,24 +3036,28 @@ namespace EventCaptureNative
                 LogNativeTimingIfSlow(L"Video WriteRecordingSample", totalMs, 5.0, details.str());
             }
 
-            recordingLastTimestamp100ns_ = nativeTimestamp100ns;
-            recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
-            ++recordingFrameCount_;
-
-            if (recordingFrameCount_ == 1 ||
-                recordingFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond) == 0)
+            if (audioDrainEnd100ns > 0)
             {
-                std::wstringstream message;
-                message << L"Native state | Action=Recording streamed-sample"
-                    << L" | Frames=" << recordingFrameCount_
-                    << L" | NativeTimestamp=" << nativeTimestamp100ns
-                    << L" | SampleTime=" << sampleTime100ns
-                    << L" | SampleDuration=" << sampleDuration
-                    << L" | RecordingStart=" << recordingStart100ns_
-                    << L" | RecordingEnd=" << recordingEnd100ns_
-                    << L" | ReplayEnabled=" << ReplayEnabled();
+                DrainRecordingAudioQueue(audioDrainEnd100ns);
+            }
 
-                LogNative(message.str());
+            {
+                std::scoped_lock lock(packetMutex_);
+                if (recordingFrameCount_ == 1 ||
+                    recordingFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond) == 0)
+                {
+                    std::wstringstream message;
+                    message << L"Native state | Action=Recording streamed-sample"
+                        << L" | Frames=" << recordingFrameCount_
+                        << L" | NativeTimestamp=" << nativeTimestamp100ns
+                        << L" | SampleTime=" << sampleTime100ns
+                        << L" | SampleDuration=" << sampleDuration
+                        << L" | RecordingStart=" << recordingStart100ns_
+                        << L" | RecordingEnd=" << recordingEnd100ns_
+                        << L" | ReplayEnabled=" << ReplayEnabled();
+
+                    LogNative(message.str());
+                }
             }
         }
 
@@ -3646,6 +3838,7 @@ namespace EventCaptureNative
             {
                 std::scoped_lock packetLock(packetMutex_);
                 packets_.clear();
+                ClearRecordingAudioQueueNoLock();
                 activeSpool_.reset();
                 bufferedBytes_ = 0;
             }
@@ -3774,6 +3967,7 @@ namespace EventCaptureNative
         std::thread encoderThread_;
 
         mutable std::mutex packetMutex_;
+        mutable std::mutex recordingWriterMutex_;
         std::deque<EncodedFrame> packets_;
         std::wstring recordingPath_;
         std::vector<EncodedFrame> recordingFrames_;
@@ -3783,6 +3977,12 @@ namespace EventCaptureNative
         DWORD recordingAudioStreamIndex_[2]{ static_cast<DWORD>(-1), static_cast<DWORD>(-1) };
         bool recordingAudioEnabled_[2]{ false, false };
         int64_t recordingAudioLastTimestamp100ns_[2]{ -1, -1 };
+        int64_t recordingAudioQueuedLastTimestamp100ns_[2]{ -1, -1 };
+        std::deque<RecordingAudioSample> recordingAudioQueue_;
+        uint64_t recordingAudioQueuedBytes_{};
+        uint64_t recordingAudioDroppedSamples_{};
+        static constexpr uint64_t MaxRecordingAudioQueueBytes = 4ull * 1024ull * 1024ull;
+        static constexpr int64_t RecordingAudioLead100ns = 2'500'000;
         std::filesystem::path spoolDirectory_;
         std::shared_ptr<EncodedStorageFile> activeSpool_;
         std::ofstream activeSpoolStream_;
