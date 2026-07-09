@@ -64,6 +64,8 @@ namespace EventCaptureNative
             ComPtr<ID3D11Texture2D> texture;
             ComPtr<ID3D11VideoProcessorInputView> inputView;
             int64_t captureTimestamp100ns{};
+            bool queued{};
+            bool encoding{};
         };
 
         enum class CaptureBackend
@@ -1584,7 +1586,7 @@ namespace EventCaptureNative
 
                     ComPtr<ID3D11Texture2D> texture;
                     ThrowIfFailed(resource.As(&texture));
-                    UpdateDesktopDuplicationLatestFrame(texture.Get());
+                    QueueDesktopDuplicationFrame(texture.Get(), true);
                 }
                 catch (const winrt::hresult_error& error)
                 {
@@ -1759,15 +1761,40 @@ namespace EventCaptureNative
                 monitorQueueMaxDepth_.load(),
                 static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
 
-            if (queuedMonitorFrameSlots_.size() >= monitorFrameSlots_.size())
+            size_t slotIndex = std::numeric_limits<size_t>::max();
+            for (size_t attempt = 0; attempt < monitorFrameSlots_.size(); ++attempt)
             {
-                queuedMonitorFrameSlots_.pop_front();
+                const size_t candidate = nextMonitorFrameSlot_;
+                nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+                if (!monitorFrameSlots_[candidate].queued && !monitorFrameSlots_[candidate].encoding)
+                {
+                    slotIndex = candidate;
+                    break;
+                }
+            }
+
+            if (slotIndex == std::numeric_limits<size_t>::max())
+            {
+                while (!queuedMonitorFrameSlots_.empty())
+                {
+                    const size_t candidate = queuedMonitorFrameSlots_.front();
+                    queuedMonitorFrameSlots_.pop_front();
+                    if (candidate < monitorFrameSlots_.size() && !monitorFrameSlots_[candidate].encoding)
+                    {
+                        monitorFrameSlots_[candidate].queued = false;
+                        slotIndex = candidate;
+                        break;
+                    }
+                }
+
                 monitorQueueOverflowFrames_.fetch_add(1);
                 droppedFrames_.fetch_add(1);
             }
 
-            const size_t slotIndex = nextMonitorFrameSlot_;
-            nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+            if (slotIndex == std::numeric_limits<size_t>::max())
+            {
+                return;
+            }
 
             if (updateLastFrame)
             {
@@ -1790,6 +1817,8 @@ namespace EventCaptureNative
 
             context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture);
             monitorFrameSlots_[slotIndex].captureTimestamp100ns = captureTimestamp100ns;
+            monitorFrameSlots_[slotIndex].queued = true;
+            monitorFrameSlots_[slotIndex].encoding = false;
             queuedMonitorFrameSlots_.push_back(slotIndex);
             monitorQueueMaxDepth_.store(std::max<uint64_t>(
                 monitorQueueMaxDepth_.load(),
@@ -3096,58 +3125,136 @@ namespace EventCaptureNative
             {
                 LogNative(L"EncodeLoop started.");
                 const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
-                const bool useFixedDesktopDuplicationClock =
+                const bool useDesktopDuplicationScheduler =
                     config_.targetKind == EcTargetKind::Monitor &&
                     captureBackend_ == CaptureBackend::DesktopDuplication;
                 const auto fixedFrameInterval =
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::nanoseconds(frameDuration * 100));
                 int64_t nextFrameDue100ns = -1;
-                std::chrono::steady_clock::time_point nextFixedWake{};
+                int64_t lastDesktopDuplicationSubmit100ns = -1;
+                std::chrono::steady_clock::time_point desktopDuplicationClockStart{};
+                std::chrono::steady_clock::time_point nextDesktopDuplicationWake{};
                 uint64_t lastEncodedTextureVersion = 0;
+                size_t lastDesktopDuplicationSlot = std::numeric_limits<size_t>::max();
+
                 while (running_)
                 {
                     bool framePrepared = false;
+                    bool selectedDesktopDuplicationSlot = false;
+                    size_t selectedSlotIndex = std::numeric_limits<size_t>::max();
                     uint64_t preparedTextureVersion = 0;
                     int64_t preparedCaptureTimestamp100ns = 0;
                     ComPtr<ID3D11Texture2D> preparedEncoderTexture;
                     ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
 
+                    if (useDesktopDuplicationScheduler)
                     {
-                        std::unique_lock lock(textureMutex_);
-                        if (useFixedDesktopDuplicationClock)
                         {
-                            if (nextFixedWake == std::chrono::steady_clock::time_point{})
+                            std::unique_lock lock(textureMutex_);
+                            if (nextDesktopDuplicationWake == std::chrono::steady_clock::time_point{})
                             {
                                 frameCondition_.wait(lock, [this]
                                     {
-                                        return !running_ || hasTexture_;
+                                        return !running_ || !queuedMonitorFrameSlots_.empty();
                                     });
                                 if (!running_) break;
-                                nextFixedWake = std::chrono::steady_clock::now();
+                                desktopDuplicationClockStart = std::chrono::steady_clock::now();
+                                nextDesktopDuplicationWake = desktopDuplicationClockStart;
                             }
                             else
                             {
                                 lock.unlock();
-                                nextFixedWake += fixedFrameInterval;
+                                nextDesktopDuplicationWake += fixedFrameInterval;
                                 const auto now = std::chrono::steady_clock::now();
-                                if (nextFixedWake + fixedFrameInterval < now)
+                                if (nextDesktopDuplicationWake + fixedFrameInterval < now)
                                 {
-                                    nextFixedWake = now;
+                                    nextDesktopDuplicationWake = now;
                                 }
-                                std::this_thread::sleep_until(nextFixedWake);
+                                std::this_thread::sleep_until(nextDesktopDuplicationWake);
                                 lock.lock();
                                 if (!running_) break;
                             }
 
-                            if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
+                            while (!queuedMonitorFrameSlots_.empty())
+                            {
+                                const size_t candidate = queuedMonitorFrameSlots_.front();
+                                queuedMonitorFrameSlots_.pop_front();
+                                if (candidate >= monitorFrameSlots_.size()) continue;
 
-                            selectedProcessorInput = monitorFrameSlots_[0].inputView;
-                            preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
+                                monitorFrameSlots_[candidate].queued = false;
+                                if (monitorFrameSlots_[candidate].encoding) continue;
+
+                                if (selectedSlotIndex != std::numeric_limits<size_t>::max())
+                                {
+                                    monitorFrameSlots_[selectedSlotIndex].encoding = false;
+                                    droppedFrames_.fetch_add(1);
+                                }
+
+                                selectedSlotIndex = candidate;
+                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                            }
+
+                            if (selectedSlotIndex == std::numeric_limits<size_t>::max())
+                            {
+                                if (lastDesktopDuplicationSlot == std::numeric_limits<size_t>::max() ||
+                                    lastDesktopDuplicationSlot >= monitorFrameSlots_.size() ||
+                                    monitorFrameSlots_[lastDesktopDuplicationSlot].encoding)
+                                {
+                                    continue;
+                                }
+
+                                selectedSlotIndex = lastDesktopDuplicationSlot;
+                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                            }
+
+                            lastDesktopDuplicationSlot = selectedSlotIndex;
+                            selectedProcessorInput = monitorFrameSlots_[selectedSlotIndex].inputView;
+                            const auto timestampNow = std::chrono::steady_clock::now();
+                            const int64_t elapsedTimestamp100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                timestampNow - desktopDuplicationClockStart).count() / 100;
+                            preparedCaptureTimestamp100ns = std::max<int64_t>(
+                                elapsedTimestamp100ns,
+                                lastDesktopDuplicationSubmit100ns >= 0 ? lastDesktopDuplicationSubmit100ns + 1 : 0);
                             preparedTextureVersion = textureVersion_;
+                            selectedDesktopDuplicationSlot = true;
+                        }
+
+                        if (selectedProcessorInput == nullptr) continue;
+
+                        D3D11_VIDEO_PROCESSOR_STREAM stream{};
+                        stream.Enable = TRUE;
+                        stream.pInputSurface = selectedProcessorInput.Get();
+                        const auto blitStart = std::chrono::steady_clock::now();
+                        const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
+                        const double blitMs = ElapsedMilliseconds(blitStart);
+                        LogNativeTimingIfSlow(L"DDA v2 VideoProcessorBlt", blitMs, 10.0);
+                        if (FAILED(blit))
+                        {
+                            SetError(HResultMessage(blit));
                         }
                         else
                         {
+                            const auto prepareStart = std::chrono::steady_clock::now();
+                            preparedEncoderTexture = PrepareEncoderInputTexture();
+                            LogNativeTimingIfSlow(L"DDA v2 PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
+                            framePrepared = true;
+                        }
+
+                        if (selectedDesktopDuplicationSlot)
+                        {
+                            std::scoped_lock lock(textureMutex_);
+                            if (selectedSlotIndex < monitorFrameSlots_.size())
+                            {
+                                monitorFrameSlots_[selectedSlotIndex].encoding = false;
+                            }
+                            frameCondition_.notify_one();
+                        }
+                    }
+                    else
+                    {
+                        {
+                            std::unique_lock lock(textureMutex_);
                             frameCondition_.wait(lock, [this, lastEncodedTextureVersion]
                                 {
                                     return !running_ ||
@@ -3183,36 +3290,36 @@ namespace EventCaptureNative
                                 preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
                                 preparedTextureVersion = textureVersion_;
                             }
-                        }
 
-                        if (!(config_.targetKind == EcTargetKind::Window && windowSourceInvalid_.load()))
-                        {
-                            D3D11_VIDEO_PROCESSOR_STREAM stream{};
-                            stream.Enable = TRUE;
-                            stream.pInputSurface = selectedProcessorInput.Get();
-                            const auto blitStart = std::chrono::steady_clock::now();
-                            const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
-                            const double blitMs = ElapsedMilliseconds(blitStart);
-                            LogNativeTimingIfSlow(L"VideoProcessorBlt", blitMs, 10.0);
-                            if (FAILED(blit))
+                            if (!(config_.targetKind == EcTargetKind::Window && windowSourceInvalid_.load()))
                             {
-                                SetError(HResultMessage(blit));
-                                continue;
+                                D3D11_VIDEO_PROCESSOR_STREAM stream{};
+                                stream.Enable = TRUE;
+                                stream.pInputSurface = selectedProcessorInput.Get();
+                                const auto blitStart = std::chrono::steady_clock::now();
+                                const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
+                                const double blitMs = ElapsedMilliseconds(blitStart);
+                                LogNativeTimingIfSlow(L"VideoProcessorBlt", blitMs, 10.0);
+                                if (FAILED(blit))
+                                {
+                                    SetError(HResultMessage(blit));
+                                    continue;
+                                }
                             }
-                        }
 
-                        {
-                            const auto prepareStart = std::chrono::steady_clock::now();
-                            preparedEncoderTexture = PrepareEncoderInputTexture();
-                            LogNativeTimingIfSlow(L"PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
-                        }
+                            {
+                                const auto prepareStart = std::chrono::steady_clock::now();
+                                preparedEncoderTexture = PrepareEncoderInputTexture();
+                                LogNativeTimingIfSlow(L"PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
+                            }
 
-                        framePrepared = true;
+                            framePrepared = true;
+                        }
                     }
 
                     if (framePrepared)
                     {
-                        if (!useFixedDesktopDuplicationClock)
+                        if (!useDesktopDuplicationScheduler)
                         {
                             if (nextFrameDue100ns < 0)
                             {
@@ -3237,8 +3344,8 @@ namespace EventCaptureNative
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
                             AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
-                            const int64_t submitTimestamp = useFixedDesktopDuplicationClock
-                                ? CurrentTimestamp100ns()
+                            const int64_t submitTimestamp = useDesktopDuplicationScheduler
+                                ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
                             const auto submitStart = std::chrono::steady_clock::now();
                             SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration);
@@ -3247,12 +3354,17 @@ namespace EventCaptureNative
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             const double drainMs = ElapsedMilliseconds(drainStart);
+                            if (useDesktopDuplicationScheduler)
+                            {
+                                lastDesktopDuplicationSubmit100ns = submitTimestamp;
+                            }
                             if (submitMs >= 10.0 || drainMs >= 10.0)
                             {
                                 std::wstringstream details;
                                 details << L"SubmitMs=" << std::fixed << std::setprecision(2) << submitMs
                                     << L" | DrainMs=" << drainMs
                                     << L" | Async=" << asyncEncoder_
+                                    << L" | DdaV2=" << useDesktopDuplicationScheduler
                                     << L" | Submitted=" << submittedFrames_.load()
                                     << L" | Encoded=" << encodedFrames_.load()
                                     << L" | Captured=" << capturedFrames_.load()
@@ -3481,6 +3593,12 @@ namespace EventCaptureNative
             frame.storageOffset = static_cast<uint64_t>(position);
             frame.storageLength = static_cast<uint32_t>(frame.bytes.size());
             bufferedBytes_.fetch_add(size);
+            if (captureBackend_ == CaptureBackend::DesktopDuplication && !packets_.empty())
+            {
+                packets_.back().duration100ns = std::max<int64_t>(
+                    1,
+                    frame.timestamp100ns - packets_.back().timestamp100ns);
+            }
             packets_.push_back(std::move(frame));
             ++activeSpoolFrameCount_;
             if (activeSpoolFrameCount_ == 1 || activeSpoolFrameCount_ % std::max<uint32_t>(1, config_.framesPerSecond * 2) == 0)
