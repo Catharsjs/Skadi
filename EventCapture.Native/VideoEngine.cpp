@@ -679,7 +679,11 @@ namespace EventCaptureNative
                 running_ = true;
                 if (captureBackend_ == CaptureBackend::DesktopDuplication)
                 {
-                    LogNative(L"DesktopDuplication capture will run on the encoder thread.");
+                    LogNative(L"DesktopDuplication capture thread creation begin.");
+                    desktopDuplicationThread_ = std::thread([this] { DesktopDuplicationLoop(); });
+                    std::wstringstream log;
+                    log << L"DesktopDuplication capture thread created | IdHash=" << std::hash<std::thread::id>{}(desktopDuplicationThread_.get_id());
+                    LogNative(log.str());
                 }
                 else
                 {
@@ -1556,7 +1560,7 @@ namespace EventCaptureNative
                 {
                     DXGI_OUTDUPL_FRAME_INFO frameInfo{};
                     ComPtr<IDXGIResource> resource;
-                    HRESULT result = desktopDuplication_->AcquireNextFrame(2, &frameInfo, &resource);
+                    HRESULT result = desktopDuplication_->AcquireNextFrame(16, &frameInfo, &resource);
 
                     if (result == DXGI_ERROR_WAIT_TIMEOUT)
                     {
@@ -3101,34 +3105,29 @@ namespace EventCaptureNative
                         std::unique_lock lock(textureMutex_);
                         if (useFixedDesktopDuplicationClock)
                         {
-                            lock.unlock();
-
                             if (nextFixedWake == std::chrono::steady_clock::time_point{})
                             {
-                                while (running_)
-                                {
-                                    PumpDesktopDuplicationFrames(16);
-                                    lock.lock();
-                                    const bool ready = hasTexture_;
-                                    lock.unlock();
-                                    if (ready) break;
-                                }
+                                frameCondition_.wait(lock, [this]
+                                    {
+                                        return !running_ || hasTexture_;
+                                    });
+                                if (!running_) break;
                                 nextFixedWake = std::chrono::steady_clock::now();
                             }
                             else
                             {
+                                lock.unlock();
                                 nextFixedWake += fixedFrameInterval;
                                 const auto now = std::chrono::steady_clock::now();
-                                if (nextFixedWake < now)
+                                if (nextFixedWake + fixedFrameInterval < now)
                                 {
                                     nextFixedWake = now;
                                 }
                                 std::this_thread::sleep_until(nextFixedWake);
-                                PumpDesktopDuplicationFrames(0);
+                                lock.lock();
+                                if (!running_) break;
                             }
 
-                            lock.lock();
-                            if (!running_) break;
                             if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
 
                             selectedProcessorInput = monitorFrameSlots_[0].inputView;
