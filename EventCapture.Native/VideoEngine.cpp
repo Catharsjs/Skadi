@@ -1099,7 +1099,10 @@ namespace EventCaptureNative
                     return EcResult::InvalidState;
                 }
 
-                const int64_t recordingDuration100ns = std::max<int64_t>(0, end100ns - start100ns);
+                const int64_t recordingDuration100ns = recordingStart100ns_ >= 0
+                    ? std::max<int64_t>(0, CurrentTimestamp100ns() - recordingStart100ns_)
+                    : std::max<int64_t>(0, end100ns - start100ns);
+                end100ns = std::max(end100ns, start100ns + recordingDuration100ns);
                 DrainRecordingAudioQueue(recordingDuration100ns);
                 ClearRecordingAudioQueue();
 
@@ -3022,7 +3025,7 @@ namespace EventCaptureNative
                     recordingLastTimestamp100ns_ = nativeTimestamp100ns;
                     recordingEnd100ns_ = nativeTimestamp100ns + sampleDuration;
                     ++recordingFrameCount_;
-                    audioDrainEnd100ns = std::max<int64_t>(0, recordingEnd100ns_ - recordingStart100ns_) + RecordingAudioLead100ns;
+                    audioDrainEnd100ns = std::max<int64_t>(0, CurrentTimestamp100ns() - recordingStart100ns_) + RecordingAudioLead100ns;
                 }
             }
 
