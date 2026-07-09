@@ -835,14 +835,21 @@ public sealed class AudioRecorder : IDisposable
             }
 
             long durationMs = Math.Max(1, frames * 1000L / NativeMixSampleRate);
+            long queuedFramesBeforeWrite = maxAvailable / NativeMixChannels;
+            long queuedDurationMsBeforeWrite = Math.Max(durationMs, queuedFramesBeforeWrite * 1000L / NativeMixSampleRate);
+            long wallClockChunkStart = Math.Max(_continuousStartTimestamp, Environment.TickCount64 - queuedDurationMsBeforeWrite);
+            long chunkTimestamp = _nativeMixChunks == 0
+                ? wallClockChunkStart
+                : Math.Max(_nativeMixNextTimestamp, wallClockChunkStart);
+
             sink.WriteContinuousAudio(
                 ContinuousAudioSource.Mixed,
                 NativeContinuousMixFormat,
                 pcm,
                 pcm.Length,
-                _nativeMixNextTimestamp,
+                chunkTimestamp,
                 durationMs);
-            _nativeMixNextTimestamp += durationMs;
+            _nativeMixNextTimestamp = chunkTimestamp + durationMs;
             _nativeMixChunks++;
             _nativeMixWrittenFrames += frames;
             LogNativeMixStatusLocked(force ? "flush-force" : "flush", force);
