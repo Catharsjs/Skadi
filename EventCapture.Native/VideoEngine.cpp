@@ -3121,7 +3121,7 @@ namespace EventCaptureNative
                                 const auto now = std::chrono::steady_clock::now();
                                 if (nextFixedWake < now)
                                 {
-                                    nextFixedWake = now + fixedFrameInterval;
+                                    nextFixedWake = now;
                                 }
                                 std::this_thread::sleep_until(nextFixedWake);
                                 PumpDesktopDuplicationFrames(0);
