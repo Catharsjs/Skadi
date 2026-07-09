@@ -829,6 +829,7 @@ namespace EventCaptureNative
                 recordingStart100ns_ = -1;
                 recordingEnd100ns_ = 0;
                 recordingLastTimestamp100ns_ = -1;
+                recordingLastKeyFrameRequest100ns_ = -1;
                 recordingFrameCount_ = 0;
 
                 ForceKeyFrame();
@@ -913,6 +914,7 @@ namespace EventCaptureNative
                 recordingStart100ns_ = -1;
                 recordingEnd100ns_ = 0;
                 recordingLastTimestamp100ns_ = -1;
+                recordingLastKeyFrameRequest100ns_ = -1;
                 recordingFrameCount_ = 0;
                 recordingAudioLastTimestamp100ns_[0] = -1;
                 recordingAudioLastTimestamp100ns_[1] = -1;
@@ -3002,6 +3004,13 @@ namespace EventCaptureNative
                     ? std::max<int64_t>(1, fallbackDuration100ns)
                     : std::max<int64_t>(1, nativeTimestamp100ns - recordingLastTimestamp100ns_);
 
+                if (recordingLastKeyFrameRequest100ns_ < 0 ||
+                    nativeTimestamp100ns - recordingLastKeyFrameRequest100ns_ >= TicksPerSecond)
+                {
+                    ForceKeyFrame();
+                    recordingLastKeyFrameRequest100ns_ = nativeTimestamp100ns;
+                }
+
                 if (recordingWriter_ == nullptr)
                 {
                     throw std::runtime_error("Recording writer is not available.");
@@ -3995,6 +4004,7 @@ namespace EventCaptureNative
         int64_t recordingStart100ns_{};
         int64_t recordingEnd100ns_{};
         int64_t recordingLastTimestamp100ns_{ -1 };
+        int64_t recordingLastKeyFrameRequest100ns_{ -1 };
         int64_t lastPacketTimestamp100ns_{ -1 };
         uint64_t recordingFrameCount_{};
         std::chrono::steady_clock::time_point encodeClockStart_{};

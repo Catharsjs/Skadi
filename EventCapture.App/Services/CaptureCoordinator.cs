@@ -339,6 +339,19 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 height,
                 effectiveFps,
                 _settings.VideoQuality);
+            int requestedVideoBitrate = videoBitrate;
+            videoBitrate = ApplyDesktopDuplicationBitrateLimit(
+                _settings,
+                width,
+                height,
+                effectiveFps,
+                videoBitrate);
+            if (videoBitrate != requestedVideoBitrate)
+            {
+                AppLogger.Info(
+                    $"Desktop Duplication bitrate limited | Requested={requestedVideoBitrate}kbps | " +
+                    $"Effective={videoBitrate}kbps | Output={width}x{height} | Fps={effectiveFps} | Quality={_settings.VideoQuality}");
+            }
             AppLogger.Info($"Coordinator state | Action=StartPipelineCore video-create-begin | Output={width}x{height} | Fps={effectiveFps} | Bitrate={videoBitrate}kbps | BufferSec={_settings.BufferSeconds} | Buffer={_settings.BufferEnabled} | Mode={_settings.CaptureMode}");
             _videoPipeline = CreateVideoPipeline(
                 _settings,
@@ -557,6 +570,32 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         return effectiveFps;
     }
 
+    private static int ApplyDesktopDuplicationBitrateLimit(
+        AppSettings settings,
+        int width,
+        int height,
+        int fps,
+        int bitrateKbps)
+    {
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+            return bitrateKbps;
+        if (settings.CaptureTarget != "PrimaryMonitor" && settings.CaptureTarget != "AllMonitors")
+            return bitrateKbps;
+
+        int pixels = Math.Max(1, width * height);
+        double megapixels = pixels / 1_000_000.0;
+        double fpsScale = Math.Clamp(fps, 1, 60) / 60.0;
+        double qualityScale = settings.VideoQuality switch
+        {
+            <= 50 => 0.75,
+            <= 70 => 1.0,
+            _ => 1.25
+        };
+
+        int ddaLimit = (int)Math.Round(6_000 * megapixels * fpsScale * qualityScale);
+        ddaLimit = Math.Clamp(ddaLimit, 6_000, 18_000);
+        return Math.Min(bitrateKbps, ddaLimit);
+    }
     private static int CalculateVideoBitrateKbps(
     int width,
     int height,
