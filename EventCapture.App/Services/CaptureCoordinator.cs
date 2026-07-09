@@ -137,12 +137,23 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 _continuousNativeCombined = false;
                 if (_settings.CaptureMode == "VideoAudio")
                 {
-                    if (!wantsVideo || !wantsAudio || _videoPipeline is not GpuCapturePipeline gpuPipeline || _audioRecorder is null)
+                    if (!wantsVideo || _videoPipeline is not GpuCapturePipeline gpuPipeline)
                         throw new InvalidOperationException("Native combined recording is unavailable.");
 
-                    gpuPipeline.StartContinuousRecording(AudioRecorder.NativeContinuousMixFormat);
-                    _audioRecorder.StartContinuousNativeStreaming(gpuPipeline);
-                    _continuousNativeCombined = true;
+                    if (wantsAudio)
+                    {
+                        if (_audioRecorder is null)
+                            throw new InvalidOperationException("Native combined recording is unavailable.");
+
+                        gpuPipeline.StartContinuousRecording(AudioRecorder.NativeContinuousMixFormat);
+                        _audioRecorder.StartContinuousNativeStreaming(gpuPipeline);
+                        _continuousNativeCombined = true;
+                    }
+                    else
+                    {
+                        AppLogger.Info("Coordinator state | Action=StartRecording combined-video-only | AudioSources=disabled");
+                        gpuPipeline.StartContinuousRecording();
+                    }
                 }
                 else
                 {
@@ -197,10 +208,14 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
             if (_settings.CaptureMode == "VideoAudio")
             {
-                if (!_continuousNativeCombined || _audioRecorder is null)
-                    throw new InvalidOperationException("Native combined recording is not active.");
+                if (_continuousNativeCombined)
+                {
+                    if (_audioRecorder is null)
+                        throw new InvalidOperationException("Native combined recording is not active.");
 
-                _audioRecorder.StopContinuousNativeStreaming();
+                    _audioRecorder.StopContinuousNativeStreaming();
+                }
+
                 audio = null;
             }
 
