@@ -648,7 +648,8 @@ public class ScreenCapturer : IDisposable
                         device,
                         texture,
                         description.Width,
-                        description.Height);
+                        description.Height,
+                        forceOpaqueAlpha: true);
 
                     ApplyDesktopDuplicationRotation(bitmap, rotation);
 
@@ -940,7 +941,8 @@ public class ScreenCapturer : IDisposable
         SharpDX.Direct3D11.Device d3dDevice,
         SharpDX.Direct3D11.Texture2D sourceTexture,
         int width,
-        int height)
+        int height,
+        bool forceOpaqueAlpha = false)
     {
         Texture2DDescription sourceDescription =
             sourceTexture.Description;
@@ -996,6 +998,9 @@ public class ScreenCapturer : IDisposable
 
             int rowBytes = width * 4;
             var rowBuffer = new byte[rowBytes];
+            int sampledPixels = 0;
+            int sampledTransparentPixels = 0;
+            int sampledNonBlackPixels = 0;
 
             for (int y = 0; y < height; y++)
             {
@@ -1015,11 +1020,41 @@ public class ScreenCapturer : IDisposable
                     0,
                     rowBytes);
 
+                if (forceOpaqueAlpha)
+                {
+                    for (int x = 0; x < rowBytes; x += 256)
+                    {
+                        sampledPixels++;
+                        if (rowBuffer[x + 3] == 0)
+                            sampledTransparentPixels++;
+                        if (rowBuffer[x] != 0 ||
+                            rowBuffer[x + 1] != 0 ||
+                            rowBuffer[x + 2] != 0)
+                        {
+                            sampledNonBlackPixels++;
+                        }
+                    }
+
+                    // DXGI desktop duplication does not guarantee meaningful alpha.
+                    // Some Windows 10 drivers return zero, making a valid RGB frame
+                    // fully transparent when consumed by WPF or encoded as PNG.
+                    for (int x = 3; x < rowBytes; x += 4)
+                    {
+                        rowBuffer[x] = byte.MaxValue;
+                    }
+                }
+
                 Marshal.Copy(
                     rowBuffer,
                     0,
                     destinationRow,
                     rowBytes);
+            }
+
+            if (forceOpaqueAlpha)
+            {
+                AppLogger.Info(
+                    $"DDA screenshot pixels normalized | Format={sourceDescription.Format} | Samples={sampledPixels} | TransparentBefore={sampledTransparentPixels} | NonBlackRgb={sampledNonBlackPixels}");
             }
 
             return bitmap;
