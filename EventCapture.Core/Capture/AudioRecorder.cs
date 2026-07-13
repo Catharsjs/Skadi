@@ -58,6 +58,12 @@ public sealed class AudioRecorder : IDisposable
     private long _nativeMixChunks;
     private long _nativeMixWrittenFrames;
     private long _nativeMixLastLogTimestamp;
+    private long _nativeSystemResampleRemainder;
+    private long _nativeMicrophoneResampleRemainder;
+    private long _nativeSystemTimelineFrames;
+    private long _nativeMicrophoneTimelineFrames;
+    private bool _nativeSystemTimelineInitialized;
+    private bool _nativeMicrophoneTimelineInitialized;
     private bool _continuousRecording;
     private bool _disposed;
 
@@ -233,7 +239,12 @@ public sealed class AudioRecorder : IDisposable
                 _continuousSystemWriter.Write(buffer, 0, count);
                 _continuousSystemWrittenBytes += count;
             }
-            QueueNativeContinuousAudio(ContinuousAudioSource.System, format, buffer, count);
+            QueueNativeContinuousAudio(
+                ContinuousAudioSource.System,
+                format,
+                buffer,
+                count,
+                packetStart);
             _systemWrittenBytes += count;
             _systemLastPacketEnd = packetEnd;
         }
@@ -274,7 +285,12 @@ public sealed class AudioRecorder : IDisposable
                 _continuousMicrophoneWriter.Write(buffer, 0, count);
                 _continuousMicrophoneWrittenBytes += count;
             }
-            QueueNativeContinuousAudio(ContinuousAudioSource.Microphone, format, buffer, count);
+            QueueNativeContinuousAudio(
+                ContinuousAudioSource.Microphone,
+                format,
+                buffer,
+                count,
+                packetStart);
             _microphoneWrittenBytes += count;
             _microphoneLastPacketEnd = packetEnd;
         }
@@ -364,6 +380,12 @@ public sealed class AudioRecorder : IDisposable
             _nativeMixChunks = 0;
             _nativeMixWrittenFrames = 0;
             _nativeMixLastLogTimestamp = 0;
+            _nativeSystemResampleRemainder = 0;
+            _nativeMicrophoneResampleRemainder = 0;
+            _nativeSystemTimelineFrames = 0;
+            _nativeMicrophoneTimelineFrames = 0;
+            _nativeSystemTimelineInitialized = false;
+            _nativeMicrophoneTimelineInitialized = false;
         }
         AppLogger.Info($"Continuous native audio mix started | SystemEnabled={IsRecordingSystem} | MicrophoneEnabled={IsRecordingMic} | SystemFormat={_systemFormat} | MicrophoneFormat={_microphoneFormat} | MixFormat={NativeContinuousMixFormat}");
         _continuousRecording = true;
@@ -757,13 +779,22 @@ public sealed class AudioRecorder : IDisposable
         ContinuousAudioSource source,
         WaveFormat format,
         byte[] buffer,
-        int count)
+        int count,
+        long packetStartTimestamp)
     {
         if (_continuousAudioSink is null || count <= 0) return;
 
         try
         {
-            float[] stereoSamples = ConvertToNativeMixSamples(format, buffer, count);
+            ref long resampleRemainder = ref (
+                source == ContinuousAudioSource.Microphone
+                    ? ref _nativeMicrophoneResampleRemainder
+                    : ref _nativeSystemResampleRemainder);
+            float[] stereoSamples = ConvertToNativeMixSamples(
+                format,
+                buffer,
+                count,
+                ref resampleRemainder);
             if (stereoSamples.Length == 0)
             {
                 AppLogger.Info($"Continuous native audio packet skipped | Source={source} | Format={format} | Bytes={count}");
@@ -777,10 +808,53 @@ public sealed class AudioRecorder : IDisposable
                     : _nativeSystemMix;
                 if (queue is null) return;
 
-                foreach (float sample in stereoSamples)
-                    queue.Enqueue(sample);
+                ref long timelineFrames = ref (
+                    source == ContinuousAudioSource.Microphone
+                        ? ref _nativeMicrophoneTimelineFrames
+                        : ref _nativeSystemTimelineFrames);
+                ref bool timelineInitialized = ref (
+                    source == ContinuousAudioSource.Microphone
+                        ? ref _nativeMicrophoneTimelineInitialized
+                        : ref _nativeSystemTimelineInitialized);
 
-                int frames = stereoSamples.Length / NativeMixChannels;
+                int packetFrames = stereoSamples.Length / NativeMixChannels;
+                if (!timelineInitialized)
+                {
+                    timelineFrames = Math.Max(
+                        0,
+                        packetStartTimestamp - _continuousStartTimestamp) *
+                        NativeMixSampleRate / 1000L;
+                    timelineInitialized = true;
+                    AppLogger.Info(
+                        $"Continuous native audio clock anchored | Source={source} | " +
+                        $"StartFrame={timelineFrames} | PacketFrames={packetFrames} | " +
+                        $"PacketStart={packetStartTimestamp} | ContinuousStart={_continuousStartTimestamp}");
+                }
+
+                long desiredStartFrame = timelineFrames;
+                timelineFrames += packetFrames;
+                long queueEndFrame = _nativeMixWrittenFrames +
+                    queue.Count / NativeMixChannels;
+                long missingFrames = desiredStartFrame - queueEndFrame;
+                if (missingFrames > 0)
+                {
+                    for (long frame = 0; frame < missingFrames; frame++)
+                    {
+                        queue.Enqueue(0);
+                        queue.Enqueue(0);
+                    }
+                    queueEndFrame += missingFrames;
+                }
+
+                int overlapFrames = checked((int)Math.Min(
+                    Math.Max(0, queueEndFrame - desiredStartFrame),
+                    packetFrames));
+                int firstSample = overlapFrames * NativeMixChannels;
+
+                for (int sample = firstSample; sample < stereoSamples.Length; sample++)
+                    queue.Enqueue(stereoSamples[sample]);
+
+                int frames = packetFrames - overlapFrames;
                 if (source == ContinuousAudioSource.Microphone)
                 {
                     _nativeMixMicrophonePackets++;
@@ -812,10 +886,27 @@ public sealed class AudioRecorder : IDisposable
         int chunkSamples = NativeMixSampleRate * NativeMixChannels * NativeMixChunkMilliseconds / 1000;
         while (true)
         {
-            int maxAvailable = Math.Max(system.Count, microphone.Count);
+            int systemAvailable = _nativeMixSystemEnabled ? system.Count : int.MaxValue;
+            int microphoneAvailable = _nativeMixMicrophoneEnabled ? microphone.Count : int.MaxValue;
+            int synchronizedAvailable = Math.Min(systemAvailable, microphoneAvailable);
+            if (!_nativeMixSystemEnabled && !_nativeMixMicrophoneEnabled)
+                synchronizedAvailable = 0;
+
+            int maxAvailable = Math.Max(
+                _nativeMixSystemEnabled ? system.Count : 0,
+                _nativeMixMicrophoneEnabled ? microphone.Count : 0);
             int samplesToWrite = force
                 ? Math.Min(chunkSamples, maxAvailable - (maxAvailable % NativeMixChannels))
-                : maxAvailable >= chunkSamples ? chunkSamples : 0;
+                : synchronizedAvailable >= chunkSamples ? chunkSamples : 0;
+
+            if (!force &&
+                samplesToWrite == 0 &&
+                _nativeMixSystemEnabled &&
+                _nativeMixMicrophoneEnabled &&
+                maxAvailable >= chunkSamples * 2)
+            {
+                samplesToWrite = chunkSamples;
+            }
 
             if (samplesToWrite <= 0)
                 break;
@@ -835,12 +926,8 @@ public sealed class AudioRecorder : IDisposable
             }
 
             long durationMs = Math.Max(1, frames * 1000L / NativeMixSampleRate);
-            long queuedFramesBeforeWrite = maxAvailable / NativeMixChannels;
-            long queuedDurationMsBeforeWrite = Math.Max(durationMs, queuedFramesBeforeWrite * 1000L / NativeMixSampleRate);
-            long wallClockChunkStart = Math.Max(_continuousStartTimestamp, Environment.TickCount64 - queuedDurationMsBeforeWrite);
-            long chunkTimestamp = _nativeMixChunks == 0
-                ? wallClockChunkStart
-                : Math.Max(_nativeMixNextTimestamp, wallClockChunkStart);
+            long chunkTimestamp = _continuousStartTimestamp +
+                _nativeMixWrittenFrames * 1000L / NativeMixSampleRate;
 
             sink.WriteContinuousAudio(
                 ContinuousAudioSource.Mixed,
@@ -868,28 +955,50 @@ public sealed class AudioRecorder : IDisposable
         AppLogger.Info($"Continuous native audio mix status | Reason={reason} | Force={force} | SystemEnabled={_nativeMixSystemEnabled} | MicrophoneEnabled={_nativeMixMicrophoneEnabled} | SystemPackets={_nativeMixSystemPackets} | MicrophonePackets={_nativeMixMicrophonePackets} | SystemQueueSamples={systemSamples} | MicrophoneQueueSamples={microphoneSamples} | SystemQueueMs={systemQueueMs} | MicrophoneQueueMs={microphoneQueueMs} | MixedChunks={_nativeMixChunks} | MixedFrames={_nativeMixWrittenFrames} | NextTimestamp={_nativeMixNextTimestamp}");
     }
 
-    private static float[] ConvertToNativeMixSamples(WaveFormat format, byte[] buffer, int count)
+    private static float[] ConvertToNativeMixSamples(
+        WaveFormat format,
+        byte[] buffer,
+        int count,
+        ref long rateRemainder)
     {
         int blockAlign = Math.Max(1, format.BlockAlign);
         int inputFrames = count / blockAlign;
         if (inputFrames <= 0 || format.SampleRate <= 0 || format.Channels <= 0)
             return [];
 
-        int outputFrames = Math.Max(1, (int)Math.Round(inputFrames * (NativeMixSampleRate / (double)format.SampleRate)));
+        long scaledFrames = checked((long)inputFrames * NativeMixSampleRate + rateRemainder);
+        int outputFrames = checked((int)(scaledFrames / format.SampleRate));
+        rateRemainder = scaledFrames % format.SampleRate;
+        if (outputFrames <= 0)
+            return [];
         float[] output = new float[outputFrames * NativeMixChannels];
         for (int frame = 0; frame < outputFrames; frame++)
         {
-            int sourceFrame = Math.Min(inputFrames - 1, (int)(frame * (format.SampleRate / (double)NativeMixSampleRate)));
-            float left = ReadSampleAsFloat(format, buffer, count, sourceFrame, 0);
+            double sourcePosition = outputFrames == 1
+                ? 0
+                : frame * (inputFrames - 1.0) / (outputFrames - 1.0);
+            int sourceFrame = Math.Min(inputFrames - 1, (int)sourcePosition);
+            int nextSourceFrame = Math.Min(inputFrames - 1, sourceFrame + 1);
+            float fraction = (float)(sourcePosition - sourceFrame);
+            float left = Lerp(
+                ReadSampleAsFloat(format, buffer, count, sourceFrame, 0),
+                ReadSampleAsFloat(format, buffer, count, nextSourceFrame, 0),
+                fraction);
             float right = format.Channels == 1
                 ? left
-                : ReadSampleAsFloat(format, buffer, count, sourceFrame, 1);
+                : Lerp(
+                    ReadSampleAsFloat(format, buffer, count, sourceFrame, 1),
+                    ReadSampleAsFloat(format, buffer, count, nextSourceFrame, 1),
+                    fraction);
             output[frame * NativeMixChannels] = left;
             output[frame * NativeMixChannels + 1] = right;
         }
 
         return output;
     }
+
+    private static float Lerp(float start, float end, float amount) =>
+        start + (end - start) * amount;
 
     private static float ReadSampleAsFloat(WaveFormat format, byte[] buffer, int count, int frame, int channel)
     {

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -10,15 +9,19 @@ namespace EventCapture.Core.Capture;
 
 public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudioSink
 {
+    private const long FinalizeReserveBytes = 256L * 1024 * 1024;
     private readonly int _fps;
     private readonly SafeVideoEngineHandle _handle;
     private readonly string _sessionDirectory;
     private long _startTimestamp;
     private string? _continuousRawPath;
+    private string? _continuousFinalPath;
+    private string? _continuousReservePath;
     private long _continuousAudioWriteCount;
     private long _continuousAudioWriteBytes;
     private long _continuousAudioLastTimestamp100ns = -1;
     private long _continuousAudioLastLogTimestamp;
+    private long _continuousStartedTimestamp;
     private bool _disposed;
 
     public GpuCapturePipeline(
@@ -91,33 +94,68 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         return (outputPath, elapsedMilliseconds, _startTimestamp + startMilliseconds);
     }
 
-    public void StartContinuousRecording(WaveFormat? audioFormat)
+    public void StartContinuousRecording(
+        string outputFolder,
+        WaveFormat? audioFormat)
     {
         ThrowIfDisposed();
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
         if (_continuousRawPath is not null)
             throw new InvalidOperationException("Continuous video recording is already active.");
-        string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.mp4");
+        var paths = CreateContinuousRecordingPaths(outputFolder);
+        CreateFinalizeReserve(paths.ReservePath);
         NativeAudioStreamConfig audioConfig = NativeAudioStreamConfig.From(audioFormat);
         NativeAudioStreamConfig disabledConfig = default;
-        ThrowIfFailed(NativeMethods.StartRecordingWithAudio(_handle, path, ref audioConfig, ref disabledConfig), _handle);
+        try
+        {
+            ThrowIfFailed(
+                NativeMethods.StartRecordingWithAudio(
+                    _handle,
+                    paths.PartPath,
+                    ref audioConfig,
+                    ref disabledConfig),
+                _handle);
+        }
+        catch
+        {
+            TryDelete(paths.ReservePath);
+            TryDelete(paths.PartPath);
+            throw;
+        }
         _continuousAudioWriteCount = 0;
         _continuousAudioWriteBytes = 0;
         _continuousAudioLastTimestamp100ns = -1;
         _continuousAudioLastLogTimestamp = 0;
-        AppLogger.Info($"Native combined recording audio stream started | Path={path} | AudioFormat={audioFormat}");
-        _continuousRawPath = path;
+        AppLogger.Info($"Native combined recording audio stream started | PartPath={paths.PartPath} | FinalPath={paths.FinalPath} | ReservePath={paths.ReservePath} | AudioFormat={audioFormat}");
+        _continuousRawPath = paths.PartPath;
+        _continuousFinalPath = paths.FinalPath;
+        _continuousReservePath = paths.ReservePath;
+        _continuousStartedTimestamp = Environment.TickCount64;
     }
 
-    public void StartContinuousRecording()
+    public void StartContinuousRecording(string outputFolder)
     {
         ThrowIfDisposed();
         if (!IsRunning) throw new InvalidOperationException("GPU capture pipeline is not running.");
         if (_continuousRawPath is not null)
             throw new InvalidOperationException("Continuous video recording is already active.");
-        string path = Path.Combine(_sessionDirectory, $"recording-{Guid.NewGuid():N}.mp4");
-        ThrowIfFailed(NativeMethods.StartRecording(_handle, path), _handle);
-        _continuousRawPath = path;
+        var paths = CreateContinuousRecordingPaths(outputFolder);
+        CreateFinalizeReserve(paths.ReservePath);
+        try
+        {
+            ThrowIfFailed(NativeMethods.StartRecording(_handle, paths.PartPath), _handle);
+        }
+        catch
+        {
+            TryDelete(paths.ReservePath);
+            TryDelete(paths.PartPath);
+            throw;
+        }
+        _continuousRawPath = paths.PartPath;
+        _continuousFinalPath = paths.FinalPath;
+        _continuousReservePath = paths.ReservePath;
+        _continuousStartedTimestamp = Environment.TickCount64;
+        AppLogger.Info($"Native video recording started | PartPath={paths.PartPath} | FinalPath={paths.FinalPath} | ReservePath={paths.ReservePath}");
     }
 
     public async Task<ContinuousVideoResult> StopContinuousRecordingAsync(
@@ -126,13 +164,48 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         ThrowIfDisposed();
         string nativeMp4Path = _continuousRawPath
             ?? throw new InvalidOperationException("Continuous video recording is not active.");
+        string outputPath = _continuousFinalPath
+            ?? throw new InvalidOperationException("Continuous recording final path is unavailable.");
+        long continuousStartedTimestamp = _continuousStartedTimestamp;
+        ReleaseFinalizeReserve();
         var export = NativeExportResult.Create();
-        ThrowIfFailed(NativeMethods.StopRecording(_handle, ref export), _handle);
-        AppLogger.Info($"Native combined recording audio stream stopped | Writes={_continuousAudioWriteCount} | Bytes={_continuousAudioWriteBytes} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns}");
-        _continuousRawPath = null;
-        string outputPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
-        double exportFps = CalculateExportFps(export);
+        Exception? finalizeFailure = null;
+        try
+        {
+            ThrowIfFailed(NativeMethods.StopRecording(_handle, ref export), _handle);
+        }
+        catch (Exception ex)
+        {
+            finalizeFailure = ex;
+            AppLogger.Error(nameof(GpuCapturePipeline), $"Fragmented MP4 finalize failed; preserving playable fragments: {ex}");
+        }
+        finally
+        {
+            _continuousRawPath = null;
+            _continuousFinalPath = null;
+            _continuousStartedTimestamp = 0;
+        }
+
+        if (!File.Exists(nativeMp4Path) || new FileInfo(nativeMp4Path).Length == 0)
+            throw finalizeFailure ?? new InvalidOperationException("Continuous recording produced an empty file.");
+
         await Task.Run(() => File.Move(nativeMp4Path, outputPath, true));
+        if (finalizeFailure is not null)
+        {
+            GpuCaptureStats stats = GetStats();
+            long recoveredStart = continuousStartedTimestamp > 0
+                ? continuousStartedTimestamp
+                : _startTimestamp;
+            export.StartTimestamp100ns = Math.Max(0, recoveredStart - _startTimestamp) * 10_000;
+            export.EndTimestamp100ns = Math.Max(
+                export.StartTimestamp100ns + 1,
+                (Environment.TickCount64 - _startTimestamp) * 10_000);
+            export.FrameCount = stats.EncodedFrames;
+            AppLogger.Info($"Fragmented MP4 recovered without finalization | Path={outputPath} | Bytes={new FileInfo(outputPath).Length}");
+        }
+
+        AppLogger.Info($"Native combined recording audio stream stopped | Writes={_continuousAudioWriteCount} | Bytes={_continuousAudioWriteBytes} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns}");
+        double exportFps = CalculateExportFps(export);
 
         LogExportDiagnostics(
             "Continuous",
@@ -194,10 +267,13 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
 
     public void Stop()
     {
-        if (_handle.IsInvalid || _handle.IsClosed || !IsRunning) return;
-        NativeMethods.StopVideoEngine(_handle);
+        if (!_handle.IsInvalid && !_handle.IsClosed && IsRunning)
+            NativeMethods.StopVideoEngine(_handle);
         IsRunning = false;
+        ReleaseFinalizeReserve();
         _continuousRawPath = null;
+        _continuousFinalPath = null;
+        _continuousStartedTimestamp = 0;
     }
 
     public void Dispose()
@@ -249,31 +325,6 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             $"OutputBytes={outputBytes}");
     }
 
-    private static async Task RemuxH264Async(string inputPath, string outputPath, double fps)
-    {
-        string ffmpegPath = FfmpegLocator.GetFfmpegPath();
-        string fpsText = fps.ToString("0.###", CultureInfo.InvariantCulture);
-        string arguments =
-            $"-y -hide_banner -loglevel error -fflags +genpts -r {fpsText} " +
-            $"-i \"{inputPath}\" -c:v copy -movflags +faststart \"{outputPath}\"";
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            }
-        };
-        process.Start();
-        string error = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
-            throw new InvalidOperationException($"H.264 remux failed: {error}");
-    }
-
     private static IntPtr ResolveTarget(string captureTarget)
     {
         if (captureTarget.StartsWith("Window|", StringComparison.Ordinal))
@@ -290,6 +341,97 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             throw new InvalidOperationException("The selected monitor is no longer available.");
 
         return monitor;
+    }
+
+    private static (string PartPath, string FinalPath, string ReservePath)
+        CreateContinuousRecordingPaths(string outputFolder)
+    {
+        Directory.CreateDirectory(outputFolder);
+        string finalPath = OutputFileName.Create(outputFolder, "Record", ".mp4");
+        string sessionFolder = Path.Combine(outputFolder, ".skadi-session");
+        Directory.CreateDirectory(sessionFolder);
+        try
+        {
+            File.SetAttributes(
+                sessionFolder,
+                File.GetAttributes(sessionFolder) | FileAttributes.Hidden);
+        }
+        catch
+        {
+        }
+
+        string token = Guid.NewGuid().ToString("N");
+        string partPath = Path.Combine(
+            sessionFolder,
+            $"{Path.GetFileNameWithoutExtension(finalPath)}-{token}.part.mp4");
+        string reservePath = Path.Combine(sessionFolder, $"{token}.finalize-reserve");
+        return (partPath, finalPath, reservePath);
+    }
+
+    public static void RecoverInterruptedRecordings(string outputFolder)
+    {
+        try
+        {
+            string sessionFolder = Path.Combine(outputFolder, ".skadi-session");
+            if (!Directory.Exists(sessionFolder)) return;
+
+            foreach (string reservePath in Directory.EnumerateFiles(sessionFolder, "*.finalize-reserve"))
+            {
+                TryDelete(reservePath);
+                AppLogger.Info($"Stale recording finalize reserve removed | Path={reservePath}");
+            }
+
+            foreach (string partPath in Directory.EnumerateFiles(sessionFolder, "*.part.mp4"))
+            {
+                try
+                {
+                    var info = new FileInfo(partPath);
+                    if (info.Length == 0)
+                    {
+                        TryDelete(partPath);
+                        continue;
+                    }
+
+                    string recoveredPath = OutputFileName.Create(
+                        outputFolder,
+                        "Recovered Record",
+                        ".mp4",
+                        info.LastWriteTime);
+                    File.Move(partPath, recoveredPath);
+                    AppLogger.Info($"Interrupted fragmented MP4 recovered | Source={partPath} | Path={recoveredPath} | Bytes={info.Length}");
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error(nameof(GpuCapturePipeline), $"Interrupted recording recovery failed | Path={partPath} | Error={ex}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(GpuCapturePipeline), $"Interrupted recording scan failed | Folder={outputFolder} | Error={ex}");
+        }
+    }
+
+    private static void CreateFinalizeReserve(string reservePath)
+    {
+        using var reserve = new FileStream(
+            reservePath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 4096,
+            FileOptions.WriteThrough);
+        reserve.SetLength(FinalizeReserveBytes);
+        reserve.Flush(flushToDisk: true);
+    }
+
+    private void ReleaseFinalizeReserve()
+    {
+        string? reservePath = _continuousReservePath;
+        _continuousReservePath = null;
+        if (string.IsNullOrWhiteSpace(reservePath)) return;
+        TryDelete(reservePath);
+        AppLogger.Info($"Recording finalize reserve released | Path={reservePath} | Bytes={FinalizeReserveBytes}");
     }
 
     private static void ThrowIfFailed(NativeResult result, SafeVideoEngineHandle? handle)

@@ -108,6 +108,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _hotkeys = hotkeys;
         _notifications = notifications;
         _overlay = overlay;
+        _capture.ContinuousRecordingStopping += OnContinuousRecordingStopping;
         _capture.ContinuousRecordingStopped += OnContinuousRecordingStopped;
         _toggleUi = toggleUi;
         _ = exit;
@@ -1253,6 +1254,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private void OnContinuousRecordingStopping(object? sender, EventArgs eventArgs)
+    {
+        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            _isRecordStateChanging = true;
+            IsContinuousRecording = false;
+            AppLogger.Info(
+                $"UI state | Action=Recording forced-stop-started | Buffer={BufferEnabled} | " +
+                $"CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
+        });
+    }
+
     private void OnContinuousRecordingStopped(object? sender, ContinuousRecordingStoppedEventArgs eventArgs)
     {
         _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
@@ -1749,6 +1762,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         StopDisplayChangeMonitoring();
         _screenshotSelection.Dispose();
         ScreenCapturer.ReleaseScreenshotCaptureResources();
+        _capture.ContinuousRecordingStopping -= OnContinuousRecordingStopping;
         _capture.ContinuousRecordingStopped -= OnContinuousRecordingStopped;
 
         StopAudioDeviceMonitoring();

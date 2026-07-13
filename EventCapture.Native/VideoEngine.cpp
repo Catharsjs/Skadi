@@ -1125,6 +1125,7 @@ namespace EventCaptureNative
                 writerLock.unlock();
 
                 ThrowIfFailed(writer->Finalize());
+                ReleaseRecordingWriterNoThrow();
 
                 result.startTimestamp100ns = start100ns;
                 result.endTimestamp100ns = end100ns;
@@ -1390,17 +1391,43 @@ namespace EventCaptureNative
                                 monitorQueueMaxDepth_.load(),
                                 static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
 
-                            if (queuedMonitorFrameSlots_.size() >= monitorFrameSlots_.size())
+                            size_t slotIndex = std::numeric_limits<size_t>::max();
+                            for (size_t attempt = 0; attempt < monitorFrameSlots_.size(); ++attempt)
                             {
-                                queuedMonitorFrameSlots_.pop_front();
-                                monitorQueueOverflowFrames_.fetch_add(1);
-                                droppedFrames_.fetch_add(1);
+                                const size_t candidate = nextMonitorFrameSlot_;
+                                nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+                                if (!monitorFrameSlots_[candidate].queued && !monitorFrameSlots_[candidate].encoding)
+                                {
+                                    slotIndex = candidate;
+                                    break;
+                                }
                             }
 
-                            const size_t slotIndex = nextMonitorFrameSlot_;
-                            nextMonitorFrameSlot_ = (nextMonitorFrameSlot_ + 1) % monitorFrameSlots_.size();
+                            while (slotIndex == std::numeric_limits<size_t>::max() &&
+                                   !queuedMonitorFrameSlots_.empty())
+                            {
+                                const size_t candidate = queuedMonitorFrameSlots_.front();
+                                queuedMonitorFrameSlots_.pop_front();
+                                if (candidate < monitorFrameSlots_.size() &&
+                                    !monitorFrameSlots_[candidate].encoding)
+                                {
+                                    monitorFrameSlots_[candidate].queued = false;
+                                    slotIndex = candidate;
+                                    break;
+                                }
+                            }
+
+                            if (slotIndex == std::numeric_limits<size_t>::max())
+                            {
+                                monitorQueueOverflowFrames_.fetch_add(1);
+                                droppedFrames_.fetch_add(1);
+                                return;
+                            }
+
                             context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture.Get());
                             monitorFrameSlots_[slotIndex].captureTimestamp100ns = captureTimestamp100ns;
+                            monitorFrameSlots_[slotIndex].queued = true;
+                            monitorFrameSlots_[slotIndex].encoding = false;
                             queuedMonitorFrameSlots_.push_back(slotIndex);
                             monitorQueueMaxDepth_.store(std::max<uint64_t>(
                                 monitorQueueMaxDepth_.load(),
@@ -1583,6 +1610,11 @@ namespace EventCaptureNative
 
                     ThrowIfFailed(result);
                     frameAcquired = true;
+
+                    if (frameInfo.LastPresentTime.QuadPart == 0)
+                    {
+                        continue;
+                    }
 
                     ComPtr<ID3D11Texture2D> texture;
                     ThrowIfFailed(resource.As(&texture));
@@ -2716,9 +2748,6 @@ namespace EventCaptureNative
             ThrowIfFailed(MFCreateAttributes(&attributes, 1));
             ThrowIfFailed(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
 
-            ComPtr<IMFSinkWriter> writer;
-            ThrowIfFailed(MFCreateSinkWriterFromURL(path, nullptr, attributes.Get(), &writer));
-
             ComPtr<IMFMediaType> outputType;
             ThrowIfFailed(MFCreateMediaType(&outputType));
             ThrowIfFailed(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
@@ -2730,26 +2759,86 @@ namespace EventCaptureNative
             ThrowIfFailed(MFSetAttributeRatio(outputType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1));
             ConfigureSdrBt709ColorMetadata(outputType.Get());
 
-            DWORD streamIndex = 0;
-            ThrowIfFailed(writer->AddStream(outputType.Get(), &streamIndex));
-            ThrowIfFailed(writer->SetInputMediaType(streamIndex, outputType.Get(), nullptr));
-
             recordingAudioEnabled_[0] = false;
             recordingAudioEnabled_[1] = false;
             recordingAudioStreamIndex_[0] = static_cast<DWORD>(-1);
             recordingAudioStreamIndex_[1] = static_cast<DWORD>(-1);
-            AddRecordingAudioStream(writer.Get(), systemAudio, 0);
-            AddRecordingAudioStream(writer.Get(), microphoneAudio, 1);
+
+            const EcAudioStreamConfig* audioConfig = nullptr;
+            int audioConfigIndex = -1;
+            if (systemAudio != nullptr && systemAudio->enabled != 0)
+            {
+                audioConfig = systemAudio;
+                audioConfigIndex = 0;
+            }
+            else if (microphoneAudio != nullptr && microphoneAudio->enabled != 0)
+            {
+                audioConfig = microphoneAudio;
+                audioConfigIndex = 1;
+            }
+
+            ComPtr<IMFMediaType> audioOutputType;
+            if (audioConfig != nullptr)
+            {
+                const UINT32 sampleRate = audioConfig->sampleRate;
+                const UINT32 channels = audioConfig->channels;
+                ThrowIfFailed(MFCreateMediaType(&audioOutputType));
+                ThrowIfFailed(audioOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
+                ThrowIfFailed(audioOutputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
+                ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels));
+                ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate));
+                ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16));
+                ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24'000));
+            }
+
+            ComPtr<IMFByteStream> byteStream;
+            ThrowIfFailed(MFCreateFile(
+                MF_ACCESSMODE_WRITE,
+                MF_OPENMODE_DELETE_IF_EXIST,
+                MF_FILEFLAGS_NONE,
+                path,
+                &byteStream));
+
+            ComPtr<IMFMediaSink> mediaSink;
+            ThrowIfFailed(MFCreateFMPEG4MediaSink(
+                byteStream.Get(),
+                outputType.Get(),
+                audioOutputType.Get(),
+                &mediaSink));
+
+            ComPtr<IMFSinkWriter> writer;
+            ThrowIfFailed(MFCreateSinkWriterFromMediaSink(
+                mediaSink.Get(),
+                attributes.Get(),
+                &writer));
+
+            constexpr DWORD videoStreamIndex = 0;
+            ThrowIfFailed(writer->SetInputMediaType(videoStreamIndex, outputType.Get(), nullptr));
+
+            if (audioConfig != nullptr)
+            {
+                constexpr DWORD audioStreamIndex = 1;
+                ConfigureRecordingAudioInput(
+                    writer.Get(),
+                    audioConfig,
+                    audioConfigIndex,
+                    audioStreamIndex);
+            }
 
             ThrowIfFailed(writer->BeginWriting());
 
             recordingWriter_ = writer;
-            recordingStreamIndex_ = streamIndex;
-            LogNative(L"MP4 encoded sample writer started.");
+            recordingMediaSink_ = mediaSink;
+            recordingByteStream_ = byteStream;
+            recordingStreamIndex_ = videoStreamIndex;
+            LogNative(L"Fragmented MP4 encoded sample writer started.");
         }
 
-
-        void AddRecordingAudioStream(IMFSinkWriter* writer, const EcAudioStreamConfig* config, int index)
+        void ConfigureRecordingAudioInput(
+            IMFSinkWriter* writer,
+            const EcAudioStreamConfig* config,
+            int index,
+            DWORD streamIndex)
         {
             if (writer == nullptr || config == nullptr || config->enabled == 0) return;
             if (config->sampleRate == 0 || config->channels == 0 || config->bitsPerSample == 0) return;
@@ -2759,18 +2848,6 @@ namespace EventCaptureNative
             const UINT32 bitsPerSample = config->bitsPerSample;
             const UINT32 blockAlign = channels * bitsPerSample / 8;
             const UINT32 avgBytesPerSecond = sampleRate * blockAlign;
-
-            ComPtr<IMFMediaType> outputType;
-            ThrowIfFailed(MFCreateMediaType(&outputType));
-            ThrowIfFailed(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
-            ThrowIfFailed(outputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
-            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels));
-            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate));
-            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16));
-            ThrowIfFailed(outputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24'000));
-
-            DWORD streamIndex = 0;
-            ThrowIfFailed(writer->AddStream(outputType.Get(), &streamIndex));
 
             ComPtr<IMFMediaType> inputType;
             ThrowIfFailed(MFCreateMediaType(&inputType));
@@ -2805,6 +2882,16 @@ namespace EventCaptureNative
                 }
             }
             catch (...) {}
+            try
+            {
+                if (recordingMediaSink_ != nullptr)
+                {
+                    recordingMediaSink_->Shutdown();
+                    recordingMediaSink_.Reset();
+                }
+            }
+            catch (...) {}
+            recordingByteStream_.Reset();
         }
 
         static void SetStreamingSampleTiming(
@@ -3125,53 +3212,54 @@ namespace EventCaptureNative
             {
                 LogNative(L"EncodeLoop started.");
                 const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
-                const bool useDesktopDuplicationScheduler =
-                    config_.targetKind == EcTargetKind::Monitor &&
-                    captureBackend_ == CaptureBackend::DesktopDuplication;
+                const bool useMonitorCfrScheduler =
+                    config_.targetKind == EcTargetKind::Monitor;
                 const auto fixedFrameInterval =
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::nanoseconds(frameDuration * 100));
                 int64_t nextFrameDue100ns = -1;
-                int64_t lastDesktopDuplicationSubmit100ns = -1;
-                std::chrono::steady_clock::time_point desktopDuplicationClockStart{};
-                std::chrono::steady_clock::time_point nextDesktopDuplicationWake{};
+                uint64_t monitorCfrFrameIndex = 0;
+                std::chrono::steady_clock::time_point nextMonitorCfrWake{};
                 uint64_t lastEncodedTextureVersion = 0;
-                size_t lastDesktopDuplicationSlot = std::numeric_limits<size_t>::max();
+                size_t lastMonitorCfrSlot = std::numeric_limits<size_t>::max();
 
                 while (running_)
                 {
                     bool framePrepared = false;
-                    bool selectedDesktopDuplicationSlot = false;
+                    bool selectedMonitorCfrSlot = false;
                     size_t selectedSlotIndex = std::numeric_limits<size_t>::max();
                     uint64_t preparedTextureVersion = 0;
                     int64_t preparedCaptureTimestamp100ns = 0;
                     ComPtr<ID3D11Texture2D> preparedEncoderTexture;
                     ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
 
-                    if (useDesktopDuplicationScheduler)
+                    if (useMonitorCfrScheduler)
                     {
                         {
                             std::unique_lock lock(textureMutex_);
-                            if (nextDesktopDuplicationWake == std::chrono::steady_clock::time_point{})
+                            if (nextMonitorCfrWake == std::chrono::steady_clock::time_point{})
                             {
                                 frameCondition_.wait(lock, [this]
                                     {
                                         return !running_ || !queuedMonitorFrameSlots_.empty();
-                                    });
+                                });
                                 if (!running_) break;
-                                desktopDuplicationClockStart = std::chrono::steady_clock::now();
-                                nextDesktopDuplicationWake = desktopDuplicationClockStart;
+                                nextMonitorCfrWake = std::chrono::steady_clock::now();
                             }
                             else
                             {
                                 lock.unlock();
-                                nextDesktopDuplicationWake += fixedFrameInterval;
+                                nextMonitorCfrWake += fixedFrameInterval;
                                 const auto now = std::chrono::steady_clock::now();
-                                if (nextDesktopDuplicationWake + fixedFrameInterval < now)
+                                if (nextMonitorCfrWake + fixedFrameInterval < now)
                                 {
-                                    nextDesktopDuplicationWake = now;
+                                    const auto lateBy = now - nextMonitorCfrWake;
+                                    const auto skippedSlots = static_cast<uint64_t>(lateBy / fixedFrameInterval);
+                                    monitorCfrFrameIndex += skippedSlots;
+                                    droppedFrames_.fetch_add(skippedSlots);
+                                    nextMonitorCfrWake += fixedFrameInterval * skippedSlots;
                                 }
-                                std::this_thread::sleep_until(nextDesktopDuplicationWake);
+                                std::this_thread::sleep_until(nextMonitorCfrWake);
                                 lock.lock();
                                 if (!running_) break;
                             }
@@ -3197,27 +3285,24 @@ namespace EventCaptureNative
 
                             if (selectedSlotIndex == std::numeric_limits<size_t>::max())
                             {
-                                if (lastDesktopDuplicationSlot == std::numeric_limits<size_t>::max() ||
-                                    lastDesktopDuplicationSlot >= monitorFrameSlots_.size() ||
-                                    monitorFrameSlots_[lastDesktopDuplicationSlot].encoding)
+                                if (lastMonitorCfrSlot == std::numeric_limits<size_t>::max() ||
+                                    lastMonitorCfrSlot >= monitorFrameSlots_.size() ||
+                                    monitorFrameSlots_[lastMonitorCfrSlot].encoding)
                                 {
                                     continue;
                                 }
 
-                                selectedSlotIndex = lastDesktopDuplicationSlot;
+                                selectedSlotIndex = lastMonitorCfrSlot;
                                 monitorFrameSlots_[selectedSlotIndex].encoding = true;
                             }
 
-                            lastDesktopDuplicationSlot = selectedSlotIndex;
+                            lastMonitorCfrSlot = selectedSlotIndex;
                             selectedProcessorInput = monitorFrameSlots_[selectedSlotIndex].inputView;
-                            const auto timestampNow = std::chrono::steady_clock::now();
-                            const int64_t elapsedTimestamp100ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                timestampNow - desktopDuplicationClockStart).count() / 100;
-                            preparedCaptureTimestamp100ns = std::max<int64_t>(
-                                elapsedTimestamp100ns,
-                                lastDesktopDuplicationSubmit100ns >= 0 ? lastDesktopDuplicationSubmit100ns + 1 : 0);
+                            preparedCaptureTimestamp100ns =
+                                static_cast<int64_t>(monitorCfrFrameIndex) * frameDuration;
+                            ++monitorCfrFrameIndex;
                             preparedTextureVersion = textureVersion_;
-                            selectedDesktopDuplicationSlot = true;
+                            selectedMonitorCfrSlot = true;
                         }
 
                         if (selectedProcessorInput == nullptr) continue;
@@ -3228,7 +3313,7 @@ namespace EventCaptureNative
                         const auto blitStart = std::chrono::steady_clock::now();
                         const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
                         const double blitMs = ElapsedMilliseconds(blitStart);
-                        LogNativeTimingIfSlow(L"DDA v2 VideoProcessorBlt", blitMs, 10.0);
+                        LogNativeTimingIfSlow(L"Monitor CFR VideoProcessorBlt", blitMs, 10.0);
                         if (FAILED(blit))
                         {
                             SetError(HResultMessage(blit));
@@ -3237,11 +3322,11 @@ namespace EventCaptureNative
                         {
                             const auto prepareStart = std::chrono::steady_clock::now();
                             preparedEncoderTexture = PrepareEncoderInputTexture();
-                            LogNativeTimingIfSlow(L"DDA v2 PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
+                            LogNativeTimingIfSlow(L"Monitor CFR PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
                             framePrepared = true;
                         }
 
-                        if (selectedDesktopDuplicationSlot)
+                        if (selectedMonitorCfrSlot)
                         {
                             std::scoped_lock lock(textureMutex_);
                             if (selectedSlotIndex < monitorFrameSlots_.size())
@@ -3319,7 +3404,7 @@ namespace EventCaptureNative
 
                     if (framePrepared)
                     {
-                        if (!useDesktopDuplicationScheduler)
+                        if (!useMonitorCfrScheduler)
                         {
                             if (nextFrameDue100ns < 0)
                             {
@@ -3344,7 +3429,7 @@ namespace EventCaptureNative
                         {
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
                             AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
-                            const int64_t submitTimestamp = useDesktopDuplicationScheduler
+                            const int64_t submitTimestamp = useMonitorCfrScheduler
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
                             const auto submitStart = std::chrono::steady_clock::now();
@@ -3354,17 +3439,13 @@ namespace EventCaptureNative
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             const double drainMs = ElapsedMilliseconds(drainStart);
-                            if (useDesktopDuplicationScheduler)
-                            {
-                                lastDesktopDuplicationSubmit100ns = submitTimestamp;
-                            }
                             if (submitMs >= 10.0 || drainMs >= 10.0)
                             {
                                 std::wstringstream details;
                                 details << L"SubmitMs=" << std::fixed << std::setprecision(2) << submitMs
                                     << L" | DrainMs=" << drainMs
                                     << L" | Async=" << asyncEncoder_
-                                    << L" | DdaV2=" << useDesktopDuplicationScheduler
+                                    << L" | MonitorCfr=" << useMonitorCfrScheduler
                                     << L" | Submitted=" << submittedFrames_.load()
                                     << L" | Encoded=" << encodedFrames_.load()
                                     << L" | Captured=" << capturedFrames_.load()
@@ -3377,11 +3458,39 @@ namespace EventCaptureNative
                         {
                             SetError(error.message().c_str());
                             droppedFrames_.fetch_add(1);
+                            bool recordingActive = false;
+                            {
+                                std::scoped_lock lock(packetMutex_);
+                                recordingActive = recording_ || recordingPending_;
+                            }
+                            if (recordingActive)
+                            {
+                                std::wstringstream message;
+                                message << L"Fatal recording writer/encoder HRESULT | Code=0x" << std::hex
+                                    << static_cast<uint32_t>(error.code())
+                                    << L" | Message=" << error.message().c_str();
+                                LogNative(message.str());
+                                running_ = false;
+                                frameCondition_.notify_all();
+                                break;
+                            }
                         }
                         catch (const std::exception& error)
                         {
                             SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                             droppedFrames_.fetch_add(1);
+                            bool recordingActive = false;
+                            {
+                                std::scoped_lock lock(packetMutex_);
+                                recordingActive = recording_ || recordingPending_;
+                            }
+                            if (recordingActive)
+                            {
+                                LogNative(L"Fatal recording writer/encoder exception | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                                running_ = false;
+                                frameCondition_.notify_all();
+                                break;
+                            }
                         }
                     }
                 }
@@ -3520,7 +3629,7 @@ namespace EventCaptureNative
             int64_t timestamp = CurrentTimestamp100ns();
             int64_t duration = configuredFrameDuration;
 
-            if (captureBackend_ == CaptureBackend::DesktopDuplication)
+            if (config_.targetKind == EcTargetKind::Monitor)
             {
                 int64_t sampleTimestamp = 0;
                 if (SUCCEEDED(sample->GetSampleTime(&sampleTimestamp)))
@@ -3593,7 +3702,7 @@ namespace EventCaptureNative
             frame.storageOffset = static_cast<uint64_t>(position);
             frame.storageLength = static_cast<uint32_t>(frame.bytes.size());
             bufferedBytes_.fetch_add(size);
-            if (captureBackend_ == CaptureBackend::DesktopDuplication && !packets_.empty())
+            if (config_.targetKind == EcTargetKind::Monitor && !packets_.empty())
             {
                 packets_.back().duration100ns = std::max<int64_t>(
                     1,
@@ -4102,6 +4211,8 @@ namespace EventCaptureNative
         std::vector<EncodedFrame> recordingFrames_;
         std::ofstream recordingStream_;
         ComPtr<IMFSinkWriter> recordingWriter_;
+        ComPtr<IMFMediaSink> recordingMediaSink_;
+        ComPtr<IMFByteStream> recordingByteStream_;
         DWORD recordingStreamIndex_{};
         DWORD recordingAudioStreamIndex_[2]{ static_cast<DWORD>(-1), static_cast<DWORD>(-1) };
         bool recordingAudioEnabled_[2]{ false, false };

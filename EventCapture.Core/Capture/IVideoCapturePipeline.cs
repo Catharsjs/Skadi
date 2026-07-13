@@ -12,7 +12,7 @@ public interface IVideoCapturePipeline : IDisposable
     Task<(string videoPath, long videoElapsedMs, long videoStartTimestamp)>
         SaveLastSecondsAsync(string outputFolder, int seconds);
 
-    void StartContinuousRecording();
+    void StartContinuousRecording(string outputFolder);
 
     Task<ContinuousVideoResult> StopContinuousRecordingAsync(string outputFolder);
 

@@ -9,7 +9,7 @@ namespace EventCapture.App.Services;
 public sealed class CaptureCoordinator : IAsyncDisposable
 {
     private const long MinimumRecordingFreeDiskBytes = 2L * 1024 * 1024 * 1024;
-    private static readonly TimeSpan RecordingDiskMonitorInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RecordingDiskMonitorInterval = TimeSpan.FromSeconds(1);
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private readonly SemaphoreSlim _continuousLock = new(1, 1);
@@ -22,6 +22,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private Task? _recordingPerformanceTask;
     private bool _continuousNativeCombined;
 
+    public event EventHandler? ContinuousRecordingStopping;
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
     public bool IsCapturingWindow => false;
@@ -116,6 +117,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             if (IsContinuousRecording)
                 throw new InvalidOperationException("Continuous recording is already active.");
 
+            GpuCapturePipeline.RecoverInterruptedRecordings(_settings.SaveFolder);
             EnsureSufficientRecordingDiskSpace(_settings, "StartRecording");
 
             await _pipelineLock.WaitAsync();
@@ -148,14 +150,16 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                         if (_audioRecorder is null)
                             throw new InvalidOperationException("Native combined recording is unavailable.");
 
-                        gpuPipeline.StartContinuousRecording(AudioRecorder.NativeContinuousMixFormat);
+                        gpuPipeline.StartContinuousRecording(
+                            _settings.SaveFolder,
+                            AudioRecorder.NativeContinuousMixFormat);
                         _audioRecorder.StartContinuousNativeStreaming(gpuPipeline);
                         _continuousNativeCombined = true;
                     }
                     else
                     {
                         AppLogger.Info("Coordinator state | Action=StartRecording combined-video-only | AudioSources=disabled");
-                        gpuPipeline.StartContinuousRecording();
+                        gpuPipeline.StartContinuousRecording(_settings.SaveFolder);
                     }
                 }
                 else
@@ -165,7 +169,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                             .StartContinuousRecording();
                     if (wantsVideo)
                         (_videoPipeline ?? throw new InvalidOperationException("Video pipeline is unavailable."))
-                            .StartContinuousRecording();
+                            .StartContinuousRecording(_settings.SaveFolder);
                 }
 
                 IsContinuousRecording = true;
@@ -451,6 +455,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                     continue;
 
                 AppLogger.Info($"Recording stopped, disk is full | {detail}");
+                ContinuousRecordingStopping?.Invoke(this, EventArgs.Empty);
                 string? path = null;
                 Exception? failure = null;
 
@@ -540,7 +545,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private static IEnumerable<string> GetRecordingStoragePaths(AppSettings settings)
     {
         yield return settings.SaveFolder;
-        yield return Path.GetTempPath();
     }
 
     private static void CleanupRecordingTempFiles(string folder)
@@ -750,10 +754,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
                     if (!stats.IsRunning && stats.IsRecording)
                     {
-                        AppLogger.Info($"Reload (Targets updated) | Active recording pipeline stopped | {videoDetail}");
+                        AppLogger.Info($"Recording stopped unexpectedly | Active recording pipeline failed | {videoDetail}");
                         await ForceStopContinuousRecordingAsync(
-                            "Reload (Targets updated)",
-                            "The active recording pipeline stopped after display topology changed.");
+                            "Recording stopped unexpectedly",
+                            "The active video encoder or file writer stopped.");
                         break;
                     }
                 }
@@ -798,6 +802,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             return;
 
         AppLogger.Info($"{message} | Forced recording stop requested | {detail} | Current={DescribeState()}");
+        ContinuousRecordingStopping?.Invoke(this, EventArgs.Empty);
 
         string? path = null;
         Exception? failure = null;
