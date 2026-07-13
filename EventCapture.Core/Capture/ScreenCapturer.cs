@@ -624,7 +624,7 @@ public class ScreenCapturer : IDisposable
 
                 SharpDX.Result acquireResult = duplication.TryAcquireNextFrame(
                     Math.Min(100, remainingMilliseconds),
-                    out OutputDuplicateFrameInformation _,
+                    out OutputDuplicateFrameInformation frameInformation,
                     out desktopResource);
 
                 if (acquireResult.Code == DxgiErrorWaitTimeout)
@@ -639,6 +639,13 @@ public class ScreenCapturer : IDisposable
                 }
 
                 frameAcquired = true;
+
+                if (frameInformation.LastPresentTime == 0)
+                {
+                    AppLogger.Info(
+                        $"DDA screenshot frame skipped | Device={monitor.DeviceName} | Reason=NoDesktopPresent | AccumulatedFrames={frameInformation.AccumulatedFrames} | ElapsedMs={stopwatch.ElapsedMilliseconds}");
+                    continue;
+                }
 
                 using (SharpDX.Direct3D11.Texture2D texture =
                        desktopResource.QueryInterface<SharpDX.Direct3D11.Texture2D>())
