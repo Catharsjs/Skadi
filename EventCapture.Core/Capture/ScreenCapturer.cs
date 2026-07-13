@@ -19,6 +19,11 @@ namespace EventCapture.Core.Capture;
 [ComVisible(true)]
 interface IGraphicsCaptureItemInterop
 {
+    // Keep the native vtable order even though window capture is not supported.
+    IntPtr CreateForWindow(
+        [In] IntPtr window,
+        [In] ref Guid iid);
+
     IntPtr CreateForMonitor(
         [In] IntPtr monitor,
         [In] ref Guid iid);
@@ -40,6 +45,9 @@ public class ScreenCapturer : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBoolDelegate(IntPtr thisPtr, byte value);
     private static readonly Guid GraphicsCaptureItemGuid = new("79C3F95B-31F7-4EC2-A464-632EF5D30760");
+    private static readonly object ScreenshotWgcDeviceSync = new();
+    private static SharpDX.Direct3D11.Device? _screenshotD3dDevice;
+    private static IDirect3DDevice? _screenshotWinRtDevice;
     private readonly VideoEncoder _encoder;
     private readonly int _fps;
     private readonly string _captureTarget;
@@ -421,9 +429,10 @@ public class ScreenCapturer : IDisposable
                 throw new Exception($"RoGetActivationFactory failed: 0x{result:X8}");
             }
 
+            IGraphicsCaptureItemInterop? interop = null;
             try
             {
-                var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPointer);
+                interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPointer);
                 var itemGuid = GraphicsCaptureItemGuid;
                 var itemPointer = interop.CreateForMonitor(monitorHandle, ref itemGuid);
 
@@ -442,6 +451,11 @@ public class ScreenCapturer : IDisposable
             }
             finally
             {
+                if (interop is not null &&
+                    Marshal.IsComObject(interop))
+                {
+                    Marshal.ReleaseComObject(interop);
+                }
                 Marshal.Release(factoryPointer);
             }
         }
@@ -485,12 +499,15 @@ public class ScreenCapturer : IDisposable
 
     private static IntPtr ResolveMonitorHandle(string captureTarget)
     {
-        var monitor =
-            DisplayMonitorService.Resolve(captureTarget);
+        DisplayMonitor monitor = DisplayMonitorService.Resolve(captureTarget);
 
-        return DisplayMonitorService.MonitorFromPoint(
-            monitor.Bounds.Left + 1,
-            monitor.Bounds.Top + 1);
+        if (monitor.Handle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                $"The selected monitor is no longer available: {monitor.DeviceName}");
+        }
+
+        return monitor.Handle;
     }
 
     private static string NormalizeCaptureTarget(string captureTarget)
@@ -502,27 +519,286 @@ public class ScreenCapturer : IDisposable
     // ...) Створення GraphicsCaptureItem
 
     public static Bitmap? CaptureScreenshot(
-    string captureTarget,
-    int timeoutMilliseconds = 2000)
+        string captureTarget,
+        int timeoutMilliseconds = 2000)
     {
-        SharpDX.Direct3D11.Device? d3dDevice = null;
-        IDirect3DDevice? winRtDevice = null;
+        string normalizedTarget = NormalizeCaptureTarget(captureTarget);
+        bool useDesktopDuplication = IsWindows10DesktopDuplicationRequired();
+        string backend = useDesktopDuplication ? "DDA" : "WGC";
+
+        AppLogger.Info(
+            $"Screenshot backend selected | Backend={backend} | Target={normalizedTarget} | WindowsBuild={Environment.OSVersion.Version.Build}");
+
+        return useDesktopDuplication
+            ? CaptureScreenshotDesktopDuplication(normalizedTarget, timeoutMilliseconds)
+            : CaptureScreenshotWgc(normalizedTarget, timeoutMilliseconds);
+    }
+
+    private static bool IsWindows10DesktopDuplicationRequired()
+    {
+        Version version = Environment.OSVersion.Version;
+        return OperatingSystem.IsWindows() &&
+               version.Major == 10 &&
+               version.Build < 22000;
+    }
+
+    private static Bitmap? CaptureScreenshotDesktopDuplication(
+        string captureTarget,
+        int timeoutMilliseconds)
+    {
+        DisplayMonitor monitor = DisplayMonitorService.Resolve(captureTarget);
+
+        try
+        {
+            using var factory = new Factory1();
+
+            foreach (Adapter1 adapter in factory.Adapters1)
+            {
+                using (adapter)
+                {
+                    foreach (Output output in adapter.Outputs)
+                    {
+                        using (output)
+                        {
+                            OutputDescription description = output.Description;
+
+                            if (description.MonitorHandle != monitor.Handle)
+                                continue;
+
+                            AppLogger.Info(
+                                $"DDA screenshot output selected | Device={description.DeviceName} | Adapter={adapter.Description1.Description} | Bounds={monitor.Bounds} | Rotation={description.Rotation}");
+
+                            return CaptureDesktopDuplicationOutput(
+                                adapter,
+                                output,
+                                description.Rotation,
+                                monitor,
+                                timeoutMilliseconds);
+                        }
+                    }
+                }
+            }
+
+            AppLogger.Error(
+                nameof(ScreenCapturer),
+                $"DDA screenshot output was not found | Device={monitor.DeviceName} | Monitor=0x{monitor.Handle.ToInt64():X}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(ScreenCapturer),
+                $"DDA screenshot failed | Device={monitor.DeviceName} | {ex}");
+            return null;
+        }
+    }
+
+    private static Bitmap? CaptureDesktopDuplicationOutput(
+        Adapter1 adapter,
+        Output output,
+        DisplayModeRotation rotation,
+        DisplayMonitor monitor,
+        int timeoutMilliseconds)
+    {
+        const int DxgiErrorWaitTimeout = unchecked((int)0x887A0027);
+
+        using var device = new SharpDX.Direct3D11.Device(
+            adapter,
+            DeviceCreationFlags.BgraSupport |
+            DeviceCreationFlags.VideoSupport);
+        using Output1 output1 = output.QueryInterface<Output1>();
+        using OutputDuplication duplication = output1.DuplicateOutput(device);
+
+        var stopwatch = Stopwatch.StartNew();
+
+        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+        {
+            bool frameAcquired = false;
+            SharpDX.DXGI.Resource? desktopResource = null;
+
+            try
+            {
+                int remainingMilliseconds = Math.Max(
+                    1,
+                    timeoutMilliseconds - (int)stopwatch.ElapsedMilliseconds);
+
+                SharpDX.Result acquireResult = duplication.TryAcquireNextFrame(
+                    Math.Min(100, remainingMilliseconds),
+                    out OutputDuplicateFrameInformation _,
+                    out desktopResource);
+
+                if (acquireResult.Code == DxgiErrorWaitTimeout)
+                    continue;
+
+                acquireResult.CheckError();
+
+                if (desktopResource is null)
+                {
+                    throw new InvalidOperationException(
+                        "Desktop Duplication returned no desktop resource.");
+                }
+
+                frameAcquired = true;
+
+                using (SharpDX.Direct3D11.Texture2D texture =
+                       desktopResource.QueryInterface<SharpDX.Direct3D11.Texture2D>())
+                {
+                    Texture2DDescription description = texture.Description;
+                    Bitmap bitmap = CopyTextureToBitmap(
+                        device,
+                        texture,
+                        description.Width,
+                        description.Height);
+
+                    ApplyDesktopDuplicationRotation(bitmap, rotation);
+
+                    AppLogger.Info(
+                        $"DDA screenshot captured | Device={monitor.DeviceName} | Surface={description.Width}x{description.Height} | Output={bitmap.Width}x{bitmap.Height} | Rotation={rotation} | ElapsedMs={stopwatch.ElapsedMilliseconds}");
+
+                    return bitmap;
+                }
+            }
+            finally
+            {
+                desktopResource?.Dispose();
+
+                if (frameAcquired)
+                {
+                    duplication.ReleaseFrame();
+                }
+            }
+        }
+
+        AppLogger.Error(
+            nameof(ScreenCapturer),
+            $"DDA screenshot timed out | Device={monitor.DeviceName} | TimeoutMs={timeoutMilliseconds}");
+        return null;
+    }
+
+    private static void ApplyDesktopDuplicationRotation(
+        Bitmap bitmap,
+        DisplayModeRotation rotation)
+    {
+        RotateFlipType rotateFlip = rotation switch
+        {
+            DisplayModeRotation.Rotate90 => RotateFlipType.Rotate90FlipNone,
+            DisplayModeRotation.Rotate180 => RotateFlipType.Rotate180FlipNone,
+            DisplayModeRotation.Rotate270 => RotateFlipType.Rotate270FlipNone,
+            _ => RotateFlipType.RotateNoneFlipNone
+        };
+
+        if (rotateFlip != RotateFlipType.RotateNoneFlipNone)
+        {
+            bitmap.RotateFlip(rotateFlip);
+        }
+    }
+
+    private static Bitmap? CaptureScreenshotWgc(
+        string captureTarget,
+        int timeoutMilliseconds)
+    {
+        lock (ScreenshotWgcDeviceSync)
+        {
+            EnsureScreenshotWgcDevice();
+
+            return CaptureScreenshotWgcCore(
+                captureTarget,
+                timeoutMilliseconds,
+                _screenshotD3dDevice!,
+                _screenshotWinRtDevice!);
+        }
+    }
+
+    private static void EnsureScreenshotWgcDevice()
+    {
+        if (_screenshotD3dDevice is not null &&
+            _screenshotWinRtDevice is not null)
+        {
+            return;
+        }
+
+        ReleaseScreenshotCaptureResourcesNoLock();
+
+        var d3dDevice = new SharpDX.Direct3D11.Device(
+            SharpDX.Direct3D.DriverType.Hardware,
+            DeviceCreationFlags.BgraSupport);
+
+        try
+        {
+            IDirect3DDevice winRtDevice = CreateDirect3DDevice(d3dDevice);
+            _screenshotD3dDevice = d3dDevice;
+            _screenshotWinRtDevice = winRtDevice;
+            AppLogger.Info("WGC screenshot shared device created");
+        }
+        catch
+        {
+            d3dDevice.Dispose();
+            throw;
+        }
+    }
+
+    public static void ReleaseScreenshotCaptureResources()
+    {
+        lock (ScreenshotWgcDeviceSync)
+        {
+            ReleaseScreenshotCaptureResourcesNoLock();
+        }
+    }
+
+    private static void ReleaseScreenshotCaptureResourcesNoLock()
+    {
+        if (_screenshotD3dDevice is null &&
+            _screenshotWinRtDevice is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _screenshotD3dDevice?.ImmediateContext.ClearState();
+            _screenshotD3dDevice?.ImmediateContext.Flush();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            _screenshotWinRtDevice?.Dispose();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            _screenshotD3dDevice?.Dispose();
+        }
+        catch
+        {
+        }
+
+        _screenshotWinRtDevice = null;
+        _screenshotD3dDevice = null;
+        AppLogger.Info("WGC screenshot shared device released");
+    }
+
+    private static Bitmap? CaptureScreenshotWgcCore(
+        string captureTarget,
+        int timeoutMilliseconds,
+        SharpDX.Direct3D11.Device d3dDevice,
+        IDirect3DDevice winRtDevice)
+    {
         GraphicsCaptureItem? captureItem = null;
         Direct3D11CaptureFramePool? framePool = null;
         GraphicsCaptureSession? session = null;
 
         try
         {
-            d3dDevice =
-                new SharpDX.Direct3D11.Device(
-                    SharpDX.Direct3D.DriverType.Hardware,
-                    DeviceCreationFlags.BgraSupport);
-
-            winRtDevice =
-                CreateDirect3DDevice(d3dDevice);
-
+            LogScreenshotNativeMemory("WGC:BeforeCaptureItem");
             captureItem =
                 CreateCaptureItem(captureTarget);
+            LogScreenshotNativeMemory("WGC:AfterCaptureItem");
 
             if (captureItem.Size.Width <= 0 ||
                 captureItem.Size.Height <= 0)
@@ -536,10 +812,12 @@ public class ScreenCapturer : IDisposable
                     DirectXPixelFormat.B8G8R8A8UIntNormalized,
                     1,
                     captureItem.Size);
+            LogScreenshotNativeMemory("WGC:AfterFramePool");
 
             session =
                 framePool.CreateCaptureSession(
                     captureItem);
+            LogScreenshotNativeMemory("WGC:AfterSession");
 
             session.IsCursorCaptureEnabled = false;
 
@@ -564,6 +842,7 @@ public class ScreenCapturer : IDisposable
 
                 using SharpDX.Direct3D11.Texture2D texture =
                     GetFrameTexture(frame);
+                LogScreenshotNativeMemory("WGC:FrameAcquired");
 
                 int width = Math.Min(
                     frame.ContentSize.Width,
@@ -583,6 +862,7 @@ public class ScreenCapturer : IDisposable
                     texture,
                     width,
                     height);
+                LogScreenshotNativeMemory("WGC:AfterGpuReadback");
 
                 return CropWindowToVisibleBounds(
                  bitmap,
@@ -623,7 +903,10 @@ public class ScreenCapturer : IDisposable
 
             try
             {
-                winRtDevice?.Dispose();
+                if ((object?)captureItem is IDisposable disposableCaptureItem)
+                {
+                    disposableCaptureItem.Dispose();
+                }
             }
             catch
             {
@@ -631,12 +914,22 @@ public class ScreenCapturer : IDisposable
 
             try
             {
-                d3dDevice?.Dispose();
+                d3dDevice.ImmediateContext.Flush();
             }
             catch
             {
             }
+
+            LogScreenshotNativeMemory("WGC:AfterResourceDispose");
         }
+    }
+
+    private static void LogScreenshotNativeMemory(string stage)
+    {
+        using Process process = Process.GetCurrentProcess();
+        process.Refresh();
+        AppLogger.Info(
+            $"Screenshot backend memory | Stage={stage} | WorkingSetBytes={process.WorkingSet64} | PrivateBytes={process.PrivateMemorySize64} | ManagedBytes={GC.GetTotalMemory(false)} | Handles={process.HandleCount}");
     }
 
     private static Bitmap CropWindowToVisibleBounds(

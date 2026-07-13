@@ -35,6 +35,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _microphoneVolumeAnimationCts;
     private CancellationTokenSource? _audioDeviceRefreshCts;
     private CancellationTokenSource? _targetRefreshCts;
+    private CancellationTokenSource? _screenshotCaptureCts;
     private MMDeviceEnumerator? _audioDeviceEnumerator;
     private AudioDeviceNotificationClient? _audioDeviceNotificationClient;
     private DispatcherTimer? _audioLevelTimer;
@@ -144,9 +145,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         OpenSaveFolderCommand = new RelayCommand(_ => OpenSaveFolder());
         SelectFolderCommand = new AsyncRelayCommand(SelectFolderAsync);
-        SaveScreenshotCommand = new AsyncRelayCommand(SaveScreenshotAsync);
-        SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync);
-        StartStopRecordCommand = new RelayCommand(_ => _ = ToggleContinuousRecordingAsync());
+        SaveScreenshotCommand = new AsyncRelayCommand(
+            SaveScreenshotAsync,
+            commandName: "SaveScreenshot",
+            uiLockTimeout: TimeSpan.FromSeconds(5),
+            uiLockTimeoutAllowed: () => !_screenshotSelection.IsSelectionActive);
+        SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync, commandName: "SaveReplay", uiLockTimeout: TimeSpan.FromSeconds(5));
+        StartStopRecordCommand = new AsyncRelayCommand(ToggleContinuousRecordingAsync, commandName: "StartStopRecording", uiLockTimeout: TimeSpan.FromSeconds(5));
         ToggleBufferCommand = new RelayCommand(_ => BufferEnabled = !BufferEnabled);
         NextPreviewPageCommand = new RelayCommand(_ => NextPreviewPage());
         CycleVideoSettingCommand = new RelayCommand(parameter => CycleVideoSetting(parameter?.ToString()));
@@ -545,11 +550,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _targetRefreshCts?.Cancel();
         _targetRefreshCts?.Dispose();
         _targetRefreshCts = null;
+        CancelActiveScreenshotSelection("Display monitoring stopped");
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e)
     {
+        CancelActiveScreenshotSelection("Display settings changed");
+        _screenshotSelection.InvalidateOverlayWindows();
+        ScreenCapturer.ReleaseScreenshotCaptureResources();
         QueueTargetRefresh("Display settings changed");
+    }
+    private void CancelActiveScreenshotSelection(string reason)
+    {
+        CancellationTokenSource? cts = _screenshotCaptureCts;
+        if (cts is null || cts.IsCancellationRequested)
+            return;
+
+        AppLogger.Info($"Screenshot command canceled | Reason={reason}");
+        cts.Cancel();
     }
 
     private void QueueTargetRefresh(string reason)
@@ -1101,19 +1119,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task SaveScreenshotAsync()
     {
+        var stopwatch = Stopwatch.StartNew();
+        AppLogger.Info($"UI state | Action=SaveScreenshot clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CanEdit={CanEditSettings} | Target={_selectedTargetValue} | SaveFolder={SaveFolder}");
+
+        _screenshotCaptureCts?.Cancel();
+        _screenshotCaptureCts?.Dispose();
+        var screenshotCts = new CancellationTokenSource();
+        _screenshotCaptureCts = screenshotCts;
+
         try
         {
             bool restoreUiAfterCapture =
                 IsSkadiPanelVisible();
 
+            AppLogger.Info($"Screenshot command | PanelVisible={restoreUiAfterCapture}");
+
             string? path =
                 await _screenshotSelection.CaptureSelectionAsync(
                     SaveFolder,
                     _toggleUi,
-                    restoreUiAfterCapture);
+                    restoreUiAfterCapture,
+                    screenshotCts.Token,
+                    allowBlockingMemoryCleanup: !IsContinuousRecording && !BufferEnabled);
 
             if (path is null)
             {
+                AppLogger.Info($"Screenshot command canceled | ElapsedMs={stopwatch.ElapsedMilliseconds}");
                 LogEvent(
                     "Screenshot canceled");
 
@@ -1122,6 +1153,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             if (string.IsNullOrWhiteSpace(path))
             {
+                AppLogger.Error(
+                    nameof(MainViewModel),
+                    $"Screenshot command unavailable | ElapsedMs={stopwatch.ElapsedMilliseconds}");
+
                 LogEvent(
                     "Screenshot capture unavailable",
                     warning: true);
@@ -1132,17 +1167,25 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            AppLogger.Info($"Screenshot command completed | Path={path} | ElapsedMs={stopwatch.ElapsedMilliseconds}");
+
             LogEvent(
                 $"Screenshot saved: {Path.GetFileName(path)}");
 
             _notifications.Show(
                 "Screenshot saved");
         }
+        catch (OperationCanceledException)
+        {
+            AppLogger.Info($"Screenshot command canceled by display topology change | ElapsedMs={stopwatch.ElapsedMilliseconds}");
+            LogEvent(
+                "Screenshot canceled");
+        }
         catch (Exception ex)
         {
             AppLogger.Error(
                 nameof(MainViewModel),
-                ex.ToString());
+                $"Screenshot command failed after {stopwatch.ElapsedMilliseconds} ms: {ex}");
 
             LogEvent(
                 "Screenshot failed",
@@ -1150,6 +1193,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _notifications.Show(
                 "Screenshot failed");
+        }
+        finally
+        {
+            if (ReferenceEquals(_screenshotCaptureCts, screenshotCts))
+                _screenshotCaptureCts = null;
+
+            screenshotCts.Dispose();
         }
     }
 
@@ -1697,6 +1747,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         StopDisplayChangeMonitoring();
+        _screenshotSelection.Dispose();
+        ScreenCapturer.ReleaseScreenshotCaptureResources();
         _capture.ContinuousRecordingStopped -= OnContinuousRecordingStopped;
 
         StopAudioDeviceMonitoring();
@@ -1712,4 +1764,3 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _microphoneVolumeAnimationCts?.Dispose();
     }
 }
-

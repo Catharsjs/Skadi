@@ -8,7 +8,7 @@ namespace EventCapture.App;
 
 public partial class MainWindow : Window
 {
-    private const int FadeDurationMs = 160;
+    private const int FadeDurationMs = 220;
     private const int GwlExStyle = -20;
     private const long WsExTransparent = 0x00000020;
     private const uint SwpNoSize = 0x0001;
@@ -106,7 +106,7 @@ public partial class MainWindow : Window
             From = RootVisual.Opacity,
             To = targetOpacity,
             Duration = TimeSpan.FromMilliseconds(FadeDurationMs),
-            EasingFunction = new QuadraticEase
+            EasingFunction = new SineEase
             {
                 EasingMode = EasingMode.EaseInOut
             },

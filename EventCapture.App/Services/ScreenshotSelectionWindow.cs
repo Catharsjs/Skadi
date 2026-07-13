@@ -1,11 +1,16 @@
 using EventCapture.Core.Capture;
+using EventCapture.Core.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using System.Windows.Xps.Packaging;
 using DrawingRectangle = System.Drawing.Rectangle;
 using ShapesRectangle = System.Windows.Shapes.Rectangle;
@@ -20,23 +25,31 @@ namespace EventCapture.App.Services;
 internal sealed class ScreenshotSelectionWindow : Window
 {
     private const int MinSelectionPixels = 12;
+    private static readonly TimeSpan FadeInDuration = TimeSpan.FromMilliseconds(220);
+    private static readonly TimeSpan FadeOutDuration = TimeSpan.FromMilliseconds(140);
     private static readonly IntPtr HwndTopmost = new(-1);
     private const uint SwpShowWindow = 0x0040;
 
     private readonly DisplayMonitor _screen;
-    private readonly Action<ScreenshotSelectionResult?> _complete;
     private readonly Canvas _canvas;
     private readonly ShapesRectangle _selectionRectangle;
+    private WpfImage? _frozenImage;
+    private WriteableBitmap? _reusableBitmap;
+    private Action<ScreenshotSelectionResult?>? _complete;
     private WpfPoint? _startPoint;
     private bool _completed;
+    private bool _closed;
+
+    private static int _liveWindowCount;
+    private static int _reusableBitmapCount;
+    internal static int LiveWindowCount => Volatile.Read(ref _liveWindowCount);
+    internal static int ReusableBitmapCount => Volatile.Read(ref _reusableBitmapCount);
 
     public ScreenshotSelectionWindow(
-     DisplayMonitor screen,
-     BitmapSource? frozenImage,
-     Action<ScreenshotSelectionResult?> complete)
+     DisplayMonitor screen)
     {
+        Interlocked.Increment(ref _liveWindowCount);
         _screen = screen;
-        _complete = complete;
 
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
@@ -49,14 +62,12 @@ internal sealed class ScreenshotSelectionWindow : Window
 
         var root = new Grid();
 
-        if (frozenImage is not null)
+        _frozenImage = new WpfImage
         {
-            root.Children.Add(new WpfImage
-            {
-                Source = frozenImage,
-                Stretch = Stretch.Fill
-            });
-        }
+            Stretch = Stretch.Fill
+        };
+
+        root.Children.Add(_frozenImage);
 
         root.Children.Add(new Border
         {
@@ -89,6 +100,165 @@ internal sealed class ScreenshotSelectionWindow : Window
         MouseLeftButtonUp += OnMouseLeftButtonUp;
         MouseRightButtonDown += (_, _) => Complete(null);
         KeyDown += OnKeyDown;
+        Closed += OnClosed;
+    }
+
+    public void Prepare(
+        Bitmap frozenImage,
+        Action<ScreenshotSelectionResult?> complete)
+    {
+        BeginAnimation(OpacityProperty, null);
+        Opacity = 0;
+        IsHitTestVisible = false;
+
+        _complete = complete;
+        _completed = false;
+        _startPoint = null;
+        _selectionRectangle.Visibility = Visibility.Collapsed;
+        _selectionRectangle.Width = 0;
+        _selectionRectangle.Height = 0;
+
+        if (_reusableBitmap is null ||
+            _reusableBitmap.PixelWidth != frozenImage.Width ||
+            _reusableBitmap.PixelHeight != frozenImage.Height)
+        {
+            if (_reusableBitmap is null)
+                Interlocked.Increment(ref _reusableBitmapCount);
+
+            _reusableBitmap = new WriteableBitmap(
+                frozenImage.Width,
+                frozenImage.Height,
+                96,
+                96,
+                PixelFormats.Bgra32,
+                null);
+
+            if (_frozenImage is not null)
+                _frozenImage.Source = _reusableBitmap;
+        }
+
+        CopyBitmapPixels(frozenImage, _reusableBitmap);
+    }
+
+    public async Task ShowPreparedAsync()
+    {
+        Show();
+
+        await Dispatcher.InvokeAsync(
+            () => { },
+            DispatcherPriority.Render);
+
+        var animation = new DoubleAnimation(
+            0,
+            1,
+            FadeInDuration)
+        {
+            EasingFunction = new SineEase
+            {
+                EasingMode = EasingMode.EaseOut
+            },
+            FillBehavior = FillBehavior.Stop
+        };
+
+        Opacity = 1;
+        BeginAnimation(OpacityProperty, animation);
+        IsHitTestVisible = true;
+        Activate();
+        Focus();
+    }
+
+    public async Task ResetForReuseAsync()
+    {
+        ReleaseMouseCapture();
+        IsHitTestVisible = false;
+
+        if (IsVisible && Opacity > 0)
+        {
+            var completion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var animation = new DoubleAnimation(
+                Opacity,
+                0,
+                FadeOutDuration)
+            {
+                EasingFunction = new SineEase
+                {
+                    EasingMode = EasingMode.EaseIn
+                },
+                FillBehavior = FillBehavior.HoldEnd
+            };
+
+            animation.Completed += (_, _) => completion.TrySetResult();
+            BeginAnimation(OpacityProperty, animation);
+            await completion.Task;
+        }
+
+        BeginAnimation(OpacityProperty, null);
+        Opacity = 0;
+        _startPoint = null;
+        _complete = null;
+        _selectionRectangle.Visibility = Visibility.Collapsed;
+
+        Hide();
+    }
+
+    private static void CopyBitmapPixels(
+        Bitmap source,
+        WriteableBitmap destination)
+    {
+        var bounds = new System.Drawing.Rectangle(0, 0, source.Width, source.Height);
+        BitmapData? data = null;
+
+        try
+        {
+            data = source.LockBits(
+                bounds,
+                ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+            if (data.Stride <= 0)
+                throw new InvalidOperationException("Screenshot bitmap has an unsupported negative stride.");
+
+            destination.WritePixels(
+                new Int32Rect(0, 0, source.Width, source.Height),
+                data.Scan0,
+                checked(data.Stride * source.Height),
+                data.Stride);
+        }
+        finally
+        {
+            if (data is not null)
+                source.UnlockBits(data);
+        }
+    }
+
+    private void OnClosed(
+        object? sender,
+        EventArgs e)
+    {
+        if (!_closed)
+        {
+            _closed = true;
+            Interlocked.Decrement(ref _liveWindowCount);
+        }
+
+        Complete(null);
+
+        if (_frozenImage is not null)
+        {
+            _frozenImage.Source = null;
+            _frozenImage = null;
+        }
+
+        if (_reusableBitmap is not null)
+        {
+            _reusableBitmap = null;
+            Interlocked.Decrement(ref _reusableBitmapCount);
+        }
+
+        Content = null;
+        AppLogger.Info($"Screenshot selection window released | Device={_screen.DeviceName} | LiveWindows={LiveWindowCount}");
     }
 
     private void OnSourceInitialized(
@@ -97,6 +267,8 @@ internal sealed class ScreenshotSelectionWindow : Window
     {
         IntPtr handle =
             new WindowInteropHelper(this).Handle;
+
+        AppLogger.Info($"Screenshot selection window initialized | Device={_screen.DeviceName} | Bounds={_screen.Bounds}");
 
         var source =
             HwndSource.FromHwnd(handle);
@@ -315,7 +487,8 @@ internal sealed class ScreenshotSelectionWindow : Window
         }
 
         _completed = true;
-        _complete(result);
+        AppLogger.Info($"Screenshot selection completed | Device={_screen.DeviceName} | HasResult={result is not null} | FullScreen={result?.IsFullScreen.ToString() ?? "False"} | Selection={result?.SelectionBounds.ToString() ?? "None"}");
+        _complete?.Invoke(result);
     }
 
     [DllImport("user32.dll")]
