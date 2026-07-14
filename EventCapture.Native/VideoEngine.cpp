@@ -68,6 +68,13 @@ namespace EventCaptureNative
             bool encoding{};
         };
 
+        struct EncoderSurfaceSlot
+        {
+            ComPtr<ID3D11Texture2D> texture;
+            ComPtr<ID3D11VideoProcessorOutputView> outputView;
+            bool inFlight{};
+        };
+
         enum class CaptureBackend
         {
             WindowsGraphicsCapture,
@@ -843,7 +850,9 @@ namespace EventCaptureNative
                         << L" | Packets=" << packets_.size()
                         << L" | Captured=" << capturedFrames_.load()
                         << L" | Submitted=" << submittedFrames_.load()
-                        << L" | Encoded=" << encodedFrames_.load();
+                        << L" | Encoded=" << encodedFrames_.load()
+                        << L" | MonitorQueueOverflow=" << monitorQueueOverflowFrames_.load()
+                        << L" | EncoderSurfaceStarvation=" << encoderSurfaceStarvationFrames_.load();
 
                     LogNative(message.str());
                 }
@@ -1615,7 +1624,7 @@ namespace EventCaptureNative
                     {
                         ComPtr<ID3D11Texture2D> texture;
                         ThrowIfFailed(resource.As(&texture));
-                        QueueDesktopDuplicationFrame(texture.Get(), true);
+                        QueueDesktopDuplicationFrame(texture.Get());
                     }
                 }
                 catch (const winrt::hresult_error& error)
@@ -1772,9 +1781,7 @@ namespace EventCaptureNative
             frameCondition_.notify_one();
         }
 
-        void QueueDesktopDuplicationFrame(
-            ID3D11Texture2D* texture,
-            bool updateLastFrame)
+        void QueueDesktopDuplicationFrame(ID3D11Texture2D* texture)
         {
             if (texture == nullptr) return;
 
@@ -1824,25 +1831,6 @@ namespace EventCaptureNative
             if (slotIndex == std::numeric_limits<size_t>::max())
             {
                 return;
-            }
-
-            if (updateLastFrame)
-            {
-                if (desktopDuplicationLastTexture_ == nullptr)
-                {
-                    D3D11_TEXTURE2D_DESC description{};
-                    texture->GetDesc(&description);
-                    description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-                    description.MiscFlags = 0;
-                    ThrowIfFailed(device_->CreateTexture2D(
-                        &description,
-                        nullptr,
-                        &desktopDuplicationLastTexture_));
-                }
-
-                context_->CopyResource(
-                    desktopDuplicationLastTexture_.Get(),
-                    texture);
             }
 
             context_->CopyResource(monitorFrameSlots_[slotIndex].texture.Get(), texture);
@@ -1916,6 +1904,7 @@ namespace EventCaptureNative
                 processorInput_ = nextProcessorInput;
                 processorOutput_ = nextProcessorOutput;
                 CreateMonitorFrameQueue(width, height);
+                CreateEncoderSurfacePool();
             }
 
             latestTexture_ = nextLatestTexture;
@@ -1963,6 +1952,43 @@ namespace EventCaptureNative
                     &slot.inputView));
                 monitorFrameSlots_.push_back(std::move(slot));
             }
+        }
+
+        void CreateEncoderSurfacePool()
+        {
+            encoderSurfaceSlots_.clear();
+            submittedEncoderSurfaces_.clear();
+            nextEncoderSurface_ = 0;
+
+            if (captureBackend_ != CaptureBackend::DesktopDuplication ||
+                encoderTexture_ == nullptr ||
+                processorEnumerator_ == nullptr)
+            {
+                return;
+            }
+
+            D3D11_TEXTURE2D_DESC description{};
+            encoderTexture_->GetDesc(&description);
+
+            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDescription{};
+            outputViewDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+            outputViewDescription.Texture2D.MipSlice = 0;
+
+            constexpr size_t SurfaceCount = 16;
+            encoderSurfaceSlots_.reserve(SurfaceCount);
+            for (size_t index = 0; index < SurfaceCount; ++index)
+            {
+                EncoderSurfaceSlot slot;
+                ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &slot.texture));
+                ThrowIfFailed(videoDevice_->CreateVideoProcessorOutputView(
+                    slot.texture.Get(),
+                    processorEnumerator_.Get(),
+                    &outputViewDescription,
+                    &slot.outputView));
+                encoderSurfaceSlots_.push_back(std::move(slot));
+            }
+
+            LogNative(L"DDA direct encoder surface pool created | Count=16");
         }
 
         bool IsWindowOnInitialMonitor() const
@@ -2079,31 +2105,33 @@ namespace EventCaptureNative
             videoContext_->VideoProcessorSetOutputColorSpace(processor.Get(), &outputColorSpace);
         }
 
-        ComPtr<ID3D11Texture2D> PrepareEncoderInputTexture()
+        size_t AcquireEncoderSurface()
         {
-            if (captureBackend_ != CaptureBackend::DesktopDuplication)
+            if (captureBackend_ != CaptureBackend::DesktopDuplication || encoderSurfaceSlots_.empty())
             {
-                return encoderTexture_;
+                return std::numeric_limits<size_t>::max();
             }
 
-            if (encoderSubmitTextures_.empty())
+            for (size_t attempt = 0; attempt < encoderSurfaceSlots_.size(); ++attempt)
             {
-                D3D11_TEXTURE2D_DESC description{};
-                encoderTexture_->GetDesc(&description);
-                constexpr size_t SubmitTextureCount = 16;
-                encoderSubmitTextures_.reserve(SubmitTextureCount);
-                for (size_t index = 0; index < SubmitTextureCount; ++index)
+                const size_t candidate = nextEncoderSurface_;
+                nextEncoderSurface_ = (nextEncoderSurface_ + 1) % encoderSurfaceSlots_.size();
+                if (!encoderSurfaceSlots_[candidate].inFlight)
                 {
-                    ComPtr<ID3D11Texture2D> texture;
-                    ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &texture));
-                    encoderSubmitTextures_.push_back(texture);
+                    encoderSurfaceSlots_[candidate].inFlight = true;
+                    return candidate;
                 }
             }
 
-            ComPtr<ID3D11Texture2D> texture = encoderSubmitTextures_[nextEncoderSubmitTexture_];
-            nextEncoderSubmitTexture_ = (nextEncoderSubmitTexture_ + 1) % encoderSubmitTextures_.size();
-            context_->CopyResource(texture.Get(), encoderTexture_.Get());
-            return texture;
+            return std::numeric_limits<size_t>::max();
+        }
+
+        void ReleaseEncoderSurface(size_t index)
+        {
+            if (index < encoderSurfaceSlots_.size())
+            {
+                encoderSurfaceSlots_[index].inFlight = false;
+            }
         }
 
         RECT CalculateCenteredActualSizeRect(uint32_t sourceWidth, uint32_t sourceHeight) const
@@ -3230,6 +3258,7 @@ namespace EventCaptureNative
                     int64_t preparedCaptureTimestamp100ns = 0;
                     ComPtr<ID3D11Texture2D> preparedEncoderTexture;
                     ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
+                    size_t preparedEncoderSurface = std::numeric_limits<size_t>::max();
 
                     if (useMonitorCfrScheduler)
                     {
@@ -3305,22 +3334,56 @@ namespace EventCaptureNative
 
                         if (selectedProcessorInput == nullptr) continue;
 
+                        ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
+                        if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                        {
+                            if (asyncEncoder_)
+                            {
+                                PumpEncoderEvents(false, std::chrono::milliseconds(0));
+                            }
+                            preparedEncoderSurface = AcquireEncoderSurface();
+                            if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
+                            {
+                                if (asyncEncoder_)
+                                {
+                                    PumpEncoderEvents(false, std::chrono::milliseconds(5));
+                                }
+                                preparedEncoderSurface = AcquireEncoderSurface();
+                            }
+
+                            if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
+                            {
+                                encoderSurfaceStarvationFrames_.fetch_add(1);
+                                droppedFrames_.fetch_add(1);
+                                std::scoped_lock lock(textureMutex_);
+                                monitorFrameSlots_[selectedSlotIndex].encoding = false;
+                                frameCondition_.notify_one();
+                                continue;
+                            }
+
+                            preparedEncoderTexture = encoderSurfaceSlots_[preparedEncoderSurface].texture;
+                            selectedProcessorOutput = encoderSurfaceSlots_[preparedEncoderSurface].outputView;
+                        }
+                        else
+                        {
+                            preparedEncoderTexture = encoderTexture_;
+                        }
+
                         D3D11_VIDEO_PROCESSOR_STREAM stream{};
                         stream.Enable = TRUE;
                         stream.pInputSurface = selectedProcessorInput.Get();
                         const auto blitStart = std::chrono::steady_clock::now();
-                        const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
+                        const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), selectedProcessorOutput.Get(), 0, 1, &stream);
                         const double blitMs = ElapsedMilliseconds(blitStart);
                         LogNativeTimingIfSlow(L"Monitor CFR VideoProcessorBlt", blitMs, 10.0);
                         if (FAILED(blit))
                         {
+                            ReleaseEncoderSurface(preparedEncoderSurface);
+                            preparedEncoderSurface = std::numeric_limits<size_t>::max();
                             SetError(HResultMessage(blit));
                         }
                         else
                         {
-                            const auto prepareStart = std::chrono::steady_clock::now();
-                            preparedEncoderTexture = PrepareEncoderInputTexture();
-                            LogNativeTimingIfSlow(L"Monitor CFR PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
                             framePrepared = true;
                         }
 
@@ -3390,11 +3453,7 @@ namespace EventCaptureNative
                                 }
                             }
 
-                            {
-                                const auto prepareStart = std::chrono::steady_clock::now();
-                                preparedEncoderTexture = PrepareEncoderInputTexture();
-                                LogNativeTimingIfSlow(L"PrepareEncoderInputTexture", ElapsedMilliseconds(prepareStart), 10.0);
-                            }
+                            preparedEncoderTexture = encoderTexture_;
 
                             framePrepared = true;
                         }
@@ -3431,7 +3490,7 @@ namespace EventCaptureNative
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
                             const auto submitStart = std::chrono::steady_clock::now();
-                            SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration);
+                            SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration, preparedEncoderSurface);
                             const double submitMs = ElapsedMilliseconds(submitStart);
                             const auto drainStart = std::chrono::steady_clock::now();
                             if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
@@ -3454,6 +3513,7 @@ namespace EventCaptureNative
                         }
                         catch (const winrt::hresult_error& error)
                         {
+                            ReleaseEncoderSurface(preparedEncoderSurface);
                             SetError(error.message().c_str());
                             droppedFrames_.fetch_add(1);
                             bool recordingActive = false;
@@ -3475,6 +3535,7 @@ namespace EventCaptureNative
                         }
                         catch (const std::exception& error)
                         {
+                            ReleaseEncoderSurface(preparedEncoderSurface);
                             SetError(std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                             droppedFrames_.fetch_add(1);
                             bool recordingActive = false;
@@ -3535,7 +3596,11 @@ namespace EventCaptureNative
             }
         }
 
-        void SubmitFrame(ID3D11Texture2D* texture, int64_t timestamp, int64_t duration)
+        void SubmitFrame(
+            ID3D11Texture2D* texture,
+            int64_t timestamp,
+            int64_t duration,
+            size_t encoderSurfaceIndex)
         {
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer));
@@ -3549,6 +3614,10 @@ namespace EventCaptureNative
                 if (!PumpEncoderEvents(true, std::chrono::seconds(1))) ThrowIfFailed(MF_E_NOTACCEPTING);
                 ThrowIfFailed(encoder_->ProcessInput(0, sample.Get(), 0));
                 --inputCredits_;
+                if (encoderSurfaceIndex != std::numeric_limits<size_t>::max())
+                {
+                    submittedEncoderSurfaces_.push_back(encoderSurfaceIndex);
+                }
                 return;
             }
 
@@ -3559,6 +3628,10 @@ namespace EventCaptureNative
                 result = encoder_->ProcessInput(0, sample.Get(), 0);
             }
             ThrowIfFailed(result);
+            if (encoderSurfaceIndex != std::numeric_limits<size_t>::max())
+            {
+                submittedEncoderSurfaces_.push_back(encoderSurfaceIndex);
+            }
         }
 
         bool PumpEncoderEvents(bool waitForInput, std::chrono::milliseconds timeout)
@@ -3606,7 +3679,16 @@ namespace EventCaptureNative
             if (output.pEvents != nullptr) output.pEvents->Release();
             if (FAILED(result)) return result;
             if (output.pSample != nullptr && output.pSample != sample.Get()) sample.Attach(output.pSample);
-            if (sample != nullptr) ConsumeEncodedSample(sample.Get());
+            if (sample != nullptr)
+            {
+                if (!submittedEncoderSurfaces_.empty())
+                {
+                    const size_t completedSurface = submittedEncoderSurfaces_.front();
+                    submittedEncoderSurfaces_.pop_front();
+                    ReleaseEncoderSurface(completedSurface);
+                }
+                ConsumeEncodedSample(sample.Get());
+            }
             return result;
         }
 
@@ -3744,6 +3826,7 @@ namespace EventCaptureNative
             encodedTimeline100ns_.clear();
             monitorQueueOverflowFrames_.store(0);
             monitorQueueMaxDepth_.store(0);
+            encoderSurfaceStarvationFrames_.store(0);
         }
 
         void AddDiagnosticTimestamp(std::deque<int64_t>& timeline, int64_t timestamp100ns)
@@ -3861,6 +3944,7 @@ namespace EventCaptureNative
                 << L" | EncodedMinusReplay=" << encodedToReplayLoss
                 << L" | MonitorQueueOverflow=" << monitorQueueOverflowFrames_.load()
                 << L" | MonitorQueueMaxDepth=" << monitorQueueMaxDepth_.load()
+                << L" | EncoderSurfaceStarvation=" << encoderSurfaceStarvationFrames_.load()
                 << L" | GapsOver1_5Frames=" << gapsOverOneAndHalfFrames
                 << L" | GapsOver2Frames=" << gapsOverTwoFrames
                 << L" | GapsOver3Frames=" << gapsOverThreeFrames
@@ -4089,7 +4173,6 @@ namespace EventCaptureNative
             framePool_ = nullptr;
             captureItem_ = nullptr;
             desktopDuplication_.Reset();
-            desktopDuplicationLastTexture_.Reset();
             encoder_.Reset();
             codecApi_.Reset();
             eventGenerator_.Reset();
@@ -4097,6 +4180,8 @@ namespace EventCaptureNative
             processorInput_.Reset();
             processor_.Reset();
             processorEnumerator_.Reset();
+            encoderSurfaceSlots_.clear();
+            submittedEncoderSurfaces_.clear();
             encoderTexture_.Reset();
             blackTexture_.Reset();
             compositorSampler_.Reset();
@@ -4157,7 +4242,6 @@ namespace EventCaptureNative
         GraphicsCaptureSession captureSession_{ nullptr };
         winrt::event_token frameToken_{};
         ComPtr<IDXGIOutputDuplication> desktopDuplication_;
-        ComPtr<ID3D11Texture2D> desktopDuplicationLastTexture_;
         std::thread desktopDuplicationThread_;
 
         mutable std::mutex textureMutex_;
@@ -4173,8 +4257,9 @@ namespace EventCaptureNative
         ComPtr<ID3D11Buffer> compositorVertexBuffer_;
         ComPtr<ID3D11SamplerState> compositorSampler_;
         ComPtr<ID3D11Texture2D> encoderTexture_;
-        std::vector<ComPtr<ID3D11Texture2D>> encoderSubmitTextures_;
-        size_t nextEncoderSubmitTexture_{};
+        std::vector<EncoderSurfaceSlot> encoderSurfaceSlots_;
+        std::deque<size_t> submittedEncoderSurfaces_;
+        size_t nextEncoderSurface_{};
         ComPtr<ID3D11Texture2D> blackTexture_;
         ComPtr<ID3D11VideoProcessorEnumerator> processorEnumerator_;
         ComPtr<ID3D11VideoProcessor> processor_;
@@ -4248,6 +4333,7 @@ namespace EventCaptureNative
         std::atomic_uint64_t bufferedBytes_{};
         std::atomic_uint64_t monitorQueueOverflowFrames_{};
         std::atomic_uint64_t monitorQueueMaxDepth_{};
+        std::atomic_uint64_t encoderSurfaceStarvationFrames_{};
     };
 
     VideoEngine::VideoEngine(const EcVideoConfig& config) : implementation_(std::make_unique<Implementation>(config)) {}
