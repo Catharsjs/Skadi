@@ -17,7 +17,7 @@ namespace EventCaptureNative
     namespace
     {
         constexpr mfxU32 SyncWaitMilliseconds = 2'000;
-        constexpr size_t AsyncDepth = 4;
+        constexpr size_t AsyncDepth = 8;
         constexpr size_t MinimumBitstreamCapacity = 4u * 1024u * 1024u;
         constexpr size_t MaximumBitstreamCapacity = 64u * 1024u * 1024u;
         constexpr int64_t TicksPerSecond = 10'000'000;
@@ -167,7 +167,7 @@ namespace EventCaptureNative
             parameters_.IOPattern = MFX_IOPATTERN_IN_VIDEO_MEMORY;
             parameters_.mfx.CodecId = MFX_CODEC_AVC;
             parameters_.mfx.CodecProfile = MFX_PROFILE_AVC_HIGH;
-            parameters_.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED;
+            parameters_.mfx.TargetUsage = MFX_TARGETUSAGE_BEST_SPEED;
             parameters_.mfx.RateControlMethod = MFX_RATECONTROL_CBR;
             parameters_.mfx.TargetKbps = static_cast<mfxU16>(std::min<uint32_t>(bitrateKbps, 65'535));
             parameters_.mfx.MaxKbps = parameters_.mfx.TargetKbps;
@@ -243,6 +243,9 @@ namespace EventCaptureNative
             message << L"QSV encoder initialized | API=" << version.Major << L'.' << version.Minor
                 << L" | Impl=0x" << std::hex << implementation << std::dec
                 << L" | AsyncDepth=" << parameters_.AsyncDepth
+                << L" | TargetUsage=" << parameters_.mfx.TargetUsage
+                << L" | LowPower=" << parameters_.mfx.LowPower
+                << L" | GopPicSize=" << parameters_.mfx.GopPicSize
                 << L" | Surfaces=" << surfaces_.size()
                 << L" | Frame=" << parameters_.mfx.FrameInfo.CropW << L'x' << parameters_.mfx.FrameInfo.CropH
                 << L" | Allocated=" << parameters_.mfx.FrameInfo.Width << L'x' << parameters_.mfx.FrameInfo.Height

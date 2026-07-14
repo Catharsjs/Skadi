@@ -2086,7 +2086,9 @@ namespace EventCaptureNative
             content.OutputHeight = config_.outputHeight;
             content.InputFrameRate = { config_.framesPerSecond, 1 };
             content.OutputFrameRate = { config_.framesPerSecond, 1 };
-            content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+            content.Usage = captureBackend_ == CaptureBackend::DesktopDuplication
+                ? D3D11_VIDEO_USAGE_OPTIMAL_SPEED
+                : D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
             ThrowIfFailed(videoDevice_->CreateVideoProcessorEnumerator(&content, &processorEnumerator));
             ThrowIfFailed(videoDevice_->CreateVideoProcessor(processorEnumerator.Get(), 0, &processor));
             D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputView{};
@@ -2110,6 +2112,7 @@ namespace EventCaptureNative
             videoContext_->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &outputRect);
             if (captureBackend_ == CaptureBackend::DesktopDuplication)
             {
+                videoContext_->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
                 const D3D11_VIDEO_PROCESSOR_ROTATION rotation = GetDesktopDuplicationVideoRotation();
                 videoContext_->VideoProcessorSetStreamRotation(
                     processor.Get(),
@@ -2525,7 +2528,7 @@ namespace EventCaptureNative
                 qsvEncoder_ = std::move(encoder);
                 useQsvEncoder_ = true;
                 StartQsvPacketWriter();
-                LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=4");
+                LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=8 | TargetUsage=BestSpeed");
                 return true;
             }
             catch (const std::exception& error)
