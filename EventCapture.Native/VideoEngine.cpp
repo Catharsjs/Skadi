@@ -2491,10 +2491,24 @@ namespace EventCaptureNative
         void CreateEncoder()
         {
             if (captureBackend_ == CaptureBackend::DesktopDuplication &&
-                encoderAdapterIsIntel_ &&
-                TryCreateQsvEncoder())
+                encoderAdapterIsIntel_)
             {
-                return;
+                CreateEncoderSurfacePool(false);
+                startupStage_ = L"Intel adapter-bound H.264 MFT configuration";
+                if (TryCreateConfiguredEncoder(
+                        MFT_ENUM_FLAG_HARDWARE |
+                        MFT_ENUM_FLAG_SORTANDFILTER,
+                        L"Intel adapter-bound hardware"))
+                {
+                    useAsyncPacketWriter_ = true;
+                    StartQsvPacketWriter();
+                    LogNative(L"DDA encoder backend selected | Backend=Intel hardware MFT | Stages=Capture-Convert-Encode-Write");
+                    return;
+                }
+
+                CreateEncoderSurfacePool(true);
+                LogNative(L"Intel hardware MFT was unavailable; trying oneVPL QSV compatibility backend");
+                if (TryCreateQsvEncoder()) return;
             }
 
             startupStage_ = L"H.264 MFT hardware configuration";
@@ -2504,6 +2518,12 @@ namespace EventCaptureNative
                     MFT_ENUM_FLAG_SORTANDFILTER,
                     L"hardware"))
             {
+                if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                {
+                    useAsyncPacketWriter_ = true;
+                    StartQsvPacketWriter();
+                    LogNative(L"DDA encoder backend selected | Backend=adapter-bound hardware MFT | Stages=Capture-Convert-Encode-Write");
+                }
                 return;
             }
 
@@ -2513,6 +2533,12 @@ namespace EventCaptureNative
                     MFT_ENUM_FLAG_ALL,
                     L"fallback"))
             {
+                if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                {
+                    useAsyncPacketWriter_ = true;
+                    StartQsvPacketWriter();
+                    LogNative(L"DDA encoder backend selected | Backend=MFT fallback | Stages=Capture-Convert-Encode-Write");
+                }
                 return;
             }
 
@@ -2543,6 +2569,7 @@ namespace EventCaptureNative
                     [](const std::wstring& message) { LogNative(message); });
                 qsvEncoder_ = std::move(encoder);
                 useQsvEncoder_ = true;
+                useAsyncPacketWriter_ = true;
                 StartQsvPacketWriter();
                 LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=4 | TargetUsage=BestSpeed | Stages=Capture-Convert-Submit-Write");
                 return true;
@@ -2554,6 +2581,7 @@ namespace EventCaptureNative
                     std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                 qsvEncoder_.reset();
                 useQsvEncoder_ = false;
+                useAsyncPacketWriter_ = false;
                 CreateEncoderSurfacePool(false);
                 LogNative(L"DDA encoder surface pool recreated for MFT fallback layout");
                 return false;
@@ -3957,16 +3985,8 @@ namespace EventCaptureNative
                     : configuredFrameDuration;
             }
 
-            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_)
-            {
-                timestamp = lastPacketTimestamp100ns_ + std::max<int64_t>(1, duration);
-            }
-
-            lastPacketTimestamp100ns_ = timestamp;
-
             UINT32 cleanPoint = FALSE;
             sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint);
-            WriteRecordingSample(sample, timestamp, duration, cleanPoint != FALSE);
 
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(sample->ConvertToContiguousBuffer(&buffer));
@@ -3988,6 +4008,25 @@ namespace EventCaptureNative
             frame.timestamp100ns = timestamp;
             frame.duration100ns = duration;
             frame.keyFrame = cleanPoint != FALSE;
+
+            if (useAsyncPacketWriter_)
+            {
+                QsvEncodedPacket packet;
+                packet.bytes = std::move(frame.bytes);
+                packet.timestamp100ns = timestamp;
+                packet.duration100ns = duration;
+                packet.keyFrame = cleanPoint != FALSE;
+                EnqueueEncodedPacket(std::move(packet));
+                return;
+            }
+
+            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_)
+            {
+                timestamp = lastPacketTimestamp100ns_ + std::max<int64_t>(1, duration);
+            }
+            lastPacketTimestamp100ns_ = timestamp;
+            frame.timestamp100ns = timestamp;
+            WriteRecordingSample(sample, timestamp, duration, cleanPoint != FALSE);
             if (ReplayEnabled()) AddPacket(std::move(frame));
             AddDiagnosticTimestamp(encodedTimeline100ns_, timestamp);
             encodedFrames_.fetch_add(1);
@@ -4183,7 +4222,7 @@ namespace EventCaptureNative
 
         bool WaitForQsvPacketWriterSnapshot()
         {
-            if (!useQsvEncoder_ || !qsvPacketWriterThread_.joinable()) return true;
+            if (!useAsyncPacketWriter_ || !qsvPacketWriterThread_.joinable()) return true;
             std::unique_lock lock(qsvPacketMutex_);
             const uint64_t target = qsvPacketsQueued_;
             qsvPacketDrainedCondition_.wait(lock, [this, target]
@@ -4198,7 +4237,7 @@ namespace EventCaptureNative
             const HRESULT apartmentResult = RoInitialize(RO_INIT_MULTITHREADED);
             const bool apartmentInitialized = SUCCEEDED(apartmentResult);
             std::chrono::steady_clock::time_point lastQueueDiagnostic{};
-            LogNative(L"QSV packet writer thread started.");
+            LogNative(L"Encoded packet writer thread started.");
 
             for (;;)
             {
@@ -4227,7 +4266,7 @@ namespace EventCaptureNative
                 catch (const winrt::hresult_error& error)
                 {
                     SetError(error.message().c_str());
-                    LogNative(L"QSV packet writer fatal HRESULT | " + std::wstring(error.message().c_str()));
+                    LogNative(L"Encoded packet writer fatal HRESULT | " + std::wstring(error.message().c_str()));
                     running_ = false;
                     std::scoped_lock lock(qsvPacketMutex_);
                     qsvPacketWriterFailed_ = true;
@@ -4237,7 +4276,7 @@ namespace EventCaptureNative
                 {
                     const std::wstring message(error.what(), error.what() + std::char_traits<char>::length(error.what()));
                     SetError(message);
-                    LogNative(L"QSV packet writer fatal exception | " + message);
+                    LogNative(L"Encoded packet writer fatal exception | " + message);
                     running_ = false;
                     std::scoped_lock lock(qsvPacketMutex_);
                     qsvPacketWriterFailed_ = true;
@@ -4245,8 +4284,8 @@ namespace EventCaptureNative
                 }
                 catch (...)
                 {
-                    SetError(L"Unexpected QSV packet writer failure.");
-                    LogNative(L"QSV packet writer fatal unknown exception.");
+                    SetError(L"Unexpected encoded packet writer failure.");
+                    LogNative(L"Encoded packet writer fatal unknown exception.");
                     running_ = false;
                     std::scoped_lock lock(qsvPacketMutex_);
                     qsvPacketWriterFailed_ = true;
@@ -4270,7 +4309,7 @@ namespace EventCaptureNative
                 {
                     lastQueueDiagnostic = diagnosticNow;
                     std::wstringstream message;
-                    message << L"QSV packet writer status | Processed=" << processed
+                    message << L"Encoded packet writer status | Processed=" << processed
                         << L" | QueueDepth=" << queueDepth
                         << L" | Capacity=" << MaxQsvPacketQueue;
                     LogNative(message.str());
@@ -4280,7 +4319,7 @@ namespace EventCaptureNative
             qsvPacketCondition_.notify_all();
             qsvPacketDrainedCondition_.notify_all();
             if (apartmentInitialized) RoUninitialize();
-            LogNative(L"QSV packet writer thread exited.");
+            LogNative(L"Encoded packet writer thread exited.");
         }
 
         void ConsumeQsvPacket(QsvEncodedPacket&& packet)
@@ -4292,6 +4331,11 @@ namespace EventCaptureNative
                 ReleaseEncoderSurface(completedSurface);
             }
 
+            EnqueueEncodedPacket(std::move(packet));
+        }
+
+        void EnqueueEncodedPacket(QsvEncodedPacket&& packet)
+        {
             std::unique_lock lock(qsvPacketMutex_);
             qsvPacketCondition_.wait(lock, [this]
                 {
@@ -4299,7 +4343,7 @@ namespace EventCaptureNative
                         qsvPacketWriterStopping_ || qsvPacketWriterFailed_;
                 });
             if (qsvPacketWriterStopping_ || qsvPacketWriterFailed_)
-                throw std::runtime_error("QSV packet writer is not available");
+                throw std::runtime_error("Encoded packet writer is not available");
             qsvPacketQueue_.push_back(std::move(packet));
             ++qsvPacketsQueued_;
             lock.unlock();
@@ -4763,6 +4807,7 @@ namespace EventCaptureNative
             desktopDuplication_.Reset();
             qsvEncoder_.reset();
             useQsvEncoder_ = false;
+            useAsyncPacketWriter_ = false;
             encoder_.Reset();
             codecApi_.Reset();
             eventGenerator_.Reset();
@@ -4877,6 +4922,7 @@ namespace EventCaptureNative
         ComPtr<IMFTransform> encoder_;
         std::unique_ptr<QsvEncoder> qsvEncoder_;
         bool useQsvEncoder_{};
+        bool useAsyncPacketWriter_{};
         std::atomic_bool qsvForceKeyFrame_{};
         ComPtr<ICodecAPI> codecApi_;
         ComPtr<IMFMediaEventGenerator> eventGenerator_;
