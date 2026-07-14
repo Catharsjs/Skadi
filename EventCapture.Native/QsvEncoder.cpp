@@ -17,7 +17,7 @@ namespace EventCaptureNative
     namespace
     {
         constexpr mfxU32 SyncWaitMilliseconds = 2'000;
-        constexpr size_t AsyncDepth = 8;
+        constexpr size_t AsyncDepth = 4;
         constexpr size_t MinimumBitstreamCapacity = 4u * 1024u * 1024u;
         constexpr size_t MaximumBitstreamCapacity = 64u * 1024u * 1024u;
         constexpr int64_t TicksPerSecond = 10'000'000;

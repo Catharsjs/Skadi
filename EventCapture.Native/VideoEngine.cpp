@@ -76,6 +76,14 @@ namespace EventCaptureNative
             bool inFlight{};
         };
 
+        struct ConvertedQsvFrame
+        {
+            size_t surfaceIndex{};
+            int64_t timestamp100ns{};
+            int64_t duration100ns{};
+            uint64_t textureVersion{};
+        };
+
         enum class CaptureBackend
         {
             WindowsGraphicsCapture,
@@ -687,6 +695,10 @@ namespace EventCaptureNative
                 submittedFrames_.store(0);
                 ResetCaptureDiagnostics();
                 running_ = true;
+                if (useQsvEncoder_)
+                {
+                    StartQsvSubmitThread();
+                }
                 if (captureBackend_ == CaptureBackend::DesktopDuplication)
                 {
                     LogNative(L"DesktopDuplication capture thread creation begin.");
@@ -852,6 +864,7 @@ namespace EventCaptureNative
                         << L" | ReplayEnabled=" << ReplayEnabled()
                         << L" | Packets=" << packets_.size()
                         << L" | Captured=" << capturedFrames_.load()
+                        << L" | Converted=" << convertedFrames_.load()
                         << L" | Submitted=" << submittedFrames_.load()
                         << L" | Encoded=" << encodedFrames_.load()
                         << L" | MonitorQueueOverflow=" << monitorQueueOverflowFrames_.load()
@@ -2148,6 +2161,8 @@ namespace EventCaptureNative
                 return std::numeric_limits<size_t>::max();
             }
 
+            std::scoped_lock lock(encoderSurfaceMutex_);
+
             for (size_t attempt = 0; attempt < encoderSurfaceSlots_.size(); ++attempt)
             {
                 const size_t candidate = nextEncoderSurface_;
@@ -2164,6 +2179,7 @@ namespace EventCaptureNative
 
         void ReleaseEncoderSurface(size_t index)
         {
+            std::scoped_lock lock(encoderSurfaceMutex_);
             if (index < encoderSurfaceSlots_.size())
             {
                 encoderSurfaceSlots_[index].inFlight = false;
@@ -2528,7 +2544,7 @@ namespace EventCaptureNative
                 qsvEncoder_ = std::move(encoder);
                 useQsvEncoder_ = true;
                 StartQsvPacketWriter();
-                LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=8 | TargetUsage=BestSpeed");
+                LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=4 | TargetUsage=BestSpeed | Stages=Capture-Convert-Submit-Write");
                 return true;
             }
             catch (const std::exception& error)
@@ -3485,22 +3501,14 @@ namespace EventCaptureNative
                         ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
                         if (captureBackend_ == CaptureBackend::DesktopDuplication)
                         {
-                            if (useQsvEncoder_)
-                            {
-                                qsvEncoder_->DrainReady();
-                            }
-                            else if (asyncEncoder_)
+                            if (!useQsvEncoder_ && asyncEncoder_)
                             {
                                 PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             }
                             preparedEncoderSurface = AcquireEncoderSurface();
                             if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
                             {
-                                if (useQsvEncoder_)
-                                {
-                                    qsvEncoder_->DrainReady();
-                                }
-                                else if (asyncEncoder_)
+                                if (!useQsvEncoder_ && asyncEncoder_)
                                 {
                                     PumpEncoderEvents(false, std::chrono::milliseconds(5));
                                 }
@@ -3647,17 +3655,37 @@ namespace EventCaptureNative
 
                         try
                         {
+                            const int64_t submitTimestamp = useMonitorCfrScheduler
+                                ? preparedCaptureTimestamp100ns
+                                : static_cast<int64_t>(submittedFrames_.load()) * frameDuration;
+                            if (useQsvEncoder_)
+                            {
+                                if (!QueueConvertedQsvFrame(
+                                        preparedEncoderSurface,
+                                        submitTimestamp,
+                                        frameDuration,
+                                        preparedTextureVersion))
+                                {
+                                    ReleaseEncoderSurface(preparedEncoderSurface);
+                                    droppedFrames_.fetch_add(1);
+                                    if (!running_) break;
+                                    continue;
+                                }
+                                preparedEncoderSurface = std::numeric_limits<size_t>::max();
+                                lastEncodedTextureVersion = preparedTextureVersion;
+                                continue;
+                            }
+
                             const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
                             AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
-                            const int64_t submitTimestamp = useMonitorCfrScheduler
+                            const int64_t mftSubmitTimestamp = useMonitorCfrScheduler
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedIndex) * frameDuration;
                             const auto submitStart = std::chrono::steady_clock::now();
-                            SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration, preparedEncoderSurface);
+                            SubmitFrame(preparedEncoderTexture.Get(), mftSubmitTimestamp, frameDuration, preparedEncoderSurface);
                             const double submitMs = ElapsedMilliseconds(submitStart);
                             const auto drainStart = std::chrono::steady_clock::now();
-                            if (useQsvEncoder_) qsvEncoder_->DrainReady();
-                            else if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
+                            if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             const double drainMs = ElapsedMilliseconds(drainStart);
                             const auto submitDiagnosticNow = std::chrono::steady_clock::now();
@@ -3722,15 +3750,7 @@ namespace EventCaptureNative
                         }
                     }
                 }
-                if (useQsvEncoder_ && qsvEncoder_)
-                {
-                    try { qsvEncoder_->Flush(); }
-                    catch (const std::exception& error)
-                    {
-                        LogNative(L"QSV drain failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
-                    }
-                }
-                else if (encoder_)
+                if (!useQsvEncoder_ && encoder_)
                 {
                     encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                     encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
@@ -3971,6 +3991,169 @@ namespace EventCaptureNative
             if (ReplayEnabled()) AddPacket(std::move(frame));
             AddDiagnosticTimestamp(encodedTimeline100ns_, timestamp);
             encodedFrames_.fetch_add(1);
+        }
+
+        bool QueueConvertedQsvFrame(
+            size_t surfaceIndex,
+            int64_t timestamp100ns,
+            int64_t duration100ns,
+            uint64_t textureVersion)
+        {
+            std::scoped_lock lock(qsvSubmitMutex_);
+            if (qsvSubmitStopping_ || qsvSubmitFailed_) return false;
+            if (qsvConvertedQueue_.size() >= MaxQsvConvertedQueue)
+            {
+                ++qsvConvertedQueueOverflow_;
+                return false;
+            }
+            qsvConvertedQueue_.push_back(ConvertedQsvFrame{
+                surfaceIndex,
+                timestamp100ns,
+                duration100ns,
+                textureVersion });
+            convertedFrames_.fetch_add(1);
+            qsvSubmitCondition_.notify_one();
+            return true;
+        }
+
+        void StartQsvSubmitThread()
+        {
+            std::scoped_lock lock(qsvSubmitMutex_);
+            qsvConvertedQueue_.clear();
+            qsvSubmitStopping_ = false;
+            qsvSubmitFailed_ = false;
+            qsvConvertedQueueOverflow_ = 0;
+            qsvSubmitThread_ = std::thread([this] { QsvSubmitLoop(); });
+        }
+
+        void StopQsvSubmitThread()
+        {
+            {
+                std::scoped_lock lock(qsvSubmitMutex_);
+                qsvSubmitStopping_ = true;
+            }
+            qsvSubmitCondition_.notify_all();
+            if (qsvSubmitThread_.joinable())
+            {
+                qsvSubmitThread_.join();
+            }
+        }
+
+        void QsvSubmitLoop()
+        {
+            DWORD mmcssTaskIndex = 0;
+            HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Capture", &mmcssTaskIndex);
+            if (mmcssHandle != nullptr) AvSetMmThreadPriority(mmcssHandle, AVRT_PRIORITY_HIGH);
+            const HRESULT apartmentResult = RoInitialize(RO_INIT_MULTITHREADED);
+            const bool apartmentInitialized = SUCCEEDED(apartmentResult);
+            std::chrono::steady_clock::time_point lastDiagnostic{};
+            bool failed = false;
+            LogNative(L"QSV submit thread started.");
+
+            for (;;)
+            {
+                ConvertedQsvFrame frame;
+                size_t queueDepth = 0;
+                uint64_t overflow = 0;
+                {
+                    std::unique_lock lock(qsvSubmitMutex_);
+                    qsvSubmitCondition_.wait(lock, [this]
+                        {
+                            return qsvSubmitStopping_ || !qsvConvertedQueue_.empty();
+                        });
+                    if (qsvConvertedQueue_.empty())
+                    {
+                        if (qsvSubmitStopping_) break;
+                        continue;
+                    }
+                    frame = qsvConvertedQueue_.front();
+                    qsvConvertedQueue_.pop_front();
+                    queueDepth = qsvConvertedQueue_.size();
+                    overflow = qsvConvertedQueueOverflow_;
+                }
+
+                try
+                {
+                    const uint64_t submittedIndex = submittedFrames_.fetch_add(1) + 1;
+                    AddDiagnosticTimestamp(submittedTimeline100ns_, frame.timestamp100ns);
+                    const auto submitStart = std::chrono::steady_clock::now();
+                    SubmitFrame(
+                        encoderSurfaceSlots_[frame.surfaceIndex].texture.Get(),
+                        frame.timestamp100ns,
+                        frame.duration100ns,
+                        frame.surfaceIndex);
+                    qsvEncoder_->DrainReady();
+                    const double submitMs = ElapsedMilliseconds(submitStart);
+
+                    const auto diagnosticNow = std::chrono::steady_clock::now();
+                    if (lastDiagnostic == std::chrono::steady_clock::time_point{} ||
+                        diagnosticNow - lastDiagnostic >= std::chrono::seconds(1))
+                    {
+                        lastDiagnostic = diagnosticNow;
+                        std::wstringstream message;
+                        message << L"QSV submit stage status"
+                            << L" | Converted=" << convertedFrames_.load()
+                            << L" | Submitted=" << submittedIndex
+                            << L" | Encoded=" << encodedFrames_.load()
+                            << L" | ConvertedQueue=" << queueDepth
+                            << L" | Overflow=" << overflow
+                            << L" | SubmitMs=" << std::fixed << std::setprecision(2) << submitMs;
+                        LogNative(message.str());
+                    }
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    ReleaseEncoderSurface(frame.surfaceIndex);
+                    SetError(error.message().c_str());
+                    LogNative(L"QSV submit thread fatal HRESULT | " + std::wstring(error.message().c_str()));
+                    failed = true;
+                }
+                catch (const std::exception& error)
+                {
+                    ReleaseEncoderSurface(frame.surfaceIndex);
+                    const std::wstring message(error.what(), error.what() + std::char_traits<char>::length(error.what()));
+                    SetError(message);
+                    LogNative(L"QSV submit thread fatal exception | " + message);
+                    failed = true;
+                }
+                catch (...)
+                {
+                    ReleaseEncoderSurface(frame.surfaceIndex);
+                    SetError(L"Unexpected QSV submit failure.");
+                    LogNative(L"QSV submit thread fatal unknown exception.");
+                    failed = true;
+                }
+
+                if (failed)
+                {
+                    running_ = false;
+                    frameCondition_.notify_all();
+                    std::scoped_lock lock(qsvSubmitMutex_);
+                    qsvSubmitFailed_ = true;
+                    break;
+                }
+            }
+
+            if (!failed && qsvEncoder_ != nullptr)
+            {
+                try { qsvEncoder_->Flush(); }
+                catch (const std::exception& error)
+                {
+                    LogNative(L"QSV submit drain failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                }
+            }
+
+            {
+                std::scoped_lock lock(qsvSubmitMutex_);
+                while (!qsvConvertedQueue_.empty())
+                {
+                    ReleaseEncoderSurface(qsvConvertedQueue_.front().surfaceIndex);
+                    qsvConvertedQueue_.pop_front();
+                }
+            }
+            if (apartmentInitialized) RoUninitialize();
+            if (mmcssHandle != nullptr) AvRevertMmThreadCharacteristics(mmcssHandle);
+            LogNative(L"QSV submit thread exited.");
         }
 
         void StartQsvPacketWriter()
@@ -4220,6 +4403,7 @@ namespace EventCaptureNative
             capturedTimeline100ns_.clear();
             submittedTimeline100ns_.clear();
             encodedTimeline100ns_.clear();
+            convertedFrames_.store(0);
             monitorQueueOverflowFrames_.store(0);
             monitorQueueMaxDepth_.store(0);
             encoderSurfaceStarvationFrames_.store(0);
@@ -4551,6 +4735,7 @@ namespace EventCaptureNative
                 }
             }
 
+            StopQsvSubmitThread();
             StopQsvPacketWriter();
 
             if (recordingStream_.is_open()) recordingStream_.close();
@@ -4666,6 +4851,7 @@ namespace EventCaptureNative
         ComPtr<ID3D11SamplerState> compositorSampler_;
         ComPtr<ID3D11Texture2D> encoderTexture_;
         std::vector<EncoderSurfaceSlot> encoderSurfaceSlots_;
+        mutable std::mutex encoderSurfaceMutex_;
         std::deque<size_t> submittedEncoderSurfaces_;
         size_t nextEncoderSurface_{};
         ComPtr<ID3D11Texture2D> blackTexture_;
@@ -4697,6 +4883,15 @@ namespace EventCaptureNative
         bool asyncEncoder_{ false };
         int inputCredits_{};
         std::thread encoderThread_;
+
+        mutable std::mutex qsvSubmitMutex_;
+        std::condition_variable qsvSubmitCondition_;
+        std::deque<ConvertedQsvFrame> qsvConvertedQueue_;
+        std::thread qsvSubmitThread_;
+        bool qsvSubmitStopping_{};
+        bool qsvSubmitFailed_{};
+        uint64_t qsvConvertedQueueOverflow_{};
+        static constexpr size_t MaxQsvConvertedQueue = 16;
 
         mutable std::mutex qsvPacketMutex_;
         std::condition_variable qsvPacketCondition_;
@@ -4750,6 +4945,7 @@ namespace EventCaptureNative
         std::deque<int64_t> encodedTimeline100ns_;
 
         std::atomic_uint64_t capturedFrames_{};
+        std::atomic_uint64_t convertedFrames_{};
         std::atomic_uint64_t submittedFrames_{};
         std::atomic_uint64_t encodedFrames_{};
         std::atomic_uint64_t droppedFrames_{};
