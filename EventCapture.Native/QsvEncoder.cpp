@@ -236,6 +236,7 @@ namespace EventCaptureNative
             MFXQueryVersion(session_, &version);
             MFXQueryIMPL(session_, &implementation);
             initialized_ = true;
+            nextFrameOrder_ = 0;
             keyFrameMismatchLogged_ = false;
 
             std::wstringstream message;
@@ -270,7 +271,8 @@ namespace EventCaptureNative
         Task& task = AcquireTask();
         Surface& surface = *surfaces_[surfaceIndex];
         surface.value.Data.TimeStamp = ToMfxTimestamp(timestamp100ns);
-        surface.value.Data.FrameOrder = static_cast<mfxU32>(timestamp100ns / std::max<int64_t>(1, frameDuration100ns_));
+        // oneVPL expects contiguous input order even when the capture scheduler skips a late slot.
+        surface.value.Data.FrameOrder = nextFrameOrder_++;
 
         mfxEncodeCtrl control{};
         if (forceKeyFrame)
@@ -381,6 +383,7 @@ namespace EventCaptureNative
         }
         session_ = nullptr;
         initialized_ = false;
+        nextFrameOrder_ = 0;
         keyFrameMismatchLogged_ = false;
         pendingTasks_.clear();
         tasks_.clear();

@@ -747,6 +747,7 @@ namespace EventCaptureNative
         EcResult SaveReplay(const wchar_t* path, uint32_t seconds, EcExportResult& result)
         {
             if (path == nullptr || seconds == 0) return EcResult::InvalidArgument;
+            if (!WaitForQsvPacketWriterSnapshot()) return EcResult::NativeFailure;
             {
                 std::wstringstream message;
                 message << L"Native state | Action=SaveReplay enter | RequestedSec=" << seconds
@@ -819,6 +820,7 @@ namespace EventCaptureNative
         EcResult StartRecording(const wchar_t* path)
         {
             if (path == nullptr || *path == L'\0') return EcResult::InvalidArgument;
+            if (!WaitForQsvPacketWriterSnapshot()) return EcResult::NativeFailure;
 
             try
             {
@@ -906,6 +908,7 @@ namespace EventCaptureNative
         EcResult StartRecordingWithAudio(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio)
         {
             if (path == nullptr || *path == L'\0') return EcResult::InvalidArgument;
+            if (!WaitForQsvPacketWriterSnapshot()) return EcResult::NativeFailure;
 
             try
             {
@@ -1087,6 +1090,7 @@ namespace EventCaptureNative
 
             try
             {
+                if (!WaitForQsvPacketWriterSnapshot()) return EcResult::NativeFailure;
                 std::unique_lock writerLock(recordingWriterMutex_);
 
                 {
@@ -2520,6 +2524,7 @@ namespace EventCaptureNative
                     [](const std::wstring& message) { LogNative(message); });
                 qsvEncoder_ = std::move(encoder);
                 useQsvEncoder_ = true;
+                StartQsvPacketWriter();
                 LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=4");
                 return true;
             }
@@ -2902,8 +2907,9 @@ namespace EventCaptureNative
         void CreateRecordingWriter(const wchar_t* path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio)
         {
             ComPtr<IMFAttributes> attributes;
-            ThrowIfFailed(MFCreateAttributes(&attributes, 1));
+            ThrowIfFailed(MFCreateAttributes(&attributes, 2));
             ThrowIfFailed(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
+            ThrowIfFailed(attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE));
 
             ComPtr<IMFMediaType> outputType;
             ThrowIfFailed(MFCreateMediaType(&outputType));
@@ -3170,8 +3176,13 @@ namespace EventCaptureNative
                 }
             }
 
-            if (writtenSamples > 0 || trimmedSamples > 0 || droppedSamples > 0)
+            const auto diagnosticNow = std::chrono::steady_clock::now();
+            const bool periodicDiagnostic = writtenSamples > 0 &&
+                (lastAudioDrainDiagnostic_ == std::chrono::steady_clock::time_point{} ||
+                    diagnosticNow - lastAudioDrainDiagnostic_ >= std::chrono::seconds(2));
+            if (periodicDiagnostic || trimmedSamples > 0 || droppedSamples > 0)
             {
+                lastAudioDrainDiagnostic_ = diagnosticNow;
                 std::wstringstream details;
                 details << L"Written=" << writtenSamples
                     << L" | Trimmed=" << trimmedSamples
@@ -3253,6 +3264,7 @@ namespace EventCaptureNative
                     recording_ = true;
                     recordingStart100ns_ = nativeTimestamp100ns;
                     recordingLastTimestamp100ns_ = nativeTimestamp100ns - fallbackDuration100ns;
+                    recordingLastKeyFrameRequest100ns_ = nativeTimestamp100ns;
 
                     std::wstringstream message;
                     message << L"Native state | Action=Recording first-buffered-sample"
@@ -3377,6 +3389,8 @@ namespace EventCaptureNative
                 int64_t nextFrameDue100ns = -1;
                 uint64_t monitorCfrFrameIndex = 0;
                 std::chrono::steady_clock::time_point nextMonitorCfrWake{};
+                std::chrono::steady_clock::time_point lastBlitDiagnostic{};
+                std::chrono::steady_clock::time_point lastSubmitDiagnostic{};
                 uint64_t lastEncodedTextureVersion = 0;
                 size_t lastMonitorCfrSlot = std::numeric_limits<size_t>::max();
 
@@ -3514,7 +3528,14 @@ namespace EventCaptureNative
                         const auto blitStart = std::chrono::steady_clock::now();
                         const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), selectedProcessorOutput.Get(), 0, 1, &stream);
                         const double blitMs = ElapsedMilliseconds(blitStart);
-                        LogNativeTimingIfSlow(L"Monitor CFR VideoProcessorBlt", blitMs, 10.0);
+                        const auto blitDiagnosticNow = std::chrono::steady_clock::now();
+                        if (blitMs >= 10.0 &&
+                            (lastBlitDiagnostic == std::chrono::steady_clock::time_point{} ||
+                                blitDiagnosticNow - lastBlitDiagnostic >= std::chrono::seconds(1)))
+                        {
+                            lastBlitDiagnostic = blitDiagnosticNow;
+                            LogNativeTimingIfSlow(L"Monitor CFR VideoProcessorBlt", blitMs, 10.0);
+                        }
                         if (FAILED(blit))
                         {
                             ReleaseEncoderSurface(preparedEncoderSurface);
@@ -3636,8 +3657,12 @@ namespace EventCaptureNative
                             else if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             const double drainMs = ElapsedMilliseconds(drainStart);
-                            if (submitMs >= 10.0 || drainMs >= 10.0)
+                            const auto submitDiagnosticNow = std::chrono::steady_clock::now();
+                            if ((submitMs >= 10.0 || drainMs >= 10.0) &&
+                                (lastSubmitDiagnostic == std::chrono::steady_clock::time_point{} ||
+                                    submitDiagnosticNow - lastSubmitDiagnostic >= std::chrono::seconds(1)))
                             {
+                                lastSubmitDiagnostic = submitDiagnosticNow;
                                 std::wstringstream details;
                                 details << L"SubmitMs=" << std::fixed << std::setprecision(2) << submitMs
                                     << L" | DrainMs=" << drainMs
@@ -3945,6 +3970,133 @@ namespace EventCaptureNative
             encodedFrames_.fetch_add(1);
         }
 
+        void StartQsvPacketWriter()
+        {
+            std::scoped_lock lock(qsvPacketMutex_);
+            qsvPacketQueue_.clear();
+            qsvPacketsQueued_ = 0;
+            qsvPacketsProcessed_ = 0;
+            qsvPacketWriterStopping_ = false;
+            qsvPacketWriterFailed_ = false;
+            qsvPacketWriterThread_ = std::thread([this] { QsvPacketWriterLoop(); });
+        }
+
+        void StopQsvPacketWriter()
+        {
+            {
+                std::scoped_lock lock(qsvPacketMutex_);
+                qsvPacketWriterStopping_ = true;
+            }
+            qsvPacketCondition_.notify_all();
+            qsvPacketDrainedCondition_.notify_all();
+            if (qsvPacketWriterThread_.joinable())
+            {
+                qsvPacketWriterThread_.join();
+            }
+        }
+
+        bool WaitForQsvPacketWriterSnapshot()
+        {
+            if (!useQsvEncoder_ || !qsvPacketWriterThread_.joinable()) return true;
+            std::unique_lock lock(qsvPacketMutex_);
+            const uint64_t target = qsvPacketsQueued_;
+            qsvPacketDrainedCondition_.wait(lock, [this, target]
+                {
+                    return qsvPacketsProcessed_ >= target || qsvPacketWriterFailed_;
+                });
+            return !qsvPacketWriterFailed_;
+        }
+
+        void QsvPacketWriterLoop()
+        {
+            const HRESULT apartmentResult = RoInitialize(RO_INIT_MULTITHREADED);
+            const bool apartmentInitialized = SUCCEEDED(apartmentResult);
+            std::chrono::steady_clock::time_point lastQueueDiagnostic{};
+            LogNative(L"QSV packet writer thread started.");
+
+            for (;;)
+            {
+                QsvEncodedPacket packet;
+                {
+                    std::unique_lock lock(qsvPacketMutex_);
+                    qsvPacketCondition_.wait(lock, [this]
+                        {
+                            return qsvPacketWriterStopping_ || !qsvPacketQueue_.empty();
+                        });
+                    if (qsvPacketQueue_.empty())
+                    {
+                        if (qsvPacketWriterStopping_) break;
+                        continue;
+                    }
+                    packet = std::move(qsvPacketQueue_.front());
+                    qsvPacketQueue_.pop_front();
+                    qsvPacketCondition_.notify_all();
+                }
+
+                bool processingFailed = false;
+                try
+                {
+                    ProcessQsvPacket(std::move(packet));
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    SetError(error.message().c_str());
+                    LogNative(L"QSV packet writer fatal HRESULT | " + std::wstring(error.message().c_str()));
+                    running_ = false;
+                    std::scoped_lock lock(qsvPacketMutex_);
+                    qsvPacketWriterFailed_ = true;
+                    processingFailed = true;
+                }
+                catch (const std::exception& error)
+                {
+                    const std::wstring message(error.what(), error.what() + std::char_traits<char>::length(error.what()));
+                    SetError(message);
+                    LogNative(L"QSV packet writer fatal exception | " + message);
+                    running_ = false;
+                    std::scoped_lock lock(qsvPacketMutex_);
+                    qsvPacketWriterFailed_ = true;
+                    processingFailed = true;
+                }
+                catch (...)
+                {
+                    SetError(L"Unexpected QSV packet writer failure.");
+                    LogNative(L"QSV packet writer fatal unknown exception.");
+                    running_ = false;
+                    std::scoped_lock lock(qsvPacketMutex_);
+                    qsvPacketWriterFailed_ = true;
+                    processingFailed = true;
+                }
+
+                uint64_t processed = 0;
+                size_t queueDepth = 0;
+                {
+                    std::scoped_lock lock(qsvPacketMutex_);
+                    ++qsvPacketsProcessed_;
+                    processed = qsvPacketsProcessed_;
+                    queueDepth = qsvPacketQueue_.size();
+                }
+                qsvPacketDrainedCondition_.notify_all();
+                if (processingFailed) break;
+
+                const auto diagnosticNow = std::chrono::steady_clock::now();
+                if (lastQueueDiagnostic == std::chrono::steady_clock::time_point{} ||
+                    diagnosticNow - lastQueueDiagnostic >= std::chrono::seconds(2))
+                {
+                    lastQueueDiagnostic = diagnosticNow;
+                    std::wstringstream message;
+                    message << L"QSV packet writer status | Processed=" << processed
+                        << L" | QueueDepth=" << queueDepth
+                        << L" | Capacity=" << MaxQsvPacketQueue;
+                    LogNative(message.str());
+                }
+            }
+
+            qsvPacketCondition_.notify_all();
+            qsvPacketDrainedCondition_.notify_all();
+            if (apartmentInitialized) RoUninitialize();
+            LogNative(L"QSV packet writer thread exited.");
+        }
+
         void ConsumeQsvPacket(QsvEncodedPacket&& packet)
         {
             if (!submittedEncoderSurfaces_.empty())
@@ -3953,6 +4105,23 @@ namespace EventCaptureNative
                 submittedEncoderSurfaces_.pop_front();
                 ReleaseEncoderSurface(completedSurface);
             }
+
+            std::unique_lock lock(qsvPacketMutex_);
+            qsvPacketCondition_.wait(lock, [this]
+                {
+                    return qsvPacketQueue_.size() < MaxQsvPacketQueue ||
+                        qsvPacketWriterStopping_ || qsvPacketWriterFailed_;
+                });
+            if (qsvPacketWriterStopping_ || qsvPacketWriterFailed_)
+                throw std::runtime_error("QSV packet writer is not available");
+            qsvPacketQueue_.push_back(std::move(packet));
+            ++qsvPacketsQueued_;
+            lock.unlock();
+            qsvPacketCondition_.notify_one();
+        }
+
+        void ProcessQsvPacket(QsvEncodedPacket&& packet)
+        {
 
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(packet.bytes.size()), &buffer));
@@ -3970,7 +4139,25 @@ namespace EventCaptureNative
             ThrowIfFailed(sample->SetSampleTime(packet.timestamp100ns));
             ThrowIfFailed(sample->SetSampleDuration(packet.duration100ns));
             ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, packet.keyFrame ? TRUE : FALSE));
-            ConsumeEncodedSample(sample.Get());
+
+            int64_t timestamp = packet.timestamp100ns;
+            const int64_t duration = std::max<int64_t>(1, packet.duration100ns);
+            if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_)
+            {
+                timestamp = lastPacketTimestamp100ns_ + duration;
+            }
+            lastPacketTimestamp100ns_ = timestamp;
+
+            WriteRecordingSample(sample.Get(), timestamp, duration, packet.keyFrame);
+
+            EncodedFrame frame;
+            frame.bytes = std::move(packet.bytes);
+            frame.timestamp100ns = timestamp;
+            frame.duration100ns = duration;
+            frame.keyFrame = packet.keyFrame;
+            if (ReplayEnabled()) AddPacket(std::move(frame));
+            AddDiagnosticTimestamp(encodedTimeline100ns_, timestamp);
+            encodedFrames_.fetch_add(1);
         }
 
         void AddPacket(EncodedFrame frame)
@@ -4361,6 +4548,8 @@ namespace EventCaptureNative
                 }
             }
 
+            StopQsvPacketWriter();
+
             if (recordingStream_.is_open()) recordingStream_.close();
             ReleaseRecordingWriterNoThrow();
             if (activeSpoolStream_.is_open()) activeSpoolStream_.close();
@@ -4506,6 +4695,17 @@ namespace EventCaptureNative
         int inputCredits_{};
         std::thread encoderThread_;
 
+        mutable std::mutex qsvPacketMutex_;
+        std::condition_variable qsvPacketCondition_;
+        std::condition_variable qsvPacketDrainedCondition_;
+        std::deque<QsvEncodedPacket> qsvPacketQueue_;
+        std::thread qsvPacketWriterThread_;
+        uint64_t qsvPacketsQueued_{};
+        uint64_t qsvPacketsProcessed_{};
+        bool qsvPacketWriterStopping_{};
+        bool qsvPacketWriterFailed_{};
+        static constexpr size_t MaxQsvPacketQueue = 240;
+
         mutable std::mutex packetMutex_;
         mutable std::mutex recordingWriterMutex_;
         std::deque<EncodedFrame> packets_;
@@ -4523,6 +4723,7 @@ namespace EventCaptureNative
         std::deque<RecordingAudioSample> recordingAudioQueue_;
         uint64_t recordingAudioQueuedBytes_{};
         uint64_t recordingAudioDroppedSamples_{};
+        std::chrono::steady_clock::time_point lastAudioDrainDiagnostic_{};
         static constexpr uint64_t MaxRecordingAudioQueueBytes = 64ull * 1024ull * 1024ull;
         static constexpr int64_t RecordingAudioLead100ns = 2'500'000;
         std::filesystem::path spoolDirectory_;

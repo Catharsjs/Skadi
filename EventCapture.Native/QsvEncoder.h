@@ -74,6 +74,7 @@ namespace EventCaptureNative
         PacketHandler packetHandler_;
         LogHandler logHandler_;
         int64_t frameDuration100ns_{};
+        mfxU32 nextFrameOrder_{};
         bool initialized_{};
         bool keyFrameMismatchLogged_{};
     };
