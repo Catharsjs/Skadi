@@ -1284,6 +1284,27 @@ namespace EventCaptureNative
                 &device_,
                 &featureLevel,
                 &context_));
+
+            ComPtr<IDXGIDevice> dxgiDevice;
+            ComPtr<IDXGIAdapter> deviceAdapter;
+            ComPtr<IDXGIAdapter1> deviceAdapter1;
+            ThrowIfFailed(device_.As(&dxgiDevice));
+            ThrowIfFailed(dxgiDevice->GetAdapter(&deviceAdapter));
+            ThrowIfFailed(deviceAdapter.As(&deviceAdapter1));
+            DXGI_ADAPTER_DESC1 deviceAdapterDescription{};
+            ThrowIfFailed(deviceAdapter1->GetDesc1(&deviceAdapterDescription));
+            encoderAdapterLuid_ = deviceAdapterDescription.AdapterLuid;
+            hasEncoderAdapterLuid_ = true;
+
+            {
+                std::wstringstream log;
+                log << L"D3D11 encoder adapter | Name=" << deviceAdapterDescription.Description
+                    << L" | VendorId=0x" << std::hex << deviceAdapterDescription.VendorId
+                    << L" | LuidHigh=0x" << static_cast<uint32_t>(encoderAdapterLuid_.HighPart)
+                    << L" | LuidLow=0x" << encoderAdapterLuid_.LowPart;
+                LogNative(log.str());
+            }
+
             ComPtr<ID3D10Multithread> multithread;
             ThrowIfFailed(context_.As(&multithread));
             multithread->SetMultithreadProtected(TRUE);
@@ -2469,14 +2490,39 @@ namespace EventCaptureNative
             IMFActivate** activates = nullptr;
             UINT32 count = 0;
 
-            HRESULT result =
-                MFTEnumEx(
-                MFT_CATEGORY_VIDEO_ENCODER,
-                flags,
-                &inputInfo,
-                &outputInfo,
-                &activates,
-                &count);
+            ComPtr<IMFAttributes> enumerationAttributes;
+            const bool enumerateForAdapter =
+                captureBackend_ == CaptureBackend::DesktopDuplication &&
+                hasEncoderAdapterLuid_ &&
+                (flags & MFT_ENUM_FLAG_HARDWARE) != 0;
+
+            HRESULT result = S_OK;
+            if (enumerateForAdapter)
+            {
+                ThrowIfFailed(MFCreateAttributes(&enumerationAttributes, 1));
+                ThrowIfFailed(enumerationAttributes->SetBlob(
+                    MFT_ENUM_ADAPTER_LUID,
+                    reinterpret_cast<const UINT8*>(&encoderAdapterLuid_),
+                    sizeof(encoderAdapterLuid_)));
+                result = MFTEnum2(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    flags,
+                    &inputInfo,
+                    &outputInfo,
+                    enumerationAttributes.Get(),
+                    &activates,
+                    &count);
+            }
+            else
+            {
+                result = MFTEnumEx(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    flags,
+                    &inputInfo,
+                    &outputInfo,
+                    &activates,
+                    &count);
+            }
 
             if (FAILED(result) || count == 0)
             {
@@ -2498,6 +2544,7 @@ namespace EventCaptureNative
             std::wstringstream countLog;
             countLog
                 << L"H.264 MFT candidates | Label=" << label
+                << L" | Enumeration=" << (enumerateForAdapter ? L"MFTEnum2-adapter" : L"MFTEnumEx")
                 << L" | Count=" << count;
             LogNative(countLog.str());
 
@@ -2507,11 +2554,33 @@ namespace EventCaptureNative
             {
                 try
                 {
+                    wchar_t* friendlyName = nullptr;
+                    UINT32 friendlyNameLength = 0;
+                    std::wstring candidateName = L"unknown";
+                    if (SUCCEEDED(activates[index]->GetAllocatedString(
+                            MFT_FRIENDLY_NAME_Attribute,
+                            &friendlyName,
+                            &friendlyNameLength)) &&
+                        friendlyName != nullptr)
+                    {
+                        candidateName.assign(friendlyName, friendlyNameLength);
+                        CoTaskMemFree(friendlyName);
+                    }
+
+                    GUID candidateClsid{};
+                    wchar_t clsidText[64]{};
+                    if (SUCCEEDED(activates[index]->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &candidateClsid)))
+                    {
+                        StringFromGUID2(candidateClsid, clsidText, static_cast<int>(std::size(clsidText)));
+                    }
+
                     {
                         std::wstringstream log;
                         log
                             << L"H.264 MFT try | Label=" << label
-                            << L" | Index=" << index;
+                            << L" | Index=" << index
+                            << L" | Name=" << candidateName
+                            << L" | CLSID=" << (clsidText[0] != L'\0' ? clsidText : L"unknown");
                         LogNative(log.str());
                     }
 
@@ -2559,6 +2628,7 @@ namespace EventCaptureNative
                     log
                         << L"H.264 MFT configured | Label=" << label
                         << L" | Index=" << index
+                        << L" | Name=" << candidateName
                         << L" | Async=" << (asyncEncoder_ ? 1 : 0);
                     LogNative(log.str());
 
@@ -2733,6 +2803,12 @@ namespace EventCaptureNative
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonMeanBitRate, config_.bitrateKbps * 1000);
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncMPVGOPSize, config_.framesPerSecond);
             SetVariantBool(candidateCodecApi.Get(), CODECAPI_AVLowLatencyMode, true);
+            if (captureBackend_ == CaptureBackend::DesktopDuplication)
+            {
+                SetVariantBool(candidateCodecApi.Get(), CODECAPI_AVEncCommonRealTime, true);
+                SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 0);
+                LogNative(L"DDA H.264 encoder configured for real-time low-complexity operation");
+            }
             LogNative(L"ConfigureEncoderTransform codec API completed");
 
             LogNative(L"ConfigureEncoderTransform stream messages begin");
@@ -4234,6 +4310,8 @@ namespace EventCaptureNative
         ComPtr<ID3D11DeviceContext> context_;
         ComPtr<ID3D11VideoDevice> videoDevice_;
         ComPtr<ID3D11VideoContext> videoContext_;
+        LUID encoderAdapterLuid_{};
+        bool hasEncoderAdapterLuid_{};
         ComPtr<IMFDXGIDeviceManager> deviceManager_;
         UINT deviceManagerToken_{};
         IDirect3DDevice winRtDevice_{ nullptr };
