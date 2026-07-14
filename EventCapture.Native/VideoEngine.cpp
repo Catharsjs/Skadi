@@ -1611,14 +1611,12 @@ namespace EventCaptureNative
                     ThrowIfFailed(result);
                     frameAcquired = true;
 
-                    if (frameInfo.LastPresentTime.QuadPart == 0)
+                    if (frameInfo.LastPresentTime.QuadPart != 0)
                     {
-                        continue;
+                        ComPtr<ID3D11Texture2D> texture;
+                        ThrowIfFailed(resource.As(&texture));
+                        QueueDesktopDuplicationFrame(texture.Get(), true);
                     }
-
-                    ComPtr<ID3D11Texture2D> texture;
-                    ThrowIfFailed(resource.As(&texture));
-                    QueueDesktopDuplicationFrame(texture.Get(), true);
                 }
                 catch (const winrt::hresult_error& error)
                 {
