@@ -78,9 +78,14 @@ jobs:
         shell: pwsh
         run: |
           $nativeDll = Join-Path "${{ steps.publish.outputs.publish_dir }}" "EventCapture.Native.dll"
+          $vplDll = Join-Path "${{ steps.publish.outputs.publish_dir }}" "libvpl.dll"
 
           if (!(Test-Path $nativeDll)) {
             Write-Error "EventCapture.Native.dll was not copied to publish directory."
+          }
+
+          if (!(Test-Path $vplDll)) {
+            Write-Error "libvpl.dll was not copied to publish directory."
           }
 
       - name: Install Inno Setup

@@ -1,4 +1,5 @@
 #include "VideoEngine.h"
+#include "QsvEncoder.h"
 #include <Windows.h>
 #include <avrt.h>
 #include <codecapi.h>
@@ -1295,6 +1296,7 @@ namespace EventCaptureNative
             ThrowIfFailed(deviceAdapter1->GetDesc1(&deviceAdapterDescription));
             encoderAdapterLuid_ = deviceAdapterDescription.AdapterLuid;
             hasEncoderAdapterLuid_ = true;
+            encoderAdapterIsIntel_ = deviceAdapterDescription.VendorId == 0x8086;
 
             {
                 std::wstringstream log;
@@ -1975,7 +1977,7 @@ namespace EventCaptureNative
             }
         }
 
-        void CreateEncoderSurfacePool()
+        void CreateEncoderSurfacePool(bool qsvCompatible = true)
         {
             encoderSurfaceSlots_.clear();
             submittedEncoderSurfaces_.clear();
@@ -1990,6 +1992,12 @@ namespace EventCaptureNative
 
             D3D11_TEXTURE2D_DESC description{};
             encoderTexture_->GetDesc(&description);
+            if (encoderAdapterIsIntel_ && qsvCompatible)
+            {
+                description.Width = (description.Width + 15u) & ~15u;
+                description.Height = (description.Height + 15u) & ~15u;
+                description.BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+            }
 
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDescription{};
             outputViewDescription.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
@@ -2459,6 +2467,13 @@ namespace EventCaptureNative
 
         void CreateEncoder()
         {
+            if (captureBackend_ == CaptureBackend::DesktopDuplication &&
+                encoderAdapterIsIntel_ &&
+                TryCreateQsvEncoder())
+            {
+                return;
+            }
+
             startupStage_ = L"H.264 MFT hardware configuration";
 
             if (TryCreateConfiguredEncoder(
@@ -2479,6 +2494,46 @@ namespace EventCaptureNative
             }
 
             throw std::runtime_error("No compatible H.264 Media Foundation encoder is available");
+        }
+
+        bool TryCreateQsvEncoder()
+        {
+            startupStage_ = L"Intel QSV D3D11 encoder configuration";
+            try
+            {
+                std::vector<ID3D11Texture2D*> textures;
+                textures.reserve(encoderSurfaceSlots_.size());
+                for (const auto& slot : encoderSurfaceSlots_)
+                {
+                    textures.push_back(slot.texture.Get());
+                }
+
+                auto encoder = std::make_unique<QsvEncoder>();
+                encoder->Initialize(
+                    device_.Get(),
+                    textures,
+                    config_.outputWidth,
+                    config_.outputHeight,
+                    config_.framesPerSecond,
+                    config_.bitrateKbps,
+                    [this](QsvEncodedPacket&& packet) { ConsumeQsvPacket(std::move(packet)); },
+                    [](const std::wstring& message) { LogNative(message); });
+                qsvEncoder_ = std::move(encoder);
+                useQsvEncoder_ = true;
+                LogNative(L"DDA encoder backend selected | Backend=Intel oneVPL QSV | AsyncDepth=4");
+                return true;
+            }
+            catch (const std::exception& error)
+            {
+                LogNative(
+                    L"Intel oneVPL QSV initialization failed; using adapter-bound MFT | Error=" +
+                    std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                qsvEncoder_.reset();
+                useQsvEncoder_ = false;
+                CreateEncoderSurfacePool(false);
+                LogNative(L"DDA encoder surface pool recreated for MFT fallback layout");
+                return false;
+            }
         }
 
         bool TryCreateConfiguredEncoder(
@@ -3413,14 +3468,22 @@ namespace EventCaptureNative
                         ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
                         if (captureBackend_ == CaptureBackend::DesktopDuplication)
                         {
-                            if (asyncEncoder_)
+                            if (useQsvEncoder_)
+                            {
+                                qsvEncoder_->DrainReady();
+                            }
+                            else if (asyncEncoder_)
                             {
                                 PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             }
                             preparedEncoderSurface = AcquireEncoderSurface();
                             if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
                             {
-                                if (asyncEncoder_)
+                                if (useQsvEncoder_)
+                                {
+                                    qsvEncoder_->DrainReady();
+                                }
+                                else if (asyncEncoder_)
                                 {
                                     PumpEncoderEvents(false, std::chrono::milliseconds(5));
                                 }
@@ -3569,7 +3632,8 @@ namespace EventCaptureNative
                             SubmitFrame(preparedEncoderTexture.Get(), submitTimestamp, frameDuration, preparedEncoderSurface);
                             const double submitMs = ElapsedMilliseconds(submitStart);
                             const auto drainStart = std::chrono::steady_clock::now();
-                            if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
+                            if (useQsvEncoder_) qsvEncoder_->DrainReady();
+                            else if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::milliseconds(0));
                             else DrainSynchronousEncoder();
                             const double drainMs = ElapsedMilliseconds(drainStart);
                             if (submitMs >= 10.0 || drainMs >= 10.0)
@@ -3577,7 +3641,8 @@ namespace EventCaptureNative
                                 std::wstringstream details;
                                 details << L"SubmitMs=" << std::fixed << std::setprecision(2) << submitMs
                                     << L" | DrainMs=" << drainMs
-                                    << L" | Async=" << asyncEncoder_
+                                    << L" | Async=" << (useQsvEncoder_ || asyncEncoder_)
+                                    << L" | EncoderBackend=" << (useQsvEncoder_ ? L"QSV" : L"MFT")
                                     << L" | MonitorCfr=" << useMonitorCfrScheduler
                                     << L" | Submitted=" << submittedFrames_.load()
                                     << L" | Encoded=" << encodedFrames_.load()
@@ -3629,7 +3694,15 @@ namespace EventCaptureNative
                         }
                     }
                 }
-                if (encoder_)
+                if (useQsvEncoder_ && qsvEncoder_)
+                {
+                    try { qsvEncoder_->Flush(); }
+                    catch (const std::exception& error)
+                    {
+                        LogNative(L"QSV drain failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+                    }
+                }
+                else if (encoder_)
                 {
                     encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                     encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
@@ -3678,6 +3751,35 @@ namespace EventCaptureNative
             int64_t duration,
             size_t encoderSurfaceIndex)
         {
+            if (useQsvEncoder_)
+            {
+                if (qsvEncoder_ == nullptr || encoderSurfaceIndex == std::numeric_limits<size_t>::max())
+                    throw std::runtime_error("QSV submission does not have an encoder surface");
+
+                submittedEncoderSurfaces_.push_back(encoderSurfaceIndex);
+                try
+                {
+                    qsvEncoder_->Submit(
+                        encoderSurfaceIndex,
+                        timestamp,
+                        duration,
+                        qsvForceKeyFrame_.exchange(false));
+                }
+                catch (...)
+                {
+                    const auto found = std::find(
+                        submittedEncoderSurfaces_.rbegin(),
+                        submittedEncoderSurfaces_.rend(),
+                        encoderSurfaceIndex);
+                    if (found != submittedEncoderSurfaces_.rend())
+                    {
+                        submittedEncoderSurfaces_.erase(std::next(found).base());
+                    }
+                    throw;
+                }
+                return;
+            }
+
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer));
             ComPtr<IMFSample> sample;
@@ -3841,6 +3943,34 @@ namespace EventCaptureNative
             if (ReplayEnabled()) AddPacket(std::move(frame));
             AddDiagnosticTimestamp(encodedTimeline100ns_, timestamp);
             encodedFrames_.fetch_add(1);
+        }
+
+        void ConsumeQsvPacket(QsvEncodedPacket&& packet)
+        {
+            if (!submittedEncoderSurfaces_.empty())
+            {
+                const size_t completedSurface = submittedEncoderSurfaces_.front();
+                submittedEncoderSurfaces_.pop_front();
+                ReleaseEncoderSurface(completedSurface);
+            }
+
+            ComPtr<IMFMediaBuffer> buffer;
+            ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(packet.bytes.size()), &buffer));
+            BYTE* destination = nullptr;
+            DWORD maxLength = 0;
+            DWORD currentLength = 0;
+            ThrowIfFailed(buffer->Lock(&destination, &maxLength, &currentLength));
+            if (!packet.bytes.empty()) std::memcpy(destination, packet.bytes.data(), packet.bytes.size());
+            ThrowIfFailed(buffer->Unlock());
+            ThrowIfFailed(buffer->SetCurrentLength(static_cast<DWORD>(packet.bytes.size())));
+
+            ComPtr<IMFSample> sample;
+            ThrowIfFailed(MFCreateSample(&sample));
+            ThrowIfFailed(sample->AddBuffer(buffer.Get()));
+            ThrowIfFailed(sample->SetSampleTime(packet.timestamp100ns));
+            ThrowIfFailed(sample->SetSampleDuration(packet.duration100ns));
+            ThrowIfFailed(sample->SetUINT32(MFSampleExtension_CleanPoint, packet.keyFrame ? TRUE : FALSE));
+            ConsumeEncodedSample(sample.Get());
         }
 
         void AddPacket(EncodedFrame frame)
@@ -4173,6 +4303,11 @@ namespace EventCaptureNative
 
         void ForceKeyFrame()
         {
+            if (useQsvEncoder_)
+            {
+                qsvForceKeyFrame_.store(true);
+                return;
+            }
             SetVariantUInt32(codecApi_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
         }
 
@@ -4249,6 +4384,8 @@ namespace EventCaptureNative
             framePool_ = nullptr;
             captureItem_ = nullptr;
             desktopDuplication_.Reset();
+            qsvEncoder_.reset();
+            useQsvEncoder_ = false;
             encoder_.Reset();
             codecApi_.Reset();
             eventGenerator_.Reset();
@@ -4312,6 +4449,7 @@ namespace EventCaptureNative
         ComPtr<ID3D11VideoContext> videoContext_;
         LUID encoderAdapterLuid_{};
         bool hasEncoderAdapterLuid_{};
+        bool encoderAdapterIsIntel_{};
         ComPtr<IMFDXGIDeviceManager> deviceManager_;
         UINT deviceManagerToken_{};
         IDirect3DDevice winRtDevice_{ nullptr };
@@ -4359,6 +4497,9 @@ namespace EventCaptureNative
         std::atomic_bool windowSourceInvalid_{ false };
 
         ComPtr<IMFTransform> encoder_;
+        std::unique_ptr<QsvEncoder> qsvEncoder_;
+        bool useQsvEncoder_{};
+        std::atomic_bool qsvForceKeyFrame_{};
         ComPtr<ICodecAPI> codecApi_;
         ComPtr<IMFMediaEventGenerator> eventGenerator_;
         bool asyncEncoder_{ false };

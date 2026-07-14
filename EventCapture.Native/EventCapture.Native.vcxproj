@@ -25,16 +25,18 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><LanguageStandard>stdcpp20</LanguageStandard><ConformanceMode>true</ConformanceMode><PrecompiledHeader>NotUsing</PrecompiledHeader><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;EVENTCAPTURENATIVE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><LanguageStandard>stdcpp20</LanguageStandard><ConformanceMode>true</ConformanceMode><PrecompiledHeader>NotUsing</PrecompiledHeader><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;EVENTCAPTURENATIVE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\ThirdParty\oneVPL\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
-    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>avrt.lib;d3d11.lib;d3dcompiler.lib;dwmapi.lib;dxgi.lib;mfplat.lib;mf.lib;mfuuid.lib;mfreadwrite.lib;runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\oneVPL\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>vpl.lib;avrt.lib;d3d11.lib;d3dcompiler.lib;dwmapi.lib;dxgi.lib;mfplat.lib;mf.lib;mfuuid.lib;mfreadwrite.lib;runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="NativeApi.h" />
+    <ClInclude Include="QsvEncoder.h" />
     <ClInclude Include="VideoEngine.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="NativeApi.cpp" />
+    <ClCompile Include="QsvEncoder.cpp" />
     <ClCompile Include="VideoEngine.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
