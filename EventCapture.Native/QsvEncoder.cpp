@@ -18,6 +18,8 @@ namespace EventCaptureNative
     {
         constexpr mfxU32 SyncWaitMilliseconds = 2'000;
         constexpr size_t AsyncDepth = 4;
+        constexpr size_t MinimumBitstreamCapacity = 4u * 1024u * 1024u;
+        constexpr size_t MaximumBitstreamCapacity = 64u * 1024u * 1024u;
         constexpr int64_t TicksPerSecond = 10'000'000;
 
         mfxU16 Align16(uint32_t value)
@@ -126,7 +128,8 @@ namespace EventCaptureNative
             parameters_.mfx.RateControlMethod = MFX_RATECONTROL_CBR;
             parameters_.mfx.TargetKbps = static_cast<mfxU16>(std::min<uint32_t>(bitrateKbps, 65'535));
             parameters_.mfx.MaxKbps = parameters_.mfx.TargetKbps;
-            parameters_.mfx.BufferSizeInKB = static_cast<mfxU16>(std::min<uint32_t>(bitrateKbps / 2 + 1, 65'535));
+            // BufferSizeInKB is bytes-per-second expressed in KB, while TargetKbps is kilobits-per-second.
+            parameters_.mfx.BufferSizeInKB = static_cast<mfxU16>(std::min<uint32_t>(bitrateKbps / 8 + 1, 65'535));
             parameters_.mfx.GopPicSize = static_cast<mfxU16>(std::min<uint32_t>(framesPerSecond, 65'535));
             parameters_.mfx.GopRefDist = 1;
             parameters_.mfx.NumRefFrame = 1;
@@ -171,17 +174,16 @@ namespace EventCaptureNative
                 surfaces_.push_back(std::move(surface));
             }
 
-            const size_t bitstreamCapacity = std::max<size_t>(
-                4u * 1024u * 1024u,
-                static_cast<size_t>(bitrateKbps) * 1'000u / 8u * 2u);
+            const size_t runtimeBufferCapacity =
+                static_cast<size_t>(parameters_.mfx.BufferSizeInKB) * 1024u + 64u * 1024u;
+            const size_t bitstreamCapacity = std::min(
+                MaximumBitstreamCapacity,
+                std::max(MinimumBitstreamCapacity, runtimeBufferCapacity));
             tasks_.reserve(AsyncDepth);
             for (size_t index = 0; index < AsyncDepth; ++index)
             {
                 auto task = std::make_unique<Task>();
-                task->data = static_cast<mfxU8*>(_aligned_malloc(bitstreamCapacity, 32));
-                if (task->data == nullptr) throw std::bad_alloc();
-                task->bitstream.Data = task->data;
-                task->bitstream.MaxLength = static_cast<mfxU32>(bitstreamCapacity);
+                ResizeTaskBuffer(*task, bitstreamCapacity);
                 task->bitstream.TimeStamp = std::numeric_limits<mfxU64>::max();
                 tasks_.push_back(std::move(task));
             }
@@ -199,7 +201,9 @@ namespace EventCaptureNative
                 << L" | Surfaces=" << surfaces_.size()
                 << L" | Frame=" << parameters_.mfx.FrameInfo.CropW << L'x' << parameters_.mfx.FrameInfo.CropH
                 << L" | Allocated=" << parameters_.mfx.FrameInfo.Width << L'x' << parameters_.mfx.FrameInfo.Height
-                << L" | TargetKbps=" << parameters_.mfx.TargetKbps;
+                << L" | TargetKbps=" << parameters_.mfx.TargetKbps
+                << L" | VbvKB=" << parameters_.mfx.BufferSizeInKB
+                << L" | BitstreamCapacity=" << bitstreamCapacity;
             Log(message.str());
         }
         catch (...)
@@ -250,7 +254,23 @@ namespace EventCaptureNative
                 continue;
             }
             if (status == MFX_ERR_NOT_ENOUGH_BUFFER)
-                throw std::runtime_error("QSV encoded frame exceeded the bounded bitstream buffer");
+            {
+                const size_t currentCapacity = task.bitstream.MaxLength;
+                if (currentCapacity >= MaximumBitstreamCapacity)
+                    throw std::runtime_error("QSV encoded frame exceeded the maximum bitstream buffer");
+
+                const size_t nextCapacity = std::min(
+                    MaximumBitstreamCapacity,
+                    std::max(currentCapacity * 2u, currentCapacity + MinimumBitstreamCapacity));
+                ResizeTaskBuffer(task, nextCapacity);
+
+                std::wstringstream message;
+                message << L"QSV bitstream buffer expanded | Previous=" << currentCapacity
+                    << L" | Current=" << nextCapacity
+                    << L" | Timestamp100ns=" << timestamp100ns;
+                Log(message.str());
+                continue;
+            }
             if (status < MFX_ERR_NONE && status != MFX_ERR_MORE_DATA) CheckStatus(status, "MFXVideoENCODE_EncodeFrameAsync");
 
             if (task.syncPoint != nullptr)
@@ -403,6 +423,26 @@ namespace EventCaptureNative
         task.bitstream.FrameType = 0;
         task.fallbackTimestamp100ns = 0;
         task.duration100ns = 0;
+    }
+
+    void QsvEncoder::ResizeTaskBuffer(Task& task, size_t capacity)
+    {
+        if (capacity == 0 || capacity > MaximumBitstreamCapacity ||
+            capacity > static_cast<size_t>(std::numeric_limits<mfxU32>::max()))
+        {
+            throw std::runtime_error("Invalid QSV bitstream buffer capacity");
+        }
+        if (task.syncPoint != nullptr || task.bitstream.DataLength != 0)
+            throw std::runtime_error("Cannot resize an in-flight QSV bitstream buffer");
+
+        auto* replacement = static_cast<mfxU8*>(_aligned_malloc(capacity, 32));
+        if (replacement == nullptr) throw std::bad_alloc();
+        if (task.data != nullptr) _aligned_free(task.data);
+        task.data = replacement;
+        task.bitstream.Data = replacement;
+        task.bitstream.DataOffset = 0;
+        task.bitstream.DataLength = 0;
+        task.bitstream.MaxLength = static_cast<mfxU32>(capacity);
     }
 
     void QsvEncoder::CheckStatus(mfxStatus status, const char* operation) const

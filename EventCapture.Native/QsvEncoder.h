@@ -61,6 +61,7 @@ namespace EventCaptureNative
         void DrainOldest(bool wait);
         void EmitTask(Task& task);
         void ResetTask(Task& task);
+        void ResizeTaskBuffer(Task& task, size_t capacity);
         void CheckStatus(mfxStatus status, const char* operation) const;
         void Log(const std::wstring& message) const;
 
