@@ -695,7 +695,7 @@ namespace EventCaptureNative
                 submittedFrames_.store(0);
                 ResetCaptureDiagnostics();
                 running_ = true;
-                if (useQsvEncoder_)
+                if (captureBackend_ == CaptureBackend::DesktopDuplication)
                 {
                     StartQsvSubmitThread();
                 }
@@ -1169,6 +1169,7 @@ namespace EventCaptureNative
                         << L" | ReplayEnabled=" << ReplayEnabled()
                         << L" | Packets=" << packets_.size()
                         << L" | Captured=" << capturedFrames_.load()
+                        << L" | Converted=" << convertedFrames_.load()
                         << L" | Submitted=" << submittedFrames_.load()
                         << L" | Encoded=" << encodedFrames_.load();
 
@@ -2009,11 +2010,14 @@ namespace EventCaptureNative
 
             D3D11_TEXTURE2D_DESC description{};
             encoderTexture_->GetDesc(&description);
-            if (encoderAdapterIsIntel_ && qsvCompatible)
+            if (encoderAdapterIsIntel_)
             {
-                description.Width = (description.Width + 15u) & ~15u;
-                description.Height = (description.Height + 15u) & ~15u;
                 description.BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+                if (qsvCompatible)
+                {
+                    description.Width = (description.Width + 15u) & ~15u;
+                    description.Height = (description.Height + 15u) & ~15u;
+                }
             }
 
             D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDescription{};
@@ -2177,6 +2181,37 @@ namespace EventCaptureNative
             return std::numeric_limits<size_t>::max();
         }
 
+        size_t WaitForEncoderSurface(std::chrono::milliseconds timeout)
+        {
+            if (captureBackend_ != CaptureBackend::DesktopDuplication || encoderSurfaceSlots_.empty())
+            {
+                return std::numeric_limits<size_t>::max();
+            }
+
+            std::unique_lock lock(encoderSurfaceMutex_);
+            encoderSurfaceCondition_.wait_for(lock, timeout, [this]
+                {
+                    return !running_ || std::any_of(
+                        encoderSurfaceSlots_.begin(),
+                        encoderSurfaceSlots_.end(),
+                        [](const EncoderSurfaceSlot& slot) { return !slot.inFlight; });
+                });
+            if (!running_) return std::numeric_limits<size_t>::max();
+
+            for (size_t attempt = 0; attempt < encoderSurfaceSlots_.size(); ++attempt)
+            {
+                const size_t candidate = nextEncoderSurface_;
+                nextEncoderSurface_ = (nextEncoderSurface_ + 1) % encoderSurfaceSlots_.size();
+                if (!encoderSurfaceSlots_[candidate].inFlight)
+                {
+                    encoderSurfaceSlots_[candidate].inFlight = true;
+                    return candidate;
+                }
+            }
+
+            return std::numeric_limits<size_t>::max();
+        }
+
         void ReleaseEncoderSurface(size_t index)
         {
             std::scoped_lock lock(encoderSurfaceMutex_);
@@ -2184,6 +2219,7 @@ namespace EventCaptureNative
             {
                 encoderSurfaceSlots_[index].inFlight = false;
             }
+            encoderSurfaceCondition_.notify_one();
         }
 
         RECT CalculateCenteredActualSizeRect(uint32_t sourceWidth, uint32_t sourceHeight) const
@@ -2909,7 +2945,7 @@ namespace EventCaptureNative
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncCommonMeanBitRate, config_.bitrateKbps * 1000);
             SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVEncMPVGOPSize, config_.framesPerSecond);
-            SetVariantBool(candidateCodecApi.Get(), CODECAPI_AVLowLatencyMode, true);
+            SetVariantUInt32(candidateCodecApi.Get(), CODECAPI_AVLowLatencyMode, 1);
             if (captureBackend_ == CaptureBackend::DesktopDuplication)
             {
                 SetVariantBool(candidateCodecApi.Get(), CODECAPI_AVEncCommonRealTime, true);
@@ -3470,7 +3506,8 @@ namespace EventCaptureNative
                                 lock.unlock();
                                 nextMonitorCfrWake += fixedFrameInterval;
                                 const auto now = std::chrono::steady_clock::now();
-                                if (nextMonitorCfrWake + fixedFrameInterval < now)
+                                if (captureBackend_ != CaptureBackend::DesktopDuplication &&
+                                    nextMonitorCfrWake + fixedFrameInterval < now)
                                 {
                                     const auto lateBy = now - nextMonitorCfrWake;
                                     const auto skippedSlots = static_cast<uint64_t>(lateBy / fixedFrameInterval);
@@ -3483,23 +3520,17 @@ namespace EventCaptureNative
                                 if (!running_) break;
                             }
 
-                            while (!queuedMonitorFrameSlots_.empty())
+                            if (!queuedMonitorFrameSlots_.empty())
                             {
                                 const size_t candidate = queuedMonitorFrameSlots_.front();
                                 queuedMonitorFrameSlots_.pop_front();
-                                if (candidate >= monitorFrameSlots_.size()) continue;
-
-                                monitorFrameSlots_[candidate].queued = false;
-                                if (monitorFrameSlots_[candidate].encoding) continue;
-
-                                if (selectedSlotIndex != std::numeric_limits<size_t>::max())
+                                if (candidate < monitorFrameSlots_.size() &&
+                                    !monitorFrameSlots_[candidate].encoding)
                                 {
-                                    monitorFrameSlots_[selectedSlotIndex].encoding = false;
-                                    droppedFrames_.fetch_add(1);
+                                    monitorFrameSlots_[candidate].queued = false;
+                                    selectedSlotIndex = candidate;
+                                    monitorFrameSlots_[selectedSlotIndex].encoding = true;
                                 }
-
-                                selectedSlotIndex = candidate;
-                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
                             }
 
                             if (selectedSlotIndex == std::numeric_limits<size_t>::max())
@@ -3529,18 +3560,11 @@ namespace EventCaptureNative
                         ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
                         if (captureBackend_ == CaptureBackend::DesktopDuplication)
                         {
-                            if (!useQsvEncoder_ && asyncEncoder_)
-                            {
-                                PumpEncoderEvents(false, std::chrono::milliseconds(0));
-                            }
                             preparedEncoderSurface = AcquireEncoderSurface();
                             if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
                             {
-                                if (!useQsvEncoder_ && asyncEncoder_)
-                                {
-                                    PumpEncoderEvents(false, std::chrono::milliseconds(5));
-                                }
-                                preparedEncoderSurface = AcquireEncoderSurface();
+                                preparedEncoderSurface = WaitForEncoderSurface(
+                                    std::chrono::milliseconds(std::max<int64_t>(1, frameDuration / 10'000)));
                             }
 
                             if (preparedEncoderSurface == std::numeric_limits<size_t>::max())
@@ -3686,7 +3710,7 @@ namespace EventCaptureNative
                             const int64_t submitTimestamp = useMonitorCfrScheduler
                                 ? preparedCaptureTimestamp100ns
                                 : static_cast<int64_t>(submittedFrames_.load()) * frameDuration;
-                            if (useQsvEncoder_)
+                            if (captureBackend_ == CaptureBackend::DesktopDuplication)
                             {
                                 if (!QueueConvertedQsvFrame(
                                         preparedEncoderSurface,
@@ -3778,7 +3802,8 @@ namespace EventCaptureNative
                         }
                     }
                 }
-                if (!useQsvEncoder_ && encoder_)
+                if (captureBackend_ != CaptureBackend::DesktopDuplication &&
+                    !useQsvEncoder_ && encoder_)
                 {
                     encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                     encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
@@ -4087,7 +4112,12 @@ namespace EventCaptureNative
             const bool apartmentInitialized = SUCCEEDED(apartmentResult);
             std::chrono::steady_clock::time_point lastDiagnostic{};
             bool failed = false;
-            LogNative(L"QSV submit thread started.");
+            uint64_t lastCaptured = 0;
+            uint64_t lastConverted = 0;
+            uint64_t lastSubmitted = 0;
+            uint64_t lastEncoded = 0;
+            auto lastDiagnosticTime = std::chrono::steady_clock::now();
+            LogNative(L"DDA encoder submit thread started.");
 
             for (;;)
             {
@@ -4113,15 +4143,26 @@ namespace EventCaptureNative
 
                 try
                 {
-                    const uint64_t submittedIndex = submittedFrames_.fetch_add(1) + 1;
-                    AddDiagnosticTimestamp(submittedTimeline100ns_, frame.timestamp100ns);
                     const auto submitStart = std::chrono::steady_clock::now();
                     SubmitFrame(
                         encoderSurfaceSlots_[frame.surfaceIndex].texture.Get(),
                         frame.timestamp100ns,
                         frame.duration100ns,
                         frame.surfaceIndex);
-                    qsvEncoder_->DrainReady();
+                    submittedFrames_.fetch_add(1);
+                    AddDiagnosticTimestamp(submittedTimeline100ns_, frame.timestamp100ns);
+                    if (useQsvEncoder_)
+                    {
+                        qsvEncoder_->DrainReady();
+                    }
+                    else if (asyncEncoder_)
+                    {
+                        PumpEncoderEvents(false, std::chrono::milliseconds(0));
+                    }
+                    else
+                    {
+                        DrainSynchronousEncoder();
+                    }
                     const double submitMs = ElapsedMilliseconds(submitStart);
 
                     const auto diagnosticNow = std::chrono::steady_clock::now();
@@ -4129,22 +4170,48 @@ namespace EventCaptureNative
                         diagnosticNow - lastDiagnostic >= std::chrono::seconds(1))
                     {
                         lastDiagnostic = diagnosticNow;
+                        const double intervalSeconds = std::max(
+                            0.001,
+                            std::chrono::duration<double>(diagnosticNow - lastDiagnosticTime).count());
+                        lastDiagnosticTime = diagnosticNow;
+                        const uint64_t captured = capturedFrames_.load();
+                        const uint64_t converted = convertedFrames_.load();
+                        const uint64_t submitted = submittedFrames_.load();
+                        const uint64_t encoded = encodedFrames_.load();
                         std::wstringstream message;
-                        message << L"QSV submit stage status"
-                            << L" | Converted=" << convertedFrames_.load()
-                            << L" | Submitted=" << submittedIndex
-                            << L" | Encoded=" << encodedFrames_.load()
+                        const uint64_t captureToConvert = captured >= converted ? captured - converted : 0;
+                        const uint64_t convertToSubmit = converted >= submitted ? converted - submitted : 0;
+                        const uint64_t submitToEncode = submitted >= encoded ? submitted - encoded : 0;
+                        message << L"DDA pipeline status"
+                            << L" | Captured=" << captured
+                            << L" | Converted=" << converted
+                            << L" | Submitted=" << submitted
+                            << L" | Encoded=" << encoded
+                            << L" | CaptureFps=" << std::fixed << std::setprecision(2) << (captured - lastCaptured) / intervalSeconds
+                            << L" | ConvertFps=" << (converted - lastConverted) / intervalSeconds
+                            << L" | SubmitFps=" << (submitted - lastSubmitted) / intervalSeconds
+                            << L" | EncodeFps=" << (encoded - lastEncoded) / intervalSeconds
                             << L" | ConvertedQueue=" << queueDepth
+                            << L" | CaptureToConvert=" << captureToConvert
+                            << L" | ConvertToSubmit=" << convertToSubmit
+                            << L" | SubmitToEncode=" << submitToEncode
                             << L" | Overflow=" << overflow
-                            << L" | SubmitMs=" << std::fixed << std::setprecision(2) << submitMs;
+                            << L" | SurfaceStarvation=" << encoderSurfaceStarvationFrames_.load()
+                            << L" | Dropped=" << droppedFrames_.load()
+                            << L" | SubmitMs=" << submitMs
+                            << L" | Backend=" << (useQsvEncoder_ ? L"QSV" : L"MFT");
                         LogNative(message.str());
+                        lastCaptured = captured;
+                        lastConverted = converted;
+                        lastSubmitted = submitted;
+                        lastEncoded = encoded;
                     }
                 }
                 catch (const winrt::hresult_error& error)
                 {
                     ReleaseEncoderSurface(frame.surfaceIndex);
                     SetError(error.message().c_str());
-                    LogNative(L"QSV submit thread fatal HRESULT | " + std::wstring(error.message().c_str()));
+                    LogNative(L"DDA encoder submit thread fatal HRESULT | " + std::wstring(error.message().c_str()));
                     failed = true;
                 }
                 catch (const std::exception& error)
@@ -4152,14 +4219,14 @@ namespace EventCaptureNative
                     ReleaseEncoderSurface(frame.surfaceIndex);
                     const std::wstring message(error.what(), error.what() + std::char_traits<char>::length(error.what()));
                     SetError(message);
-                    LogNative(L"QSV submit thread fatal exception | " + message);
+                    LogNative(L"DDA encoder submit thread fatal exception | " + message);
                     failed = true;
                 }
                 catch (...)
                 {
                     ReleaseEncoderSurface(frame.surfaceIndex);
-                    SetError(L"Unexpected QSV submit failure.");
-                    LogNative(L"QSV submit thread fatal unknown exception.");
+                    SetError(L"Unexpected DDA encoder submit failure.");
+                    LogNative(L"DDA encoder submit thread fatal unknown exception.");
                     failed = true;
                 }
 
@@ -4181,6 +4248,20 @@ namespace EventCaptureNative
                     LogNative(L"QSV submit drain failed | " + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
                 }
             }
+            else if (!failed && encoder_ != nullptr)
+            {
+                try
+                {
+                    encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+                    encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+                    if (asyncEncoder_) PumpEncoderEvents(false, std::chrono::seconds(2));
+                    else DrainSynchronousEncoder();
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    LogNative(L"DDA MFT submit drain failed | " + std::wstring(error.message().c_str()));
+                }
+            }
 
             {
                 std::scoped_lock lock(qsvSubmitMutex_);
@@ -4192,7 +4273,7 @@ namespace EventCaptureNative
             }
             if (apartmentInitialized) RoUninitialize();
             if (mmcssHandle != nullptr) AvRevertMmThreadCharacteristics(mmcssHandle);
-            LogNative(L"QSV submit thread exited.");
+            LogNative(L"DDA encoder submit thread exited.");
         }
 
         void StartQsvPacketWriter()
@@ -4734,6 +4815,7 @@ namespace EventCaptureNative
             LogNative(L"StopCore entered.");
             running_ = false;
             frameCondition_.notify_all();
+            encoderSurfaceCondition_.notify_all();
 
             if (desktopDuplicationThread_.joinable())
             {
@@ -4897,6 +4979,7 @@ namespace EventCaptureNative
         ComPtr<ID3D11Texture2D> encoderTexture_;
         std::vector<EncoderSurfaceSlot> encoderSurfaceSlots_;
         mutable std::mutex encoderSurfaceMutex_;
+        std::condition_variable encoderSurfaceCondition_;
         std::deque<size_t> submittedEncoderSurfaces_;
         size_t nextEncoderSurface_{};
         ComPtr<ID3D11Texture2D> blackTexture_;
