@@ -38,6 +38,49 @@ namespace EventCaptureNative
                 ? -1
                 : static_cast<int64_t>(timestamp * 1'000u / 9u);
         }
+
+        bool ContainsH264IdrNal(const uint8_t* data, size_t size)
+        {
+            if (data == nullptr || size == 0) return false;
+
+            bool foundAnnexB = false;
+            for (size_t offset = 0; offset + 3 < size; ++offset)
+            {
+                size_t prefixLength = 0;
+                if (data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1)
+                {
+                    prefixLength = 3;
+                }
+                else if (offset + 4 < size && data[offset] == 0 && data[offset + 1] == 0 &&
+                    data[offset + 2] == 0 && data[offset + 3] == 1)
+                {
+                    prefixLength = 4;
+                }
+
+                if (prefixLength == 0) continue;
+                foundAnnexB = true;
+                const size_t nalOffset = offset + prefixLength;
+                if (nalOffset < size && (data[nalOffset] & 0x1fu) == 5u) return true;
+                offset = nalOffset;
+            }
+
+            if (foundAnnexB) return false;
+
+            size_t offset = 0;
+            while (offset + 4 <= size)
+            {
+                const uint32_t nalLength =
+                    (static_cast<uint32_t>(data[offset]) << 24) |
+                    (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                    (static_cast<uint32_t>(data[offset + 2]) << 8) |
+                    static_cast<uint32_t>(data[offset + 3]);
+                offset += 4;
+                if (nalLength == 0 || nalLength > size - offset) return false;
+                if ((data[offset] & 0x1fu) == 5u) return true;
+                offset += nalLength;
+            }
+            return false;
+        }
     }
 
     struct QsvEncoder::SurfaceHandle
@@ -193,6 +236,7 @@ namespace EventCaptureNative
             MFXQueryVersion(session_, &version);
             MFXQueryIMPL(session_, &implementation);
             initialized_ = true;
+            keyFrameMismatchLogged_ = false;
 
             std::wstringstream message;
             message << L"QSV encoder initialized | API=" << version.Major << L'.' << version.Minor
@@ -337,6 +381,7 @@ namespace EventCaptureNative
         }
         session_ = nullptr;
         initialized_ = false;
+        keyFrameMismatchLogged_ = false;
         pendingTasks_.clear();
         tasks_.clear();
         surfaces_.clear();
@@ -410,7 +455,20 @@ namespace EventCaptureNative
         const int64_t outputTimestamp = FromMfxTimestamp(task.bitstream.TimeStamp);
         packet.timestamp100ns = outputTimestamp >= 0 ? outputTimestamp : task.fallbackTimestamp100ns;
         packet.duration100ns = std::max<int64_t>(1, task.duration100ns);
-        packet.keyFrame = (task.bitstream.FrameType & (MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I)) != 0;
+        const bool runtimeKeyFrame =
+            (task.bitstream.FrameType & (MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I)) != 0;
+        packet.keyFrame = ContainsH264IdrNal(packet.bytes.data(), packet.bytes.size());
+        if (runtimeKeyFrame != packet.keyFrame && !keyFrameMismatchLogged_)
+        {
+            std::wstringstream message;
+            message << L"QSV FrameType differs from H.264 NAL classification"
+                << L" | FrameType=0x" << std::hex << task.bitstream.FrameType << std::dec
+                << L" | RuntimeKey=" << runtimeKeyFrame
+                << L" | IdrNal=" << packet.keyFrame
+                << L" | Bytes=" << packet.bytes.size();
+            Log(message.str());
+            keyFrameMismatchLogged_ = true;
+        }
         if (packetHandler_) packetHandler_(std::move(packet));
     }
 

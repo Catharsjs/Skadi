@@ -75,5 +75,6 @@ namespace EventCaptureNative
         LogHandler logHandler_;
         int64_t frameDuration100ns_{};
         bool initialized_{};
+        bool keyFrameMismatchLogged_{};
     };
 }
