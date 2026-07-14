@@ -361,3 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Pinned native oneVPL dispatcher required by the DDA/QSV encoder.
+!ThirdParty/oneVPL/bin/
+!ThirdParty/oneVPL/bin/x64/
+!ThirdParty/oneVPL/bin/x64/libvpl.dll
+!ThirdParty/oneVPL/lib/
+!ThirdParty/oneVPL/lib/x64/
+!ThirdParty/oneVPL/lib/x64/vpl.lib
