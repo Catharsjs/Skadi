@@ -701,11 +701,7 @@ namespace EventCaptureNative
                 }
                 if (captureBackend_ == CaptureBackend::DesktopDuplication)
                 {
-                    LogNative(L"DesktopDuplication capture thread creation begin.");
-                    desktopDuplicationThread_ = std::thread([this] { DesktopDuplicationLoop(); });
-                    std::wstringstream log;
-                    log << L"DesktopDuplication capture thread created | IdHash=" << std::hash<std::thread::id>{}(desktopDuplicationThread_.get_id());
-                    LogNative(log.str());
+                    LogNative(L"Desktop Duplication capture assigned to the GPU conversion thread.");
                 }
                 else
                 {
@@ -3490,14 +3486,27 @@ namespace EventCaptureNative
 
                     if (useMonitorCfrScheduler)
                     {
+                        if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                        {
+                            PumpDesktopDuplicationFrames(
+                                nextMonitorCfrWake == std::chrono::steady_clock::time_point{} ? 16u : 0u);
+                        }
+
                         {
                             std::unique_lock lock(textureMutex_);
                             if (nextMonitorCfrWake == std::chrono::steady_clock::time_point{})
                             {
-                                frameCondition_.wait(lock, [this]
-                                    {
-                                        return !running_ || !queuedMonitorFrameSlots_.empty();
-                                });
+                                if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                                {
+                                    if (!hasTexture_) continue;
+                                }
+                                else
+                                {
+                                    frameCondition_.wait(lock, [this]
+                                        {
+                                            return !running_ || !queuedMonitorFrameSlots_.empty();
+                                        });
+                                }
                                 if (!running_) break;
                                 nextMonitorCfrWake = std::chrono::steady_clock::now();
                             }
@@ -3520,7 +3529,13 @@ namespace EventCaptureNative
                                 if (!running_) break;
                             }
 
-                            if (!queuedMonitorFrameSlots_.empty())
+                            if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                            {
+                                if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
+                                selectedSlotIndex = 0;
+                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                            }
+                            else if (!queuedMonitorFrameSlots_.empty())
                             {
                                 const size_t candidate = queuedMonitorFrameSlots_.front();
                                 queuedMonitorFrameSlots_.pop_front();
