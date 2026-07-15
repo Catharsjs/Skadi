@@ -1595,25 +1595,96 @@ namespace EventCaptureNative
                 desktopDuplicationRotation_ == DXGI_MODE_ROTATION_ROTATE90 ||
                 desktopDuplicationRotation_ == DXGI_MODE_ROTATION_ROTATE270;
 
-            const uint32_t surfaceWidth = duplicationDescription.ModeDesc.Width > 0
+            const uint32_t modeWidth = duplicationDescription.ModeDesc.Width > 0
                 ? duplicationDescription.ModeDesc.Width
                 : logicalWidth;
-            const uint32_t surfaceHeight = duplicationDescription.ModeDesc.Height > 0
+            const uint32_t modeHeight = duplicationDescription.ModeDesc.Height > 0
                 ? duplicationDescription.ModeDesc.Height
                 : logicalHeight;
 
+            uint32_t surfaceWidth = useDdaShaderRotation_ ? modeHeight : modeWidth;
+            uint32_t surfaceHeight = useDdaShaderRotation_ ? modeWidth : modeHeight;
+            ComPtr<ID3D11Texture2D> initialDesktopTexture;
+            bool initialFrameAcquired = false;
+
+            try
             {
+                DXGI_OUTDUPL_FRAME_INFO initialFrameInfo{};
+                ComPtr<IDXGIResource> initialResource;
+                const HRESULT acquireResult = desktopDuplication_->AcquireNextFrame(
+                    500,
+                    &initialFrameInfo,
+                    &initialResource);
+
+                if (SUCCEEDED(acquireResult))
+                {
+                    initialFrameAcquired = true;
+                    ThrowIfFailed(initialResource.As(&initialDesktopTexture));
+                    D3D11_TEXTURE2D_DESC actualDescription{};
+                    initialDesktopTexture->GetDesc(&actualDescription);
+                    surfaceWidth = actualDescription.Width;
+                    surfaceHeight = actualDescription.Height;
+
+                    std::wstringstream frameLog;
+                    frameLog << L"DDA initial texture acquired"
+                        << L" | ActualSize=" << surfaceWidth << L"x" << surfaceHeight
+                        << L" | Format=" << static_cast<uint32_t>(actualDescription.Format)
+                        << L" | LastPresentTime=" << initialFrameInfo.LastPresentTime.QuadPart
+                        << L" | AccumulatedFrames=" << initialFrameInfo.AccumulatedFrames;
+                    LogNative(frameLog.str());
+                    if (useDdaShaderRotation_)
+                    {
+                        LogDdaTextureProbe(initialDesktopTexture.Get(), L"Initial acquired BGRA");
+                    }
+                }
+                else if (acquireResult == DXGI_ERROR_WAIT_TIMEOUT)
+                {
+                    std::wstringstream timeoutLog;
+                    timeoutLog << L"DDA initial texture acquisition timed out"
+                        << L" | FallbackSize=" << surfaceWidth << L"x" << surfaceHeight;
+                    LogNative(timeoutLog.str());
+                }
+                else
+                {
+                    ThrowIfFailed(acquireResult);
+                }
+
                 std::wstringstream log;
                 log
                     << L"DDA output selected | DeviceName=" << selectedDescription.DeviceName
                     << L" | Bounds=" << RectToString(selectedDescription.DesktopCoordinates)
                     << L" | LogicalSize=" << logicalWidth << L"x" << logicalHeight
-                    << L" | SurfaceSize=" << surfaceWidth << L"x" << surfaceHeight
+                    << L" | ModeSize=" << modeWidth << L"x" << modeHeight
+                    << L" | CaptureSurfaceSize=" << surfaceWidth << L"x" << surfaceHeight
                     << L" | Rotation=" << static_cast<uint32_t>(desktopDuplicationRotation_);
                 LogNative(log.str());
+
+                CreateLatestTexture(surfaceWidth, surfaceHeight);
+
+                if (initialDesktopTexture != nullptr)
+                {
+                    ID3D11Texture2D* destination = useDdaShaderRotation_
+                        ? latestTexture_.Get()
+                        : monitorFrameSlots_[0].texture.Get();
+                    context_->CopyResource(destination, initialDesktopTexture.Get());
+                    hasTexture_ = true;
+                    ++textureVersion_;
+                    LogNative(L"DDA initial texture seeded into the capture pipeline.");
+                }
+            }
+            catch (...)
+            {
+                if (initialFrameAcquired && desktopDuplication_ != nullptr)
+                {
+                    desktopDuplication_->ReleaseFrame();
+                }
+                throw;
             }
 
-            CreateLatestTexture(surfaceWidth, surfaceHeight);
+            if (initialFrameAcquired && desktopDuplication_ != nullptr)
+            {
+                ThrowIfFailed(desktopDuplication_->ReleaseFrame());
+            }
 
             LogNative(L"CreateDesktopDuplicationCapture completed.");
         }
@@ -1790,6 +1861,48 @@ namespace EventCaptureNative
         {
             if (texture == nullptr) return;
 
+            D3D11_TEXTURE2D_DESC sourceDescription{};
+            D3D11_TEXTURE2D_DESC destinationDescription{};
+            texture->GetDesc(&sourceDescription);
+            ID3D11Texture2D* copyDestination = useDdaShaderRotation_
+                ? latestTexture_.Get()
+                : (monitorFrameSlots_.empty() ? nullptr : monitorFrameSlots_[0].texture.Get());
+            if (copyDestination == nullptr)
+            {
+                droppedFrames_.fetch_add(1);
+                return;
+            }
+            copyDestination->GetDesc(&destinationDescription);
+
+            if (!ddaSourceTextureLogged_)
+            {
+                std::wstringstream message;
+                message << L"DDA runtime texture validated"
+                    << L" | SourceSize=" << sourceDescription.Width << L"x" << sourceDescription.Height
+                    << L" | DestinationSize=" << destinationDescription.Width << L"x" << destinationDescription.Height
+                    << L" | SourceFormat=" << static_cast<uint32_t>(sourceDescription.Format)
+                    << L" | DestinationFormat=" << static_cast<uint32_t>(destinationDescription.Format);
+                LogNative(message.str());
+                ddaSourceTextureLogged_ = true;
+            }
+
+            if (sourceDescription.Width != destinationDescription.Width ||
+                sourceDescription.Height != destinationDescription.Height ||
+                sourceDescription.Format != destinationDescription.Format)
+            {
+                std::wstringstream message;
+                message << L"DDA texture mismatch; capture stopped"
+                    << L" | SourceSize=" << sourceDescription.Width << L"x" << sourceDescription.Height
+                    << L" | DestinationSize=" << destinationDescription.Width << L"x" << destinationDescription.Height
+                    << L" | SourceFormat=" << static_cast<uint32_t>(sourceDescription.Format)
+                    << L" | DestinationFormat=" << static_cast<uint32_t>(destinationDescription.Format);
+                LogNative(message.str());
+                SetError(L"Desktop Duplication texture layout changed during capture.");
+                running_ = false;
+                frameCondition_.notify_all();
+                return;
+            }
+
             const int64_t captureTimestamp100ns = CurrentTimestamp100ns();
             const auto lockStart = std::chrono::steady_clock::now();
             std::unique_lock lock(textureMutex_);
@@ -1802,9 +1915,6 @@ namespace EventCaptureNative
             }
 
             const auto copyStart = std::chrono::steady_clock::now();
-            ID3D11Texture2D* copyDestination = useDdaShaderRotation_
-                ? latestTexture_.Get()
-                : monitorFrameSlots_[0].texture.Get();
             context_->CopyResource(copyDestination, texture);
             const double copyMs = ElapsedMilliseconds(copyStart);
             if (lockMs >= 5.0 || copyMs >= 5.0)
@@ -4852,6 +4962,7 @@ namespace EventCaptureNative
             encoderSurfaceStarvationFrames_.store(0);
             ddaPortraitProbeCount_ = 0;
             ddaPortraitEncodedPacketLogged_ = false;
+            ddaSourceTextureLogged_ = false;
         }
 
         void AddDiagnosticTimestamp(std::deque<int64_t>& timeline, int64_t timestamp100ns)
@@ -5315,6 +5426,7 @@ namespace EventCaptureNative
         bool useDdaShaderRotation_{};
         uint32_t ddaPortraitProbeCount_{};
         bool ddaPortraitEncodedPacketLogged_{};
+        bool ddaSourceTextureLogged_{};
         uint32_t sourceContentWidth_{};
         uint32_t sourceContentHeight_{};
         uint32_t windowFrameWidth_{};
