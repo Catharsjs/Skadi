@@ -1591,6 +1591,9 @@ namespace EventCaptureNative
             DXGI_OUTDUPL_DESC duplicationDescription{};
             desktopDuplication_->GetDesc(&duplicationDescription);
             desktopDuplicationRotation_ = duplicationDescription.Rotation;
+            useDdaShaderRotation_ =
+                desktopDuplicationRotation_ == DXGI_MODE_ROTATION_ROTATE90 ||
+                desktopDuplicationRotation_ == DXGI_MODE_ROTATION_ROTATE270;
 
             const uint32_t surfaceWidth = duplicationDescription.ModeDesc.Width > 0
                 ? duplicationDescription.ModeDesc.Width
@@ -1792,14 +1795,17 @@ namespace EventCaptureNative
             std::unique_lock lock(textureMutex_);
             const double lockMs = ElapsedMilliseconds(lockStart);
 
-            if (monitorFrameSlots_.empty())
+            if (!useDdaShaderRotation_ && monitorFrameSlots_.empty())
             {
                 droppedFrames_.fetch_add(1);
                 return;
             }
 
             const auto copyStart = std::chrono::steady_clock::now();
-            context_->CopyResource(monitorFrameSlots_[0].texture.Get(), texture);
+            ID3D11Texture2D* copyDestination = useDdaShaderRotation_
+                ? latestTexture_.Get()
+                : monitorFrameSlots_[0].texture.Get();
+            context_->CopyResource(copyDestination, texture);
             const double copyMs = ElapsedMilliseconds(copyStart);
             if (lockMs >= 5.0 || copyMs >= 5.0)
             {
@@ -1809,7 +1815,10 @@ namespace EventCaptureNative
                     << L" | TextureVersion=" << textureVersion_;
                 LogNativeTimingIfSlow(L"DDA latest frame lock/copy", lockMs + copyMs, 5.0, details.str());
             }
-            monitorFrameSlots_[0].captureTimestamp100ns = captureTimestamp100ns;
+            if (!useDdaShaderRotation_)
+            {
+                monitorFrameSlots_[0].captureTimestamp100ns = captureTimestamp100ns;
+            }
 
             hasTexture_ = true;
             ++textureVersion_;
@@ -1913,12 +1922,17 @@ namespace EventCaptureNative
             ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &nextLatestTexture));
             ThrowIfFailed(device_->CreateRenderTargetView(nextLatestTexture.Get(), nullptr, &nextLatestRenderTarget));
 
-            if (config_.targetKind == EcTargetKind::Window)
+            if (config_.targetKind == EcTargetKind::Window || useDdaShaderRotation_)
             {
                 ThrowIfFailed(device_->CreateShaderResourceView(nextLatestTexture.Get(), nullptr, &nextLatestShaderResource));
                 if (canvasTexture_ == nullptr)
                 {
                     CreateWindowCompositorPipeline();
+                }
+                if (useDdaShaderRotation_)
+                {
+                    CreateEncoderSurfacePool(false);
+                    LogNative(L"DDA portrait shader rotation pipeline created.");
                 }
             }
             else
@@ -2077,7 +2091,8 @@ namespace EventCaptureNative
             ComPtr<ID3D11VideoProcessorEnumerator>& processorEnumerator,
             ComPtr<ID3D11VideoProcessor>& processor,
             ComPtr<ID3D11VideoProcessorInputView>& processorInput,
-            ComPtr<ID3D11VideoProcessorOutputView>& processorOutput)
+            ComPtr<ID3D11VideoProcessorOutputView>& processorOutput,
+            bool applyDesktopDuplicationRotation = true)
         {
             D3D11_TEXTURE2D_DESC outputDescription{};
             outputDescription.Width = config_.outputWidth;
@@ -2126,12 +2141,15 @@ namespace EventCaptureNative
             if (captureBackend_ == CaptureBackend::DesktopDuplication)
             {
                 videoContext_->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
-                const D3D11_VIDEO_PROCESSOR_ROTATION rotation = GetDesktopDuplicationVideoRotation();
-                videoContext_->VideoProcessorSetStreamRotation(
-                    processor.Get(),
-                    0,
-                    rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
-                    rotation);
+                if (applyDesktopDuplicationRotation)
+                {
+                    const D3D11_VIDEO_PROCESSOR_ROTATION rotation = GetDesktopDuplicationVideoRotation();
+                    videoContext_->VideoProcessorSetStreamRotation(
+                        processor.Get(),
+                        0,
+                        rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+                        rotation);
+                }
             }
             D3D11_VIDEO_COLOR background{};
             background.RGBA.R = 0.0f;
@@ -2398,7 +2416,8 @@ namespace EventCaptureNative
                 nextProcessorEnumerator,
                 nextProcessor,
                 nextProcessorInput,
-                nextProcessorOutput);
+                nextProcessorOutput,
+                !useDdaShaderRotation_);
 
             encoderTexture_ = nextEncoderTexture;
             blackTexture_ = nextBlackTexture;
@@ -2482,6 +2501,75 @@ namespace EventCaptureNative
                 { left, bottom, u0, v1 },
                 { right, top, u1, v0 },
                 { right, bottom, u1, v1 }
+            };
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            ThrowIfFailed(context_->Map(compositorVertexBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+            std::memcpy(mapped.pData, vertices, sizeof(vertices));
+            context_->Unmap(compositorVertexBuffer_.Get(), 0);
+
+            const FLOAT clearColor[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+            context_->ClearRenderTargetView(canvasRenderTarget_.Get(), clearColor);
+
+            D3D11_VIEWPORT viewport{};
+            viewport.Width = static_cast<float>(config_.outputWidth);
+            viewport.Height = static_cast<float>(config_.outputHeight);
+            viewport.MinDepth = 0.0f;
+            viewport.MaxDepth = 1.0f;
+            context_->RSSetViewports(1, &viewport);
+
+            const UINT stride = sizeof(CompositorVertex);
+            const UINT offset = 0;
+            ID3D11Buffer* vertexBuffers[] { compositorVertexBuffer_.Get() };
+            ID3D11ShaderResourceView* shaderResources[] { latestShaderResource_.Get() };
+            ID3D11SamplerState* samplers[] { compositorSampler_.Get() };
+            ID3D11RenderTargetView* renderTargets[] { canvasRenderTarget_.Get() };
+
+            context_->IASetInputLayout(compositorInputLayout_.Get());
+            context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+            context_->VSSetShader(compositorVertexShader_.Get(), nullptr, 0);
+            context_->PSSetShader(compositorPixelShader_.Get(), nullptr, 0);
+            context_->PSSetShaderResources(0, 1, shaderResources);
+            context_->PSSetSamplers(0, 1, samplers);
+            context_->OMSetRenderTargets(1, renderTargets, nullptr);
+            context_->Draw(6, 0);
+
+            ID3D11ShaderResourceView* nullShaderResources[] { nullptr };
+            context_->PSSetShaderResources(0, 1, nullShaderResources);
+        }
+
+        void RenderDesktopDuplicationToCanvas()
+        {
+            float topLeftU = 0.0f;
+            float topLeftV = 1.0f;
+            float topRightU = 0.0f;
+            float topRightV = 0.0f;
+            float bottomLeftU = 1.0f;
+            float bottomLeftV = 1.0f;
+            float bottomRightU = 1.0f;
+            float bottomRightV = 0.0f;
+
+            if (desktopDuplicationRotation_ == DXGI_MODE_ROTATION_ROTATE270)
+            {
+                topLeftU = 1.0f;
+                topLeftV = 0.0f;
+                topRightU = 1.0f;
+                topRightV = 1.0f;
+                bottomLeftU = 0.0f;
+                bottomLeftV = 0.0f;
+                bottomRightU = 0.0f;
+                bottomRightV = 1.0f;
+            }
+
+            const CompositorVertex vertices[]
+            {
+                { -1.0f,  1.0f, topLeftU, topLeftV },
+                {  1.0f,  1.0f, topRightU, topRightV },
+                { -1.0f, -1.0f, bottomLeftU, bottomLeftV },
+                { -1.0f, -1.0f, bottomLeftU, bottomLeftV },
+                {  1.0f,  1.0f, topRightU, topRightV },
+                {  1.0f, -1.0f, bottomRightU, bottomRightV }
             };
 
             D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -3529,48 +3617,65 @@ namespace EventCaptureNative
                                 if (!running_) break;
                             }
 
-                            if (captureBackend_ == CaptureBackend::DesktopDuplication)
+                            if (useDdaShaderRotation_)
                             {
-                                if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
-                                selectedSlotIndex = 0;
-                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                                if (!hasTexture_ || processorInput_ == nullptr) continue;
+                                selectedProcessorInput = processorInput_;
+                                preparedCaptureTimestamp100ns =
+                                    static_cast<int64_t>(monitorCfrFrameIndex) * frameDuration;
+                                ++monitorCfrFrameIndex;
+                                preparedTextureVersion = textureVersion_;
                             }
-                            else if (!queuedMonitorFrameSlots_.empty())
+                            else
                             {
-                                const size_t candidate = queuedMonitorFrameSlots_.front();
-                                queuedMonitorFrameSlots_.pop_front();
-                                if (candidate < monitorFrameSlots_.size() &&
-                                    !monitorFrameSlots_[candidate].encoding)
+                                if (captureBackend_ == CaptureBackend::DesktopDuplication)
                                 {
-                                    monitorFrameSlots_[candidate].queued = false;
-                                    selectedSlotIndex = candidate;
+                                    if (!hasTexture_ || monitorFrameSlots_.empty()) continue;
+                                    selectedSlotIndex = 0;
                                     monitorFrameSlots_[selectedSlotIndex].encoding = true;
                                 }
-                            }
-
-                            if (selectedSlotIndex == std::numeric_limits<size_t>::max())
-                            {
-                                if (lastMonitorCfrSlot == std::numeric_limits<size_t>::max() ||
-                                    lastMonitorCfrSlot >= monitorFrameSlots_.size() ||
-                                    monitorFrameSlots_[lastMonitorCfrSlot].encoding)
+                                else if (!queuedMonitorFrameSlots_.empty())
                                 {
-                                    continue;
+                                    const size_t candidate = queuedMonitorFrameSlots_.front();
+                                    queuedMonitorFrameSlots_.pop_front();
+                                    if (candidate < monitorFrameSlots_.size() &&
+                                        !monitorFrameSlots_[candidate].encoding)
+                                    {
+                                        monitorFrameSlots_[candidate].queued = false;
+                                        selectedSlotIndex = candidate;
+                                        monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                                    }
                                 }
 
-                                selectedSlotIndex = lastMonitorCfrSlot;
-                                monitorFrameSlots_[selectedSlotIndex].encoding = true;
-                            }
+                                if (selectedSlotIndex == std::numeric_limits<size_t>::max())
+                                {
+                                    if (lastMonitorCfrSlot == std::numeric_limits<size_t>::max() ||
+                                        lastMonitorCfrSlot >= monitorFrameSlots_.size() ||
+                                        monitorFrameSlots_[lastMonitorCfrSlot].encoding)
+                                    {
+                                        continue;
+                                    }
 
-                            lastMonitorCfrSlot = selectedSlotIndex;
-                            selectedProcessorInput = monitorFrameSlots_[selectedSlotIndex].inputView;
-                            preparedCaptureTimestamp100ns =
-                                static_cast<int64_t>(monitorCfrFrameIndex) * frameDuration;
-                            ++monitorCfrFrameIndex;
-                            preparedTextureVersion = textureVersion_;
-                            selectedMonitorCfrSlot = true;
+                                    selectedSlotIndex = lastMonitorCfrSlot;
+                                    monitorFrameSlots_[selectedSlotIndex].encoding = true;
+                                }
+
+                                lastMonitorCfrSlot = selectedSlotIndex;
+                                selectedProcessorInput = monitorFrameSlots_[selectedSlotIndex].inputView;
+                                preparedCaptureTimestamp100ns =
+                                    static_cast<int64_t>(monitorCfrFrameIndex) * frameDuration;
+                                ++monitorCfrFrameIndex;
+                                preparedTextureVersion = textureVersion_;
+                                selectedMonitorCfrSlot = true;
+                            }
                         }
 
                         if (selectedProcessorInput == nullptr) continue;
+
+                        if (useDdaShaderRotation_)
+                        {
+                            RenderDesktopDuplicationToCanvas();
+                        }
 
                         ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
                         if (captureBackend_ == CaptureBackend::DesktopDuplication)
@@ -5005,6 +5110,7 @@ namespace EventCaptureNative
         uint32_t sourceWidth_{};
         uint32_t sourceHeight_{};
         DXGI_MODE_ROTATION desktopDuplicationRotation_{ DXGI_MODE_ROTATION_IDENTITY };
+        bool useDdaShaderRotation_{};
         uint32_t sourceContentWidth_{};
         uint32_t sourceContentHeight_{};
         uint32_t windowFrameWidth_{};
