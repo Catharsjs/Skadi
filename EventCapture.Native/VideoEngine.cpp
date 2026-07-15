@@ -1932,7 +1932,13 @@ namespace EventCaptureNative
                 if (useDdaShaderRotation_)
                 {
                     CreateEncoderSurfacePool(false);
-                    LogNative(L"DDA portrait shader rotation pipeline created.");
+                    std::wstringstream message;
+                    message << L"DDA portrait shader rotation pipeline created"
+                        << L" | Rotation=" << static_cast<uint32_t>(desktopDuplicationRotation_)
+                        << L" | CapturedSize=" << width << L"x" << height
+                        << L" | CanvasSize=" << config_.outputWidth << L"x" << config_.outputHeight
+                        << L" | PixelShaderAlpha=ForcedOpaque";
+                    LogNative(message.str());
                 }
             }
             else
@@ -2355,10 +2361,17 @@ namespace EventCaptureNative
                     color.a = 1.0f;
                     return color;
                 }
+
+                float4 PSMainOpaque(VSOut input) : SV_TARGET
+                {
+                    float4 color = sourceTexture.Sample(sourceSampler, input.uv);
+                    return float4(color.rgb, 1.0f);
+                }
             )";
 
             ComPtr<ID3DBlob> vertexBlob = CompileShader(shaderSource, "VSMain", "vs_5_0");
             ComPtr<ID3DBlob> pixelBlob = CompileShader(shaderSource, "PSMain", "ps_5_0");
+            ComPtr<ID3DBlob> opaquePixelBlob = CompileShader(shaderSource, "PSMainOpaque", "ps_5_0");
 
             ThrowIfFailed(device_->CreateVertexShader(
                 vertexBlob->GetBufferPointer(),
@@ -2371,6 +2384,12 @@ namespace EventCaptureNative
                 pixelBlob->GetBufferSize(),
                 nullptr,
                 &compositorPixelShader_));
+
+            ThrowIfFailed(device_->CreatePixelShader(
+                opaquePixelBlob->GetBufferPointer(),
+                opaquePixelBlob->GetBufferSize(),
+                nullptr,
+                &ddaRotationPixelShader_));
 
             D3D11_INPUT_ELEMENT_DESC inputElements[]
             {
@@ -2598,7 +2617,7 @@ namespace EventCaptureNative
             context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
             context_->VSSetShader(compositorVertexShader_.Get(), nullptr, 0);
-            context_->PSSetShader(compositorPixelShader_.Get(), nullptr, 0);
+            context_->PSSetShader(ddaRotationPixelShader_.Get(), nullptr, 0);
             context_->PSSetShaderResources(0, 1, shaderResources);
             context_->PSSetSamplers(0, 1, samplers);
             context_->OMSetRenderTargets(1, renderTargets, nullptr);
@@ -2606,6 +2625,156 @@ namespace EventCaptureNative
 
             ID3D11ShaderResourceView* nullShaderResources[] { nullptr };
             context_->PSSetShaderResources(0, 1, nullShaderResources);
+        }
+
+        void LogDdaTextureProbe(ID3D11Texture2D* texture, const wchar_t* stage) const noexcept
+        {
+            if (texture == nullptr) return;
+
+            try
+            {
+                D3D11_TEXTURE2D_DESC description{};
+                texture->GetDesc(&description);
+
+                if (description.SampleDesc.Count != 1)
+                {
+                    std::wstringstream message;
+                    message << L"DDA portrait texture probe skipped | Stage=" << stage
+                        << L" | Reason=Multisampled texture"
+                        << L" | Samples=" << description.SampleDesc.Count;
+                    LogNative(message.str());
+                    return;
+                }
+
+                D3D11_TEXTURE2D_DESC stagingDescription = description;
+                stagingDescription.Usage = D3D11_USAGE_STAGING;
+                stagingDescription.BindFlags = 0;
+                stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                stagingDescription.MiscFlags = 0;
+
+                ComPtr<ID3D11Texture2D> stagingTexture;
+                ThrowIfFailed(device_->CreateTexture2D(&stagingDescription, nullptr, &stagingTexture));
+                context_->CopyResource(stagingTexture.Get(), texture);
+
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                ThrowIfFailed(context_->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped));
+
+                constexpr uint32_t sampleGrid = 16;
+                uint64_t valueSum = 0;
+                uint64_t alphaSum = 0;
+                uint32_t sampledPixels = 0;
+                uint32_t nonBlackPixels = 0;
+                uint32_t zeroAlphaPixels = 0;
+                uint8_t minimumValue = 255;
+                uint8_t maximumValue = 0;
+
+                if (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                    description.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+                {
+                    for (uint32_t sampleY = 0; sampleY < sampleGrid; ++sampleY)
+                    {
+                        const uint32_t y = std::min(
+                            description.Height - 1,
+                            ((sampleY * 2 + 1) * description.Height) / (sampleGrid * 2));
+                        const auto* row = static_cast<const uint8_t*>(mapped.pData) +
+                            static_cast<size_t>(y) * mapped.RowPitch;
+
+                        for (uint32_t sampleX = 0; sampleX < sampleGrid; ++sampleX)
+                        {
+                            const uint32_t x = std::min(
+                                description.Width - 1,
+                                ((sampleX * 2 + 1) * description.Width) / (sampleGrid * 2));
+                            const auto* pixel = row + static_cast<size_t>(x) * 4;
+                            const uint8_t blue = pixel[0];
+                            const uint8_t green = pixel[1];
+                            const uint8_t red = pixel[2];
+                            const uint8_t alpha = pixel[3];
+                            const uint8_t pixelMaximum = std::max({ blue, green, red });
+                            const uint8_t pixelMinimum = std::min({ blue, green, red });
+
+                            valueSum += static_cast<uint64_t>(blue) + green + red;
+                            alphaSum += alpha;
+                            minimumValue = std::min(minimumValue, pixelMinimum);
+                            maximumValue = std::max(maximumValue, pixelMaximum);
+                            if (pixelMaximum > 8) ++nonBlackPixels;
+                            if (alpha == 0) ++zeroAlphaPixels;
+                            ++sampledPixels;
+                        }
+                    }
+                }
+                else if (description.Format == DXGI_FORMAT_NV12)
+                {
+                    for (uint32_t sampleY = 0; sampleY < sampleGrid; ++sampleY)
+                    {
+                        const uint32_t y = std::min(
+                            description.Height - 1,
+                            ((sampleY * 2 + 1) * description.Height) / (sampleGrid * 2));
+                        const auto* row = static_cast<const uint8_t*>(mapped.pData) +
+                            static_cast<size_t>(y) * mapped.RowPitch;
+
+                        for (uint32_t sampleX = 0; sampleX < sampleGrid; ++sampleX)
+                        {
+                            const uint32_t x = std::min(
+                                description.Width - 1,
+                                ((sampleX * 2 + 1) * description.Width) / (sampleGrid * 2));
+                            const uint8_t luminance = row[x];
+                            valueSum += luminance;
+                            minimumValue = std::min(minimumValue, luminance);
+                            maximumValue = std::max(maximumValue, luminance);
+                            if (luminance > 20) ++nonBlackPixels;
+                            ++sampledPixels;
+                        }
+                    }
+                }
+
+                context_->Unmap(stagingTexture.Get(), 0);
+
+                std::wstringstream message;
+                message << L"DDA portrait texture probe | Stage=" << stage
+                    << L" | Size=" << description.Width << L"x" << description.Height
+                    << L" | Format=" << static_cast<uint32_t>(description.Format)
+                    << L" | RowPitch=" << mapped.RowPitch
+                    << L" | Samples=" << sampledPixels;
+
+                if (sampledPixels == 0)
+                {
+                    message << L" | Result=Unsupported format";
+                }
+                else
+                {
+                    const uint64_t divisor = description.Format == DXGI_FORMAT_NV12
+                        ? sampledPixels
+                        : static_cast<uint64_t>(sampledPixels) * 3;
+                    message << L" | Min=" << static_cast<uint32_t>(minimumValue)
+                        << L" | Max=" << static_cast<uint32_t>(maximumValue)
+                        << L" | Average=" << (valueSum / std::max<uint64_t>(1, divisor))
+                        << L" | NonBlack=" << nonBlackPixels << L"/" << sampledPixels;
+                    if (description.Format != DXGI_FORMAT_NV12)
+                    {
+                        message << L" | AverageAlpha=" << (alphaSum / sampledPixels)
+                            << L" | ZeroAlpha=" << zeroAlphaPixels << L"/" << sampledPixels;
+                    }
+                }
+                LogNative(message.str());
+            }
+            catch (const winrt::hresult_error& error)
+            {
+                std::wstringstream message;
+                message << L"DDA portrait texture probe failed | Stage=" << stage
+                    << L" | HRESULT=0x" << std::hex << static_cast<uint32_t>(error.code())
+                    << L" | Message=" << error.message().c_str();
+                LogNative(message.str());
+            }
+            catch (const std::exception& error)
+            {
+                LogNative(
+                    L"DDA portrait texture probe failed | Stage=" + std::wstring(stage) +
+                    L" | Message=" + std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+            }
+            catch (...)
+            {
+                LogNative(L"DDA portrait texture probe failed | Stage=" + std::wstring(stage) + L" | Unknown error");
+            }
         }
 
         void CreateEncoder()
@@ -3564,6 +3733,7 @@ namespace EventCaptureNative
                 while (running_)
                 {
                     bool framePrepared = false;
+                    bool probeDdaPortraitFrame = false;
                     bool selectedMonitorCfrSlot = false;
                     size_t selectedSlotIndex = std::numeric_limits<size_t>::max();
                     uint64_t preparedTextureVersion = 0;
@@ -3675,6 +3845,13 @@ namespace EventCaptureNative
                         if (useDdaShaderRotation_)
                         {
                             RenderDesktopDuplicationToCanvas();
+                            probeDdaPortraitFrame = ddaPortraitProbeCount_ == 0 ||
+                                (ddaPortraitProbeCount_ == 1 && convertedFrames_.load() >= config_.framesPerSecond);
+                            if (probeDdaPortraitFrame)
+                            {
+                                LogDdaTextureProbe(latestTexture_.Get(), L"Captured BGRA");
+                                LogDdaTextureProbe(canvasTexture_.Get(), L"Rotated canvas BGRA");
+                            }
                         }
 
                         ComPtr<ID3D11VideoProcessorOutputView> selectedProcessorOutput = processorOutput_;
@@ -3691,9 +3868,15 @@ namespace EventCaptureNative
                             {
                                 encoderSurfaceStarvationFrames_.fetch_add(1);
                                 droppedFrames_.fetch_add(1);
-                                std::scoped_lock lock(textureMutex_);
-                                monitorFrameSlots_[selectedSlotIndex].encoding = false;
-                                frameCondition_.notify_one();
+                                if (selectedMonitorCfrSlot)
+                                {
+                                    std::scoped_lock lock(textureMutex_);
+                                    if (selectedSlotIndex < monitorFrameSlots_.size())
+                                    {
+                                        monitorFrameSlots_[selectedSlotIndex].encoding = false;
+                                    }
+                                    frameCondition_.notify_one();
+                                }
                                 continue;
                             }
 
@@ -3728,6 +3911,11 @@ namespace EventCaptureNative
                         else
                         {
                             framePrepared = true;
+                            if (probeDdaPortraitFrame)
+                            {
+                                LogDdaTextureProbe(preparedEncoderTexture.Get(), L"Converted encoder NV12");
+                                ++ddaPortraitProbeCount_;
+                            }
                         }
 
                         if (selectedMonitorCfrSlot)
@@ -4553,6 +4741,16 @@ namespace EventCaptureNative
 
         void ProcessQsvPacket(QsvEncodedPacket&& packet)
         {
+            if (useDdaShaderRotation_ && !ddaPortraitEncodedPacketLogged_)
+            {
+                std::wstringstream message;
+                message << L"DDA portrait encoded packet | Bytes=" << packet.bytes.size()
+                    << L" | Timestamp=" << packet.timestamp100ns
+                    << L" | Duration=" << packet.duration100ns
+                    << L" | KeyFrame=" << packet.keyFrame;
+                LogNative(message.str());
+                ddaPortraitEncodedPacketLogged_ = true;
+            }
 
             ComPtr<IMFMediaBuffer> buffer;
             ThrowIfFailed(MFCreateMemoryBuffer(static_cast<DWORD>(packet.bytes.size()), &buffer));
@@ -4652,6 +4850,8 @@ namespace EventCaptureNative
             monitorQueueOverflowFrames_.store(0);
             monitorQueueMaxDepth_.store(0);
             encoderSurfaceStarvationFrames_.store(0);
+            ddaPortraitProbeCount_ = 0;
+            ddaPortraitEncodedPacketLogged_ = false;
         }
 
         void AddDiagnosticTimestamp(std::deque<int64_t>& timeline, int64_t timestamp100ns)
@@ -5024,6 +5224,7 @@ namespace EventCaptureNative
             compositorSampler_.Reset();
             compositorVertexBuffer_.Reset();
             compositorInputLayout_.Reset();
+            ddaRotationPixelShader_.Reset();
             compositorPixelShader_.Reset();
             compositorVertexShader_.Reset();
             canvasRenderTarget_.Reset();
@@ -5093,6 +5294,7 @@ namespace EventCaptureNative
         ComPtr<ID3D11RenderTargetView> canvasRenderTarget_;
         ComPtr<ID3D11VertexShader> compositorVertexShader_;
         ComPtr<ID3D11PixelShader> compositorPixelShader_;
+        ComPtr<ID3D11PixelShader> ddaRotationPixelShader_;
         ComPtr<ID3D11InputLayout> compositorInputLayout_;
         ComPtr<ID3D11Buffer> compositorVertexBuffer_;
         ComPtr<ID3D11SamplerState> compositorSampler_;
@@ -5111,6 +5313,8 @@ namespace EventCaptureNative
         uint32_t sourceHeight_{};
         DXGI_MODE_ROTATION desktopDuplicationRotation_{ DXGI_MODE_ROTATION_IDENTITY };
         bool useDdaShaderRotation_{};
+        uint32_t ddaPortraitProbeCount_{};
+        bool ddaPortraitEncodedPacketLogged_{};
         uint32_t sourceContentWidth_{};
         uint32_t sourceContentHeight_{};
         uint32_t windowFrameWidth_{};
