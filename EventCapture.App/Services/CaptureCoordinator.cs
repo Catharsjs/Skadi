@@ -197,34 +197,51 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     public Task<string> StopContinuousRecordingAsync() =>
         StopContinuousRecordingCoreAsync(stopDiskMonitor: true);
 
-    public async Task HandleDisplayTopologyChangedAsync()
+    public async Task<string?> HandleDisplayTopologyChangedAsync()
     {
         AppLogger.Info($"Reload (Targets updated) | Action=DisplayTopologyChanged | Current={DescribeState()}");
 
-        if (!IsContinuousRecording || _videoPipeline is null)
-            return;
-
-        bool videoUnavailable = !_videoPipeline.IsRunning;
-        if (_videoPipeline is GpuCapturePipeline gpu)
+        string? finalizedRecordingPath = null;
+        Exception? finalizeError = null;
+        if (IsContinuousRecording)
         {
             try
             {
-                GpuCaptureStats stats = gpu.GetStats();
-                videoUnavailable = !stats.IsRunning && stats.IsRecording;
+                finalizedRecordingPath = await StopContinuousRecordingCoreAsync(stopDiskMonitor: true);
+                AppLogger.Info(
+                    $"Reload (Targets updated) | Recording finalized | " +
+                    $"Path={Path.GetFileName(finalizedRecordingPath)}");
             }
             catch (Exception ex)
             {
-                videoUnavailable = true;
-                AppLogger.Error(nameof(CaptureCoordinator), $"Reload (Targets updated) | Failed to read native stats after display change: {ex}");
+                finalizeError = ex;
+                AppLogger.Error(
+                    nameof(CaptureCoordinator),
+                    $"Reload (Targets updated) | Recording finalization failed: {ex}");
             }
         }
 
-        if (!videoUnavailable)
-            return;
+        await _pipelineLock.WaitAsync();
+        try
+        {
+            StopPipelineCore();
+            AppLogger.Info(
+                $"Reload (Targets updated) | Previous capture pipeline stopped | " +
+                $"Finalized={finalizedRecordingPath is not null} | Current={DescribeState()}");
+        }
+        finally
+        {
+            _pipelineLock.Release();
+        }
 
-        await ForceStopContinuousRecordingAsync(
-            "Reload (Targets updated)",
-            "Display topology changed and the active recording pipeline stopped.");
+        if (finalizeError is not null)
+        {
+            throw new InvalidOperationException(
+                "Recording could not be safely finalized after the display topology changed.",
+                finalizeError);
+        }
+
+        return finalizedRecordingPath;
     }
 
     private async Task<string> StopContinuousRecordingCoreAsync(bool stopDiskMonitor)

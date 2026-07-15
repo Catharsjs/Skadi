@@ -829,17 +829,39 @@
                         IsHitTestVisible="{Binding CanEditSettings}"
                         Style="{StaticResource FadeSectionStyle}">
 
-                            <Grid Height="42"
+                            <Grid Height="50"
                           Margin="6,2,6,0">
 
-                                <TextBlock Text="Show System Info"
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition/>
+                                    <ColumnDefinition Width="320"/>
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="HUD"
                                    FontSize="17"
                                    VerticalAlignment="Center"/>
 
-                                <CheckBox HorizontalAlignment="Right"
-                                  VerticalAlignment="Center"
-                                  Style="{StaticResource ToggleStyle}"
-                                  IsChecked="{Binding ShowSystemInfo}"/>
+                                <Grid Grid.Column="1">
+                                    <Button Style="{StaticResource ArrowButtonStyle}"
+                                            Content="&#x25C0;"
+                                            Command="{Binding CycleVideoSettingCommand}"
+                                            CommandParameter="HudMode:-1"/>
+
+                                    <controls:AnimatedTextBlock
+                                        Value="{Binding HudMode}"
+                                        Foreground="{StaticResource AccentBrush}"
+                                        FontFamily="Segoe UI"
+                                        FontSize="19"
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"/>
+
+                                    <Button HorizontalAlignment="Right"
+                                            Style="{StaticResource ArrowButtonStyle}"
+                                            Content="&#x25B6;"
+                                            Command="{Binding CycleVideoSettingCommand}"
+                                            CommandParameter="HudMode:1"/>
+                                </Grid>
                             </Grid>
                         </Border>
 

@@ -61,7 +61,7 @@ public partial class App : System.Windows.Application
 
             _viewModel = new MainViewModel(
                 settings, _capture, new CaptureTargetService(), _hotkeys,
-                notifications, _overlay, ToggleUiAsync, () => _ = ShutdownSkadiAsync(),
+                notifications, _overlay, _overlayViewModel, ToggleUiAsync, () => _ = ShutdownSkadiAsync(),
                 (screenshot, record) => _tray.UpdateHotkeys(screenshot, record));
             _window.DataContext = _viewModel;
             _window.PrepareHidden();

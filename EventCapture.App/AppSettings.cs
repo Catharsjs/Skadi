@@ -22,7 +22,7 @@ public class AppSettings
     public string? MicDeviceId { get; set; }
     public int SystemAudioVolume { get; set; } = 100;
     public int MicVolume { get; set; } = 100;
-    public bool ShowSystemInfo { get; set; }
+    public string HudMode { get; set; } = "None";
 
     // Гарячі клавіші
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
@@ -66,8 +66,17 @@ public class AppSettings
 
             var settings = JsonSerializer.Deserialize<AppSettings>(json)
                            ?? new AppSettings();
+            using JsonDocument document = JsonDocument.Parse(json);
+            bool hasHudMode = document.RootElement.TryGetProperty(nameof(HudMode), out _);
+            if (!hasHudMode &&
+                document.RootElement.TryGetProperty("ShowSystemInfo", out JsonElement legacySystemInfo) &&
+                legacySystemInfo.ValueKind == JsonValueKind.True)
+            {
+                settings.HudMode = "System Info";
+            }
             settings.Fps = NormalizeFps(settings.Fps);
             settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
+            settings.HudMode = NormalizeHudMode(settings.HudMode);
             settings.NormalizeHotkeys();
             return settings;
         }
@@ -96,6 +105,13 @@ public class AppSettings
             .OrderBy(preset => Math.Abs(preset - value))
             .First();
     }
+
+    private static string NormalizeHudMode(string? value) => value switch
+    {
+        "Timer" => "Timer",
+        "System Info" => "System Info",
+        _ => "None"
+    };
 
     private void NormalizeHotkeys()
     {

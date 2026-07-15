@@ -24,6 +24,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly NotificationService _notifications;
     private readonly ScreenshotSelectionService _screenshotSelection = new();
     private readonly OverlayWindow _overlay;
+    private readonly OverlayViewModel _overlayViewModel;
     private readonly Func<Task> _toggleUi;
     private readonly Action<string, string> _updateTrayHotkeys;
     private readonly Dictionary<string, string?> _systemDeviceIds = [];
@@ -78,7 +79,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isSystemAudioInputEnabled;
     private bool _isMicrophoneInputEnabled;
     private string _saveFolder;
-    private bool _showSystemInfo;
+    private string _hudMode;
     private string _screenshotHotkey;
     private string _recordHotkey;
     private string _startStopRecordHotkey;
@@ -98,6 +99,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         GlobalHotkeyService hotkeys,
         NotificationService notifications,
         OverlayWindow overlay,
+        OverlayViewModel overlayViewModel,
         Func<Task> toggleUi,
         Action exit,
         Action<string, string> updateTrayHotkeys)
@@ -108,6 +110,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _hotkeys = hotkeys;
         _notifications = notifications;
         _overlay = overlay;
+        _overlayViewModel = overlayViewModel;
         _capture.ContinuousRecordingStopping += OnContinuousRecordingStopping;
         _capture.ContinuousRecordingStopped += OnContinuousRecordingStopped;
         _toggleUi = toggleUi;
@@ -137,7 +140,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 ? _lastMicrophoneVolume
                 : 0;
         _saveFolder = settings.SaveFolder;
-        _showSystemInfo = settings.ShowSystemInfo;
+        _hudMode = settings.HudMode;
         _screenshotHotkey = settings.HotkeyScreenshot;
         _recordHotkey = settings.HotkeySaveVideo;
         _startStopRecordHotkey = settings.HotkeyStartStopRecord;
@@ -238,7 +241,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         RefreshVisiblePreviews();
         _initializing = false;
         ApplyHotkeys();
-        if (_showSystemInfo) _overlay.Show();
+        ApplyHudMode();
         try
         {
             ApplyToSettings();
@@ -389,14 +392,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public bool IsSystemAudioInputEnabled { get => _isSystemAudioInputEnabled; private set => SetProperty(ref _isSystemAudioInputEnabled, value); }
     public bool IsMicrophoneInputEnabled { get => _isMicrophoneInputEnabled; private set => SetProperty(ref _isMicrophoneInputEnabled, value); }
     public string SaveFolder { get => _saveFolder; set { if (SetProperty(ref _saveFolder, value)) QueueSettingsUpdate(false); } }
-    public bool ShowSystemInfo
+    public string HudMode
     {
-        get => _showSystemInfo;
+        get => _hudMode;
         set
         {
-            if (!SetProperty(ref _showSystemInfo, value)) return;
-            if (value) _overlay.Show(); else _overlay.Hide();
-            LogEvent(value ? "System info enabled" : "System info disabled");
+            string normalizedMode = value is "Timer" or "System Info" ? value : "None";
+            if (!SetProperty(ref _hudMode, normalizedMode)) return;
+            ApplyHudMode();
+            LogEvent($"HUD: {normalizedMode}");
             QueueSettingsUpdate(false);
         }
     }
@@ -588,6 +592,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshTargetsAfterDisplayChangeAsync(string reason, CancellationToken cancellationToken)
     {
+        bool recordingStateTransition = false;
         try
         {
             await Task.Delay(450, cancellationToken);
@@ -595,29 +600,40 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             AppLogger.Info($"Display topology changed | Reason={reason} | Recording={IsContinuousRecording} | Buffer={BufferEnabled} | CanEdit={CanEditSettings} | Target={_selectedTargetValue}");
 
+            bool recordingWasActive = IsContinuousRecording || _capture.IsContinuousRecording;
+            bool bufferShouldRestart = BufferEnabled;
+            if (recordingWasActive)
+            {
+                recordingStateTransition = true;
+                _isRecordStateChanging = true;
+                IsContinuousRecording = false;
+                AppLogger.Info(
+                    $"Reload (Targets updated) | UI recording state stopped for topology change | " +
+                    $"Buffer={BufferEnabled} | CaptureRecording={_capture.IsContinuousRecording} | " +
+                    $"Frames={_capture.CapturedFrames}");
+            }
+
+            string? finalizedPath = await _capture.HandleDisplayTopologyChangedAsync();
+            cancellationToken.ThrowIfCancellationRequested();
+
             await AnimateTargetPreviewOpacityAsync(0.0, cancellationToken);
             IReadOnlyList<CapturePreview> nextTargets = await _targets.GetMonitorsAsync();
             cancellationToken.ThrowIfCancellationRequested();
 
             _monitors = nextTargets;
             _previewPage = 0;
-            RefreshVisiblePreviews(selectStoredTarget: true, preserveMissingSelection: !CanEditSettings);
+            RefreshVisiblePreviews(selectStoredTarget: true, preserveMissingSelection: false);
             await AnimateTargetPreviewOpacityAsync(1.0, cancellationToken);
 
-            LogEvent("Reload (Targets updated)", warning: IsContinuousRecording);
-
-            if (!CanEditSettings)
-            {
-                AppLogger.Info($"Reload (Targets updated) | Selection locked | Recording={IsContinuousRecording} | Buffer={BufferEnabled} | Target={_selectedTargetValue}");
-                _notifications.Show("Reload (Targets updated)");
-                await _capture.HandleDisplayTopologyChangedAsync();
-                return;
-            }
-
             ApplyToSettings();
-            await _capture.ApplySettingsAsync(_settings, restartPipeline: true);
+            await _capture.ApplySettingsAsync(_settings, restartPipeline: bufferShouldRestart);
             _settings.Save();
-            AppLogger.Info($"Reload (Targets updated) | Applied | Target={_settings.CaptureTarget}");
+            AppLogger.Info(
+                $"Reload (Targets updated) | Applied | Target={_settings.CaptureTarget} | " +
+                $"RecordingFinalized={finalizedPath is not null} | " +
+                $"FinalizedPath={Path.GetFileName(finalizedPath ?? string.Empty)} | " +
+                $"BufferRestarted={bufferShouldRestart}");
+            LogEvent("Reload (Targets updated)", warning: recordingWasActive);
             _notifications.Show("Reload (Targets updated)");
         }
         catch (OperationCanceledException)
@@ -629,6 +645,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             TargetPreviewOpacity = 1.0;
             LogEvent("Reload failed", warning: true);
             _notifications.Show("Reload failed");
+        }
+        finally
+        {
+            if (recordingStateTransition)
+            {
+                _isRecordStateChanging = false;
+                IsContinuousRecording = false;
+                AppLogger.Info(
+                    $"Reload (Targets updated) | UI recording state finalized | " +
+                    $"Buffer={BufferEnabled} | CaptureRecording={_capture.IsContinuousRecording} | " +
+                    $"Frames={_capture.CapturedFrames}");
+            }
         }
     }
 
@@ -909,6 +937,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _recordingTimerLastLogTimestamp = 0;
         _recordingTimerTickCount = 0;
         _recordingElapsed = TimeSpan.Zero;
+        _overlayViewModel.SetRecordingElapsed(TimeSpan.Zero);
 
         _recordingTimer ??= new DispatcherTimer
         {
@@ -929,6 +958,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         _recordingStopwatch.Reset();
         _recordingElapsed = TimeSpan.Zero;
+        _overlayViewModel.SetRecordingElapsed(null);
         OnPropertyChanged(nameof(StartStopRecordText));
     }
 
@@ -945,6 +975,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         TimeSpan wallElapsed = DateTimeOffset.Now - _recordingStartedAt;
         double driftMs = wallElapsed.TotalMilliseconds - stopwatchElapsed.TotalMilliseconds;
         _recordingElapsed = stopwatchElapsed;
+        _overlayViewModel.SetRecordingElapsed(stopwatchElapsed);
         OnPropertyChanged(nameof(StartStopRecordText));
 
         bool shouldLog = tickGapMs > 750 || Math.Abs(driftMs) > 750 || nowTicks - _recordingTimerLastLogTimestamp > Stopwatch.Frequency * 5;
@@ -1518,7 +1549,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.HotkeyStartStopRecord = StartStopRecordHotkey;
         _settings.HotkeyToggleUI = ToggleUiHotkey;
         _settings.SaveFolder = SaveFolder;
-        _settings.ShowSystemInfo = ShowSystemInfo;
+        _settings.HudMode = HudMode;
     }
 
     private void UpdateCaptureSectionState(
@@ -1626,7 +1657,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             case "Quality": Quality = Cycle(["Low", "Medium", "High"], Quality, direction); break;
             case "FrameRate": FrameRate = Cycle(FrameRates, FrameRate, direction); break;
             case "BufferDuration": BufferDuration = Cycle(BufferDurations, BufferDuration, direction); break;
+            case "HudMode": HudMode = Cycle(["None", "Timer", "System Info"], HudMode, direction); break;
         }
+    }
+
+    private void ApplyHudMode()
+    {
+        _overlayViewModel.SetHudMode(HudMode);
+        if (HudMode == "None")
+            _overlay.Hide();
+        else
+            _overlay.Show();
     }
 
     private static T Cycle<T>(IReadOnlyList<T> values, T current, int direction)

@@ -47,11 +47,8 @@ public partial class OverlayWindow : Window
 
         Loaded += (_, _) =>
         {
-            Left =
-                SystemParameters.WorkArea.Left + 18;
-
-            Top =
-                SystemParameters.WorkArea.Top + 18;
+            Left = 18;
+            Top = 18;
         };
     }
 
