@@ -155,7 +155,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             uiLockTimeout: TimeSpan.FromSeconds(5),
             uiLockTimeoutAllowed: () => !_screenshotSelection.IsSelectionActive);
         SaveRecordCommand = new AsyncRelayCommand(SaveRecordAsync, commandName: "SaveReplay", uiLockTimeout: TimeSpan.FromSeconds(5));
-        StartStopRecordCommand = new AsyncRelayCommand(ToggleContinuousRecordingAsync, commandName: "StartStopRecording", uiLockTimeout: TimeSpan.FromSeconds(5));
+        StartStopRecordCommand = new AsyncRelayCommand(
+            ToggleContinuousRecordingAsync,
+            commandName: "StartStopRecording",
+            uiLockTimeout: TimeSpan.FromSeconds(5),
+            uiLockTimeoutAllowed: () => !_isRecordStateChanging);
         ToggleBufferCommand = new RelayCommand(_ => BufferEnabled = !BufferEnabled);
         NextPreviewPageCommand = new RelayCommand(_ => NextPreviewPage());
         CycleVideoSettingCommand = new RelayCommand(parameter => CycleVideoSetting(parameter?.ToString()));

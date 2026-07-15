@@ -13,6 +13,9 @@ public sealed class AudioRecorder : IDisposable
     private const int NativeMixSampleRate = 48_000;
     private const int NativeMixChannels = 2;
     private const int NativeMixChunkMilliseconds = 50;
+    private const int NativeMixPumpLatencyMilliseconds = 500;
+    private const float NativeMixLimiterThreshold = 0.95f;
+    private const int NativeMixLimiterReleaseMilliseconds = 250;
 
     private readonly object _systemLock = new();
     private readonly object _microphoneLock = new();
@@ -37,13 +40,7 @@ public sealed class AudioRecorder : IDisposable
     private long _sharedStartTimestamp;
     private double _systemGain = 1.0;
     private double _microphoneGain = 1.0;
-    private WaveFileWriter? _continuousSystemWriter;
-    private WaveFileWriter? _continuousMicrophoneWriter;
-    private string? _continuousSystemPath;
-    private string? _continuousMicrophonePath;
     private long _continuousStartTimestamp;
-    private long _continuousSystemWrittenBytes;
-    private long _continuousMicrophoneWrittenBytes;
     private IContinuousAudioSink? _continuousAudioSink;
     private readonly object _nativeMixLock = new();
     private Queue<float>? _nativeSystemMix;
@@ -55,15 +52,24 @@ public sealed class AudioRecorder : IDisposable
     private long _nativeMixMicrophonePackets;
     private long _nativeMixSystemFrames;
     private long _nativeMixMicrophoneFrames;
+    private long _nativeMixSystemInputFrames;
+    private long _nativeMixMicrophoneInputFrames;
     private long _nativeMixChunks;
     private long _nativeMixWrittenFrames;
     private long _nativeMixLastLogTimestamp;
+    private double _nativeMixLimiterGain;
+    private double _nativeMixMinimumLimiterGain;
+    private float _nativeMixPeakBeforeLimiter;
+    private long _nativeMixLimitedFrames;
     private long _nativeSystemResampleRemainder;
     private long _nativeMicrophoneResampleRemainder;
     private long _nativeSystemTimelineFrames;
     private long _nativeMicrophoneTimelineFrames;
     private bool _nativeSystemTimelineInitialized;
     private bool _nativeMicrophoneTimelineInitialized;
+    private System.Threading.Timer? _nativeMixPumpTimer;
+    private bool _nativeMixClockPumped;
+    private Exception? _nativeMixFailure;
     private bool _continuousRecording;
     private bool _disposed;
 
@@ -226,19 +232,6 @@ public sealed class AudioRecorder : IDisposable
             PadTimelineGap(_systemWriter, format, _systemSegmentStart, _systemWrittenBytes, packetStart, out long paddingBytes);
             _systemWrittenBytes += paddingBytes;
             _systemWriter.Write(buffer, 0, count);
-            if (_continuousSystemWriter is not null)
-            {
-                PadTimelineGap(
-                    _continuousSystemWriter,
-                    format,
-                    _continuousStartTimestamp,
-                    _continuousSystemWrittenBytes,
-                    packetStart,
-                    out long continuousPadding);
-                _continuousSystemWrittenBytes += continuousPadding;
-                _continuousSystemWriter.Write(buffer, 0, count);
-                _continuousSystemWrittenBytes += count;
-            }
             QueueNativeContinuousAudio(
                 ContinuousAudioSource.System,
                 format,
@@ -272,19 +265,6 @@ public sealed class AudioRecorder : IDisposable
             PadTimelineGap(_microphoneWriter, format, _microphoneSegmentStart, _microphoneWrittenBytes, packetStart, out long paddingBytes);
             _microphoneWrittenBytes += paddingBytes;
             _microphoneWriter.Write(buffer, 0, count);
-            if (_continuousMicrophoneWriter is not null)
-            {
-                PadTimelineGap(
-                    _continuousMicrophoneWriter,
-                    format,
-                    _continuousStartTimestamp,
-                    _continuousMicrophoneWrittenBytes,
-                    packetStart,
-                    out long continuousPadding);
-                _continuousMicrophoneWrittenBytes += continuousPadding;
-                _continuousMicrophoneWriter.Write(buffer, 0, count);
-                _continuousMicrophoneWrittenBytes += count;
-            }
             QueueNativeContinuousAudio(
                 ContinuousAudioSource.Microphone,
                 format,
@@ -359,12 +339,10 @@ public sealed class AudioRecorder : IDisposable
         ThrowIfDisposed();
         if (_continuousRecording)
             throw new InvalidOperationException("Continuous audio recording is already active.");
+        if (!IsRecordingSystem && !IsRecordingMic)
+            throw new InvalidOperationException("No active audio source is available.");
 
         _continuousStartTimestamp = Environment.TickCount64;
-        _continuousSystemWrittenBytes = 0;
-        _continuousMicrophoneWrittenBytes = 0;
-        _continuousSystemPath = null;
-        _continuousMicrophonePath = null;
         lock (_nativeMixLock)
         {
             _continuousAudioSink = sink;
@@ -377,18 +355,34 @@ public sealed class AudioRecorder : IDisposable
             _nativeMixMicrophonePackets = 0;
             _nativeMixSystemFrames = 0;
             _nativeMixMicrophoneFrames = 0;
+            _nativeMixSystemInputFrames = 0;
+            _nativeMixMicrophoneInputFrames = 0;
             _nativeMixChunks = 0;
             _nativeMixWrittenFrames = 0;
             _nativeMixLastLogTimestamp = 0;
+            _nativeMixLimiterGain = 1.0;
+            _nativeMixMinimumLimiterGain = 1.0;
+            _nativeMixPeakBeforeLimiter = 0;
+            _nativeMixLimitedFrames = 0;
             _nativeSystemResampleRemainder = 0;
             _nativeMicrophoneResampleRemainder = 0;
             _nativeSystemTimelineFrames = 0;
             _nativeMicrophoneTimelineFrames = 0;
             _nativeSystemTimelineInitialized = false;
             _nativeMicrophoneTimelineInitialized = false;
+            _nativeMixClockPumped = sink is StreamingMp3Writer;
+            _nativeMixFailure = null;
         }
-        AppLogger.Info($"Continuous native audio mix started | SystemEnabled={IsRecordingSystem} | MicrophoneEnabled={IsRecordingMic} | SystemFormat={_systemFormat} | MicrophoneFormat={_microphoneFormat} | MixFormat={NativeContinuousMixFormat}");
         _continuousRecording = true;
+        if (_nativeMixClockPumped)
+        {
+            _nativeMixPumpTimer = new System.Threading.Timer(
+                _ => PumpNativeMixClock(),
+                null,
+                NativeMixChunkMilliseconds,
+                NativeMixChunkMilliseconds);
+        }
+        AppLogger.Info($"Continuous native audio mix started | SystemEnabled={IsRecordingSystem} | MicrophoneEnabled={IsRecordingMic} | ClockPump={_nativeMixClockPumped} | JitterBufferMs={NativeMixPumpLatencyMilliseconds} | SystemFormat={_systemFormat} | MicrophoneFormat={_microphoneFormat} | MixFormat={NativeContinuousMixFormat}");
     }
 
     public (long StartTimestamp, long EndTimestamp) StopContinuousNativeStreaming()
@@ -396,146 +390,40 @@ public sealed class AudioRecorder : IDisposable
         if (!_continuousRecording)
             throw new InvalidOperationException("Continuous audio recording is not active.");
 
+        System.Threading.Timer? pumpTimer = Interlocked.Exchange(ref _nativeMixPumpTimer, null);
+        try { pumpTimer?.Dispose(); } catch { }
+        long endTimestamp = Environment.TickCount64;
+        Exception? mixFailure;
         lock (_nativeMixLock)
         {
-            FlushNativeMixedAudioLocked(force: true);
-            AppLogger.Info($"Continuous native audio mix stopped | SystemPackets={_nativeMixSystemPackets} | MicrophonePackets={_nativeMixMicrophonePackets} | SystemFrames={_nativeMixSystemFrames} | MicrophoneFrames={_nativeMixMicrophoneFrames} | MixedChunks={_nativeMixChunks} | MixedFrames={_nativeMixWrittenFrames} | RemainingSystemSamples={_nativeSystemMix?.Count ?? 0} | RemainingMicrophoneSamples={_nativeMicrophoneMix?.Count ?? 0} | NextTimestamp={_nativeMixNextTimestamp}");
+            try
+            {
+                if (_nativeMixFailure is null)
+                {
+                    if (_nativeMixClockPumped)
+                        PumpNativeMixedAudioToTimestampLocked(endTimestamp, includePartialChunk: true);
+                    else
+                        FlushNativeMixedAudioLocked(force: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                _nativeMixFailure ??= ex;
+            }
+            mixFailure = _nativeMixFailure;
+            AppLogger.Info($"Continuous native audio mix stopped | SystemPackets={_nativeMixSystemPackets} | MicrophonePackets={_nativeMixMicrophonePackets} | SystemInputFrames={_nativeMixSystemInputFrames} | MicrophoneInputFrames={_nativeMixMicrophoneInputFrames} | SystemFrames={_nativeMixSystemFrames} | MicrophoneFrames={_nativeMixMicrophoneFrames} | MixedChunks={_nativeMixChunks} | MixedFrames={_nativeMixWrittenFrames} | PeakBeforeLimiter={_nativeMixPeakBeforeLimiter:0.####} | MinimumLimiterGain={_nativeMixMinimumLimiterGain:0.####} | LimitedFrames={_nativeMixLimitedFrames} | RemainingSystemSamples={_nativeSystemMix?.Count ?? 0} | RemainingMicrophoneSamples={_nativeMicrophoneMix?.Count ?? 0} | NextTimestamp={_nativeMixNextTimestamp}");
             _continuousAudioSink = null;
             _nativeSystemMix = null;
             _nativeMicrophoneMix = null;
             _nativeMixSystemEnabled = false;
             _nativeMixMicrophoneEnabled = false;
+            _nativeMixClockPumped = false;
+            _nativeMixFailure = null;
         }
         _continuousRecording = false;
-        return (_continuousStartTimestamp, Environment.TickCount64);
-    }
-
-    public void StartContinuousRecording()
-    {
-        ThrowIfDisposed();
-        if (_continuousRecording)
-            throw new InvalidOperationException("Continuous audio recording is already active.");
-
-        _continuousStartTimestamp = Environment.TickCount64;
-        _continuousSystemWrittenBytes = 0;
-        _continuousMicrophoneWrittenBytes = 0;
-        _continuousSystemPath = null;
-        _continuousMicrophonePath = null;
-
-        lock (_systemLock)
-        {
-            if (IsRecordingSystem && _systemFormat is not null)
-            {
-                _continuousSystemPath = Path.Combine(
-                    _sessionDirectory,
-                    $"continuous-system-{Guid.NewGuid():N}.wav");
-                _continuousSystemWriter = new WaveFileWriter(
-                    _continuousSystemPath,
-                    _systemFormat);
-            }
-        }
-
-        lock (_microphoneLock)
-        {
-            if (IsRecordingMic && _microphoneFormat is not null)
-            {
-                _continuousMicrophonePath = Path.Combine(
-                    _sessionDirectory,
-                    $"continuous-microphone-{Guid.NewGuid():N}.wav");
-                _continuousMicrophoneWriter = new WaveFileWriter(
-                    _continuousMicrophonePath,
-                    _microphoneFormat);
-            }
-        }
-
-        if (_continuousSystemWriter is null && _continuousMicrophoneWriter is null)
-            throw new InvalidOperationException("No active audio source is available.");
-
-        _continuousRecording = true;
-    }
-
-    public async Task<(string? AudioPath, long StartTimestamp, long EndTimestamp)>
-        StopContinuousRecordingAsync()
-    {
-        if (!_continuousRecording)
-            throw new InvalidOperationException("Continuous audio recording is not active.");
-
-        _continuousRecording = false;
-        long endTimestamp = Environment.TickCount64;
-
-        lock (_systemLock)
-        {
-            if (_continuousSystemWriter is not null && _systemFormat is not null)
-            {
-                PadContinuousWriterToEnd(
-                    _continuousSystemWriter,
-                    _systemFormat,
-                    _continuousStartTimestamp,
-                    _continuousSystemWrittenBytes,
-                    endTimestamp);
-            }
-            _continuousSystemWriter?.Flush();
-            _continuousSystemWriter?.Dispose();
-            _continuousSystemWriter = null;
-        }
-
-        lock (_microphoneLock)
-        {
-            if (_continuousMicrophoneWriter is not null && _microphoneFormat is not null)
-            {
-                PadContinuousWriterToEnd(
-                    _continuousMicrophoneWriter,
-                    _microphoneFormat,
-                    _continuousStartTimestamp,
-                    _continuousMicrophoneWrittenBytes,
-                    endTimestamp);
-            }
-            _continuousMicrophoneWriter?.Flush();
-            _continuousMicrophoneWriter?.Dispose();
-            _continuousMicrophoneWriter = null;
-        }
-
-        var sources = new[] { _continuousSystemPath, _continuousMicrophonePath }
-            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
-            .Cast<string>()
-            .ToArray();
-
-        _continuousSystemPath = null;
-        _continuousMicrophonePath = null;
-
-        if (sources.Length == 0)
-            return (null, _continuousStartTimestamp, endTimestamp);
-
-        if (sources.Length == 1)
-            return (sources[0], _continuousStartTimestamp, endTimestamp);
-
-        string mixedPath = Path.Combine(
-            _sessionDirectory,
-            $"continuous-mixed-{Guid.NewGuid():N}.wav");
-        string arguments =
-            $"-y -i \"{sources[0]}\" -i \"{sources[1]}\" " +
-            "-filter_complex \"[0:a][1:a]amix=inputs=2:duration=longest:" +
-            "dropout_transition=0:normalize=0,alimiter=limit=0.95[out]\" " +
-            $"-map \"[out]\" -c:a pcm_s16le \"{mixedPath}\"";
-
-        try
-        {
-            await RunFfmpegAsync(arguments, "Continuous audio mix");
-            return (mixedPath, _continuousStartTimestamp, endTimestamp);
-        }
-        finally
-        {
-            foreach (string source in sources) TryDelete(source);
-        }
-    }
-
-    public static async Task<string> EncodeContinuousAudioAsMp3Async(
-        string audioPath,
-        string outputFolder)
-    {
-        string outputPath = OutputFileName.Create(outputFolder, "Audio", ".mp3");
-        await EncodeMp3Async(audioPath, outputPath);
-        return outputPath;
+        if (mixFailure is not null)
+            throw new InvalidOperationException("Continuous audio streaming failed.", mixFailure);
+        return (_continuousStartTimestamp, endTimestamp);
     }
 
     private async Task<string?> CreateAudioSnapshotAsync(long windowStart, long windowEnd)
@@ -678,20 +566,6 @@ public sealed class AudioRecorder : IDisposable
             : 0;
     }
 
-    private static void PadContinuousWriterToEnd(
-        WaveFileWriter writer,
-        WaveFormat format,
-        long startTimestamp,
-        long writtenBytes,
-        long endTimestamp)
-    {
-        long expectedMilliseconds = Math.Max(0, endTimestamp - startTimestamp);
-        long writtenMilliseconds = BytesToMilliseconds(writtenBytes, format);
-        long missingMilliseconds = expectedMilliseconds - writtenMilliseconds;
-        if (missingMilliseconds > 0)
-            WriteSilence(writer, format, missingMilliseconds);
-    }
-
     private async Task MixSegmentsAsync(
         IReadOnlyList<ReplaySegmentBuffer.Segment> segments,
         long windowStart,
@@ -818,6 +692,10 @@ public sealed class AudioRecorder : IDisposable
                         : ref _nativeSystemTimelineInitialized);
 
                 int packetFrames = stereoSamples.Length / NativeMixChannels;
+                if (source == ContinuousAudioSource.Microphone)
+                    _nativeMixMicrophoneInputFrames += packetFrames;
+                else
+                    _nativeMixSystemInputFrames += packetFrames;
                 if (!timelineInitialized)
                 {
                     timelineFrames = Math.Max(
@@ -832,7 +710,18 @@ public sealed class AudioRecorder : IDisposable
                 }
 
                 long desiredStartFrame = timelineFrames;
-                timelineFrames += packetFrames;
+                if (_nativeMixClockPumped)
+                {
+                    long timestampStartFrame = Math.Max(
+                        0,
+                        packetStartTimestamp - _continuousStartTimestamp) *
+                        NativeMixSampleRate / 1000L;
+                    long gapThresholdFrames =
+                        GapThresholdMilliseconds * NativeMixSampleRate / 1000L;
+                    if (timestampStartFrame - timelineFrames > gapThresholdFrames)
+                        desiredStartFrame = timestampStartFrame;
+                }
+                timelineFrames = desiredStartFrame + packetFrames;
                 long queueEndFrame = _nativeMixWrittenFrames +
                     queue.Count / NativeMixChannels;
                 long missingFrames = desiredStartFrame - queueEndFrame;
@@ -872,8 +761,87 @@ public sealed class AudioRecorder : IDisposable
         }
         catch (Exception ex)
         {
+            if (_nativeMixClockPumped)
+            {
+                lock (_nativeMixLock)
+                {
+                    _nativeMixFailure ??= ex;
+                }
+            }
             AppLogger.Error(nameof(AudioRecorder), $"Continuous native audio mix failed: {ex}");
         }
+    }
+
+    private void PumpNativeMixClock()
+    {
+        try
+        {
+            lock (_nativeMixLock)
+            {
+                if (!_continuousRecording ||
+                    !_nativeMixClockPumped ||
+                    _continuousAudioSink is null ||
+                    _nativeMixFailure is not null)
+                {
+                    return;
+                }
+
+                long targetTimestamp = Math.Max(
+                    _continuousStartTimestamp,
+                    Environment.TickCount64 - NativeMixPumpLatencyMilliseconds);
+                PumpNativeMixedAudioToTimestampLocked(
+                    targetTimestamp,
+                    includePartialChunk: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (_nativeMixLock)
+            {
+                _nativeMixFailure ??= ex;
+            }
+            AppLogger.Error(nameof(AudioRecorder), $"Continuous MP3 clock pump failed: {ex}");
+        }
+    }
+
+    private void PumpNativeMixedAudioToTimestampLocked(
+        long targetTimestamp,
+        bool includePartialChunk)
+    {
+        Queue<float>? system = _nativeSystemMix;
+        Queue<float>? microphone = _nativeMicrophoneMix;
+        if (_continuousAudioSink is null || system is null || microphone is null)
+            return;
+
+        long targetFrames = Math.Max(
+            0,
+            targetTimestamp - _continuousStartTimestamp) *
+            NativeMixSampleRate / 1000L;
+        int chunkFrames = NativeMixSampleRate * NativeMixChunkMilliseconds / 1000;
+
+        while (_nativeMixWrittenFrames < targetFrames)
+        {
+            long remainingFrames = targetFrames - _nativeMixWrittenFrames;
+            int frames = (int)Math.Min(chunkFrames, remainingFrames);
+            if (!includePartialChunk && frames < chunkFrames)
+                break;
+
+            int requiredSamples = frames * NativeMixChannels;
+            if (_nativeMixSystemEnabled)
+                PadNativeMixQueue(system, requiredSamples);
+            if (_nativeMixMicrophoneEnabled)
+                PadNativeMixQueue(microphone, requiredSamples);
+
+            FlushNativeMixedAudioLocked(force: frames < chunkFrames);
+            if (frames < chunkFrames)
+                break;
+        }
+    }
+
+    private static void PadNativeMixQueue(Queue<float> queue, int requiredSamples)
+    {
+        while (queue.Count < requiredSamples)
+            queue.Enqueue(0);
     }
 
     private void FlushNativeMixedAudioLocked(bool force)
@@ -901,6 +869,7 @@ public sealed class AudioRecorder : IDisposable
 
             if (!force &&
                 samplesToWrite == 0 &&
+                !_nativeMixClockPumped &&
                 _nativeMixSystemEnabled &&
                 _nativeMixMicrophoneEnabled &&
                 maxAvailable >= chunkSamples * 2)
@@ -913,16 +882,33 @@ public sealed class AudioRecorder : IDisposable
 
             int frames = samplesToWrite / NativeMixChannels;
             byte[] pcm = new byte[frames * NativeMixChannels * sizeof(short)];
-            for (int sampleIndex = 0; sampleIndex < frames * NativeMixChannels; sampleIndex++)
+            double releaseCoefficient = 1.0 - Math.Exp(
+                -1.0 /
+                (NativeMixSampleRate * NativeMixLimiterReleaseMilliseconds / 1000.0));
+            for (int frame = 0; frame < frames; frame++)
             {
-                float mixed = 0;
-                if (system.Count > 0) mixed += system.Dequeue();
-                if (microphone.Count > 0) mixed += microphone.Dequeue();
-                short pcmSample = (short)Math.Clamp(
-                    (int)Math.Round(Math.Clamp(mixed, -1.0f, 1.0f) * short.MaxValue),
-                    short.MinValue,
-                    short.MaxValue);
-                BitConverter.TryWriteBytes(pcm.AsSpan(sampleIndex * sizeof(short), sizeof(short)), pcmSample);
+                float left = DequeueMixedSample(system, microphone);
+                float right = DequeueMixedSample(system, microphone);
+                float peak = Math.Max(Math.Abs(left), Math.Abs(right));
+                _nativeMixPeakBeforeLimiter = Math.Max(_nativeMixPeakBeforeLimiter, peak);
+
+                double requiredGain = peak > NativeMixLimiterThreshold
+                    ? NativeMixLimiterThreshold / peak
+                    : 1.0;
+                if (requiredGain < _nativeMixLimiterGain)
+                    _nativeMixLimiterGain = requiredGain;
+                else
+                    _nativeMixLimiterGain +=
+                        (1.0 - _nativeMixLimiterGain) * releaseCoefficient;
+
+                _nativeMixMinimumLimiterGain = Math.Min(
+                    _nativeMixMinimumLimiterGain,
+                    _nativeMixLimiterGain);
+                if (_nativeMixLimiterGain < 0.9999)
+                    _nativeMixLimitedFrames++;
+
+                WritePcm16Sample(pcm, frame * NativeMixChannels, left, _nativeMixLimiterGain);
+                WritePcm16Sample(pcm, frame * NativeMixChannels + 1, right, _nativeMixLimiterGain);
             }
 
             long durationMs = Math.Max(1, frames * 1000L / NativeMixSampleRate);
@@ -995,6 +981,31 @@ public sealed class AudioRecorder : IDisposable
         }
 
         return output;
+    }
+
+    private static float DequeueMixedSample(
+        Queue<float> system,
+        Queue<float> microphone)
+    {
+        float mixed = 0;
+        if (system.Count > 0) mixed += system.Dequeue();
+        if (microphone.Count > 0) mixed += microphone.Dequeue();
+        return mixed;
+    }
+
+    private static void WritePcm16Sample(
+        byte[] destination,
+        int sampleIndex,
+        float sample,
+        double gain)
+    {
+        short pcmSample = (short)Math.Clamp(
+            (int)Math.Round(Math.Clamp(sample * gain, -1.0, 1.0) * short.MaxValue),
+            short.MinValue,
+            short.MaxValue);
+        BitConverter.TryWriteBytes(
+            destination.AsSpan(sampleIndex * sizeof(short), sizeof(short)),
+            pcmSample);
     }
 
     private static float Lerp(float start, float end, float amount) =>
@@ -1134,15 +1145,16 @@ public sealed class AudioRecorder : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        lock (_systemLock)
+        System.Threading.Timer? pumpTimer = Interlocked.Exchange(ref _nativeMixPumpTimer, null);
+        try { pumpTimer?.Dispose(); } catch { }
+        lock (_nativeMixLock)
         {
-            _continuousSystemWriter?.Dispose();
-            _continuousSystemWriter = null;
-        }
-        lock (_microphoneLock)
-        {
-            _continuousMicrophoneWriter?.Dispose();
-            _continuousMicrophoneWriter = null;
+            _continuousAudioSink = null;
+            _nativeSystemMix = null;
+            _nativeMicrophoneMix = null;
+            _nativeMixClockPumped = false;
+            _nativeMixFailure = null;
+            _continuousRecording = false;
         }
         StopSystemCapture();
         StopMicrophoneCapture();

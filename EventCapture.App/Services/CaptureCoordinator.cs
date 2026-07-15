@@ -21,6 +21,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private CancellationTokenSource? _recordingPerformanceCts;
     private Task? _recordingPerformanceTask;
     private bool _continuousNativeCombined;
+    private StreamingMp3Writer? _continuousMp3Writer;
 
     public event EventHandler? ContinuousRecordingStopping;
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
@@ -165,8 +166,25 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 else
                 {
                     if (wantsAudio)
-                        (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
-                            .StartContinuousRecording();
+                    {
+                        if (_settings.CaptureMode != "Audio")
+                            throw new InvalidOperationException("Continuous audio mode is unavailable.");
+
+                        var writer = StreamingMp3Writer.Start(
+                            _settings.SaveFolder,
+                            AudioRecorder.NativeContinuousMixFormat);
+                        try
+                        {
+                            (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
+                                .StartContinuousNativeStreaming(writer);
+                            _continuousMp3Writer = writer;
+                        }
+                        catch
+                        {
+                            writer.Dispose();
+                            throw;
+                        }
+                    }
                     if (wantsVideo)
                         (_videoPipeline ?? throw new InvalidOperationException("Video pipeline is unavailable."))
                             .StartContinuousRecording(_settings.SaveFolder);
@@ -258,7 +276,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 throw new InvalidOperationException("Continuous recording is not active.");
 
             ContinuousVideoResult? video = null;
-            (string? AudioPath, long StartTimestamp, long EndTimestamp)? audio = null;
+            string? audioPath = null;
 
             if (_settings.CaptureMode == "VideoAudio")
             {
@@ -269,27 +287,35 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
                     _audioRecorder.StopContinuousNativeStreaming();
                 }
-
-                audio = null;
             }
 
             if (_settings.CaptureMode != "Audio" && _videoPipeline is not null)
                 video = await _videoPipeline.StopContinuousRecordingAsync(_settings.SaveFolder);
-            if (_settings.CaptureMode != "VideoAudio" && _settings.CaptureMode != "Video" && _audioRecorder is not null &&
-                (_settings.RecordSystemAudio || _settings.RecordMicrophone))
-                audio = await _audioRecorder.StopContinuousRecordingAsync();
+            if (_settings.CaptureMode == "Audio")
+            {
+                StreamingMp3Writer writer = _continuousMp3Writer ??
+                    throw new InvalidOperationException("Streaming MP3 recording is not active.");
+                _continuousMp3Writer = null;
+                try
+                {
+                    (_audioRecorder ?? throw new InvalidOperationException("Audio pipeline is unavailable."))
+                        .StopContinuousNativeStreaming();
+                    audioPath = await writer.CompleteAsync();
+                }
+                finally
+                {
+                    writer.Dispose();
+                }
+            }
 
             string result;
             if (video is not null)
             {
                 result = video.VideoPath;
             }
-            else if (audio?.AudioPath is not null)
+            else if (audioPath is not null)
             {
-                result = await AudioRecorder.EncodeContinuousAudioAsMp3Async(
-                    audio.Value.AudioPath,
-                    _settings.SaveFolder);
-                TryDelete(audio.Value.AudioPath);
+                result = audioPath;
             }
             else
             {
@@ -570,6 +596,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         {
             if (!Directory.Exists(folder)) return;
             foreach (string path in Directory.EnumerateFiles(folder, ".record-merge-*.tmp.mp4"))
+                TryDelete(path);
+            foreach (string path in Directory.EnumerateFiles(folder, ".audio-recording-*.tmp.mp3"))
                 TryDelete(path);
         }
         catch { }
@@ -877,6 +905,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private void StopPipelineCore()
     {
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore enter | Current={DescribeState()}");
+        try { _continuousMp3Writer?.Dispose(); } catch { }
         try { _audioRecorder?.Dispose(); } catch { }
         try { _videoPipeline?.Stop(); } catch { }
         try { _videoPipeline?.Dispose(); } catch { }
@@ -884,6 +913,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         StopRecordingPerformanceMonitor();
         IsContinuousRecording = false;
         _continuousNativeCombined = false;
+        _continuousMp3Writer = null;
         _audioRecorder = null;
         _videoPipeline = null;
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore exit | Current={DescribeState()}");
@@ -914,7 +944,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             ? "Video=null"
             : $"Video={_videoPipeline.GetType().Name}, Running={_videoPipeline.IsRunning}, Continuous={_videoPipeline.IsContinuousRecording}, Frames={_videoPipeline.FramesCaptured}";
         string audio = _audioRecorder is null ? "Audio=null" : "Audio=active";
-        return $"Continuous={IsContinuousRecording}, {settings}, {video}, {audio}";
+        string streamingMp3 = _continuousMp3Writer is null ? "StreamingMp3=null" : "StreamingMp3=active";
+        return $"Continuous={IsContinuousRecording}, {settings}, {video}, {audio}, {streamingMp3}";
     }
     private static void TryDelete(string path)
     {
