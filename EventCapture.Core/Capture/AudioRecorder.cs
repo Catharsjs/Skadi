@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using EventCapture.Core.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -8,6 +7,8 @@ namespace EventCapture.Core.Capture;
 
 public sealed class AudioRecorder : IDisposable
 {
+    private enum AudioInputSource { System, Microphone }
+
     private const int SegmentMilliseconds = 2_000;
     private const int GapThresholdMilliseconds = 100;
     private const int NativeMixSampleRate = 48_000;
@@ -83,10 +84,6 @@ public sealed class AudioRecorder : IDisposable
 
     public bool IsRecordingSystem { get; private set; }
     public bool IsRecordingMic { get; private set; }
-    public bool UseDefaultSystemDevice { get; private set; } = true;
-    public bool UseDefaultMicDevice { get; private set; } = true;
-    public WaveFormat? SystemFormat => _systemFormat;
-    public WaveFormat? MicrophoneFormat => _microphoneFormat;
     public static WaveFormat NativeContinuousMixFormat { get; } = new(NativeMixSampleRate, 16, NativeMixChannels);
 
     public void SetSystemVolume(double percent) =>
@@ -113,6 +110,7 @@ public sealed class AudioRecorder : IDisposable
             .ToList();
     }
 
+    // Запуск захоплення системного звуку та мікрофона ...
     public void StartRecording(
         bool recordSystem,
         string? systemDeviceId,
@@ -129,6 +127,7 @@ public sealed class AudioRecorder : IDisposable
         if (recordSystem) StartSystemCapture(systemDeviceId);
         if (recordMicrophone) StartMicrophoneCapture(microphoneDeviceId);
     }
+    // ...Запуск захоплення системного звуку та мікрофона
 
     public void RestartSystemCapture(string? deviceId)
     {
@@ -154,7 +153,6 @@ public sealed class AudioRecorder : IDisposable
             var capture = new WasapiLoopbackCapture(device);
             _systemCapture = capture;
             _systemFormat = capture.WaveFormat;
-            UseDefaultSystemDevice = deviceId is null;
 
             lock (_systemLock)
             {
@@ -188,7 +186,6 @@ public sealed class AudioRecorder : IDisposable
             var capture = new WasapiCapture(device);
             _microphoneCapture = capture;
             _microphoneFormat = capture.WaveFormat;
-            UseDefaultMicDevice = deviceId is null;
 
             lock (_microphoneLock)
             {
@@ -233,7 +230,7 @@ public sealed class AudioRecorder : IDisposable
             _systemWrittenBytes += paddingBytes;
             _systemWriter.Write(buffer, 0, count);
             QueueNativeContinuousAudio(
-                ContinuousAudioSource.System,
+                AudioInputSource.System,
                 format,
                 buffer,
                 count,
@@ -266,7 +263,7 @@ public sealed class AudioRecorder : IDisposable
             _microphoneWrittenBytes += paddingBytes;
             _microphoneWriter.Write(buffer, 0, count);
             QueueNativeContinuousAudio(
-                ContinuousAudioSource.Microphone,
+                AudioInputSource.Microphone,
                 format,
                 buffer,
                 count,
@@ -276,6 +273,7 @@ public sealed class AudioRecorder : IDisposable
         }
     }
 
+    // Збереження replay з відео та аудіо ...
     public async Task<string?> SaveLastSecondsAsync(
         string outputFolder,
         int seconds,
@@ -289,7 +287,7 @@ public sealed class AudioRecorder : IDisposable
         if (mixedAudio is null) return null;
 
         Directory.CreateDirectory(outputFolder);
-        string outputPath = IsInsideFolder(videoPath, outputFolder)
+        string outputPath = ReplayAudioExporter.IsInsideFolder(videoPath, outputFolder)
             ? videoPath
             : OutputFileName.Create(outputFolder, "Replay", ".mp4");
         string mergeOutputPath = Path.Combine(
@@ -298,7 +296,7 @@ public sealed class AudioRecorder : IDisposable
 
         try
         {
-            await MergeWithVideoAsync(videoPath, mixedAudio, mergeOutputPath);
+            await ReplayAudioExporter.MuxWithVideoAsync(videoPath, mixedAudio, mergeOutputPath);
 
             if (File.Exists(outputPath))
                 File.Delete(outputPath);
@@ -312,7 +310,9 @@ public sealed class AudioRecorder : IDisposable
             TryDelete(mergeOutputPath);
         }
     }
+    // ...Збереження replay з відео та аудіо
 
+    // Збереження аудіо з replay buffer у MP3 ...
     public async Task<string?> SaveAudioLastSecondsAsMp3Async(string outputFolder, int seconds)
     {
         long windowEnd = Environment.TickCount64;
@@ -324,7 +324,7 @@ public sealed class AudioRecorder : IDisposable
 
         try
         {
-            await EncodeMp3Async(mixedAudio, outputPath);
+            await ReplayAudioExporter.EncodeMp3Async(mixedAudio, outputPath);
             return File.Exists(outputPath) && new FileInfo(outputPath).Length > 0 ? outputPath : null;
         }
         finally
@@ -332,8 +332,10 @@ public sealed class AudioRecorder : IDisposable
             TryDelete(mixedAudio);
         }
     }
+    // ...Збереження аудіо з replay buffer у MP3
 
 
+    // Запуск безперервного передавання змішаного аудіо ...
     public void StartContinuousNativeStreaming(IContinuousAudioSink sink)
     {
         ThrowIfDisposed();
@@ -384,7 +386,9 @@ public sealed class AudioRecorder : IDisposable
         }
         AppLogger.Info($"Continuous native audio mix started | SystemEnabled={IsRecordingSystem} | MicrophoneEnabled={IsRecordingMic} | ClockPump={_nativeMixClockPumped} | JitterBufferMs={NativeMixPumpLatencyMilliseconds} | SystemFormat={_systemFormat} | MicrophoneFormat={_microphoneFormat} | MixFormat={NativeContinuousMixFormat}");
     }
+    // ...Запуск безперервного передавання змішаного аудіо
 
+    // Зупинка безперервного передавання змішаного аудіо ...
     public (long StartTimestamp, long EndTimestamp) StopContinuousNativeStreaming()
     {
         if (!_continuousRecording)
@@ -425,6 +429,7 @@ public sealed class AudioRecorder : IDisposable
             throw new InvalidOperationException("Continuous audio streaming failed.", mixFailure);
         return (_continuousStartTimestamp, endTimestamp);
     }
+    // ...Зупинка безперервного передавання змішаного аудіо
 
     private async Task<string?> CreateAudioSnapshotAsync(long windowStart, long windowEnd)
     {
@@ -441,7 +446,7 @@ public sealed class AudioRecorder : IDisposable
         if (segments.Length == 0) return null;
 
         string outputPath = Path.Combine(_sessionDirectory, $"mix_{Guid.NewGuid():N}.wav");
-        await MixSegmentsAsync(segments, windowStart, windowEnd, outputPath);
+        await ReplayAudioExporter.MixSegmentsAsync(segments, windowStart, windowEnd, outputPath);
         return File.Exists(outputPath) && new FileInfo(outputPath).Length > 78 ? outputPath : null;
     }
 
@@ -566,91 +571,8 @@ public sealed class AudioRecorder : IDisposable
             : 0;
     }
 
-    private async Task MixSegmentsAsync(
-        IReadOnlyList<ReplaySegmentBuffer.Segment> segments,
-        long windowStart,
-        long windowEnd,
-        string outputPath)
-    {
-        double windowDuration = Math.Max(0.001, (windowEnd - windowStart) / 1000.0);
-        var inputArguments = new List<string>();
-        var filters = new List<string>();
-        var labels = new List<string>();
-
-        for (int index = 0; index < segments.Count; index++)
-        {
-            ReplaySegmentBuffer.Segment segment = segments[index];
-            long overlapStart = Math.Max(windowStart, segment.StartTimestamp);
-            long overlapEnd = Math.Min(windowEnd, segment.EndTimestamp);
-            if (overlapEnd <= overlapStart) continue;
-
-            inputArguments.Add($"-i \"{segment.Path}\"");
-            double trimStart = Math.Max(0, (overlapStart - segment.StartTimestamp) / 1000.0);
-            double trimDuration = Math.Max(0.001, (overlapEnd - overlapStart) / 1000.0);
-            long delay = Math.Max(0, overlapStart - windowStart);
-            string label = $"a{labels.Count}";
-            filters.Add(
-                $"[{index}:a]atrim=start={FormatSeconds(trimStart)}:" +
-                $"duration={FormatSeconds(trimDuration)}," +
-                $"asetpts=PTS-STARTPTS,adelay={delay}:all=1[{label}]");
-            labels.Add($"[{label}]");
-        }
-
-        if (labels.Count == 0) return;
-
-        string mixedInput = labels.Count == 1
-            ? labels[0]
-            : string.Concat(labels) +
-              $"amix=inputs={labels.Count}:duration=longest:" +
-              $"dropout_transition=0:normalize=0,alimiter=limit=0.95[mixed];[mixed]";
-
-        filters.Add(
-            $"{mixedInput}apad=pad_dur={FormatSeconds(windowDuration)}," +
-            $"atrim=duration={FormatSeconds(windowDuration)}[out]");
-
-        string arguments =
-            $"-y {string.Join(' ', inputArguments)} " +
-            $"-filter_complex \"{string.Join(';', filters)}\" " +
-            $"-map \"[out]\" -c:a pcm_s16le \"{outputPath}\"";
-
-        await RunFfmpegAsync(arguments, "Audio segment mix");
-    }
-
-    private static string FormatSeconds(double value) =>
-        value.ToString("F3", CultureInfo.InvariantCulture);
-
-    private static bool IsInsideFolder(string path, string folder)
-    {
-        string fullPath = Path.GetFullPath(path);
-        string fullFolder = Path.GetFullPath(folder)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
-            Path.DirectorySeparatorChar;
-
-        return fullPath.StartsWith(fullFolder, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static async Task MergeWithVideoAsync(string videoPath, string audioPath, string outputPath)
-    {
-        string arguments =
-            $"-y -i \"{videoPath}\" -i \"{audioPath}\" " +
-            $"-map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest " +
-            $"-movflags +faststart \"{outputPath}\"";
-        await RunFfmpegAsync(arguments, "Audio/video merge");
-    }
-
-    private static async Task EncodeMp3Async(string audioPath, string outputPath)
-    {
-        string arguments = $"-y -i \"{audioPath}\" -c:a libmp3lame -q:a 2 \"{outputPath}\"";
-        await RunFfmpegAsync(arguments, "MP3 export");
-    }
-
-    private static async Task RunFfmpegAsync(string arguments, string operation)
-    {
-        await FfmpegLocator.RunAsync(arguments, operation);
-    }
-
     private void QueueNativeContinuousAudio(
-        ContinuousAudioSource source,
+        AudioInputSource source,
         WaveFormat format,
         byte[] buffer,
         int count,
@@ -661,7 +583,7 @@ public sealed class AudioRecorder : IDisposable
         try
         {
             ref long resampleRemainder = ref (
-                source == ContinuousAudioSource.Microphone
+                source == AudioInputSource.Microphone
                     ? ref _nativeMicrophoneResampleRemainder
                     : ref _nativeSystemResampleRemainder);
             float[] stereoSamples = ConvertToNativeMixSamples(
@@ -677,22 +599,22 @@ public sealed class AudioRecorder : IDisposable
 
             lock (_nativeMixLock)
             {
-                Queue<float>? queue = source == ContinuousAudioSource.Microphone
+                Queue<float>? queue = source == AudioInputSource.Microphone
                     ? _nativeMicrophoneMix
                     : _nativeSystemMix;
                 if (queue is null) return;
 
                 ref long timelineFrames = ref (
-                    source == ContinuousAudioSource.Microphone
+                    source == AudioInputSource.Microphone
                         ? ref _nativeMicrophoneTimelineFrames
                         : ref _nativeSystemTimelineFrames);
                 ref bool timelineInitialized = ref (
-                    source == ContinuousAudioSource.Microphone
+                    source == AudioInputSource.Microphone
                         ? ref _nativeMicrophoneTimelineInitialized
                         : ref _nativeSystemTimelineInitialized);
 
                 int packetFrames = stereoSamples.Length / NativeMixChannels;
-                if (source == ContinuousAudioSource.Microphone)
+                if (source == AudioInputSource.Microphone)
                     _nativeMixMicrophoneInputFrames += packetFrames;
                 else
                     _nativeMixSystemInputFrames += packetFrames;
@@ -744,7 +666,7 @@ public sealed class AudioRecorder : IDisposable
                     queue.Enqueue(stereoSamples[sample]);
 
                 int frames = packetFrames - overlapFrames;
-                if (source == ContinuousAudioSource.Microphone)
+                if (source == AudioInputSource.Microphone)
                 {
                     _nativeMixMicrophonePackets++;
                     _nativeMixMicrophoneFrames += frames;
@@ -916,7 +838,6 @@ public sealed class AudioRecorder : IDisposable
                 _nativeMixWrittenFrames * 1000L / NativeMixSampleRate;
 
             sink.WriteContinuousAudio(
-                ContinuousAudioSource.Mixed,
                 NativeContinuousMixFormat,
                 pcm,
                 pcm.Length,
@@ -1141,6 +1062,7 @@ public sealed class AudioRecorder : IDisposable
         IsRecordingMic = false;
     }
 
+    // Зупинка аудіозахоплення та звільнення ресурсів ...
     public void Dispose()
     {
         if (_disposed) return;
@@ -1162,6 +1084,7 @@ public sealed class AudioRecorder : IDisposable
         _microphoneSegments.Dispose();
         TryDeleteDirectory(_sessionDirectory);
     }
+    // ...Зупинка аудіозахоплення та звільнення ресурсів
 
     private void ThrowIfDisposed()
     {

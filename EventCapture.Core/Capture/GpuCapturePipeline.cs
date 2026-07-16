@@ -3,11 +3,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 using EventCapture.Core.Diagnostics;
 using NAudio.Wave;
-using Microsoft.Win32.SafeHandles;
 
 namespace EventCapture.Core.Capture;
 
-public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudioSink
+public sealed class GpuCapturePipeline : IDisposable, IContinuousAudioSink
 {
     private const long FinalizeReserveBytes = 256L * 1024 * 1024;
     private readonly int _fps;
@@ -58,6 +57,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
     public long StartTimestamp => _startTimestamp;
     public long FramesCaptured => checked((long)GetStats().CapturedFrames);
 
+    // Запуск GPU pipeline захоплення ...
     public void Start()
     {
         ThrowIfDisposed();
@@ -66,7 +66,9 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         _startTimestamp = Environment.TickCount64;
         IsRunning = true;
     }
+    // ...Запуск GPU pipeline захоплення
 
+    // Збереження відео з replay buffer ...
     public async Task<(string videoPath, long videoElapsedMs, long videoStartTimestamp)>
         SaveLastSecondsAsync(string outputFolder, int seconds)
     {
@@ -93,7 +95,24 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
 
         return (outputPath, elapsedMilliseconds, _startTimestamp + startMilliseconds);
     }
+    // ...Збереження відео з replay buffer
 
+    // Об'єднання replay-відео з аудіо ...
+    internal static void MuxReplayAudio(
+        string videoPath,
+        string audioPath,
+        string outputPath)
+    {
+        NativeResult result = NativeMethods.MuxReplayAudio(videoPath, audioPath, outputPath);
+        if (result != NativeResult.Ok)
+        {
+            throw new InvalidOperationException(
+                $"Native Media Foundation replay mux failed with result {result}.");
+        }
+    }
+    // ...Об'єднання replay-відео з аудіо
+
+    // Запуск безперервного запису відео з аудіо ...
     public void StartContinuousRecording(
         string outputFolder,
         WaveFormat? audioFormat)
@@ -132,7 +151,9 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         _continuousReservePath = paths.ReservePath;
         _continuousStartedTimestamp = Environment.TickCount64;
     }
+    // ...Запуск безперервного запису відео з аудіо
 
+    // Запуск безперервного запису відео без аудіо ...
     public void StartContinuousRecording(string outputFolder)
     {
         ThrowIfDisposed();
@@ -157,7 +178,9 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         _continuousStartedTimestamp = Environment.TickCount64;
         AppLogger.Info($"Native video recording started | PartPath={paths.PartPath} | FinalPath={paths.FinalPath} | ReservePath={paths.ReservePath}");
     }
+    // ...Запуск безперервного запису відео без аудіо
 
+    // Зупинка та фіналізація безперервного відеозапису ...
     public async Task<ContinuousVideoResult> StopContinuousRecordingAsync(
         string outputFolder)
     {
@@ -219,16 +242,18 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             _startTimestamp + export.EndTimestamp100ns / 10_000,
             export.FrameCount);
     }
+    // ...Зупинка та фіналізація безперервного відеозапису
 
 
-    public void WriteContinuousAudio(ContinuousAudioSource source, WaveFormat format, byte[] buffer, int count, long packetStartTimestamp, long packetDurationMilliseconds)
+    // Передавання змішаного аудіо в native writer ...
+    public void WriteContinuousAudio(WaveFormat format, byte[] buffer, int count, long packetStartTimestamp, long packetDurationMilliseconds)
     {
         if (_continuousRawPath is null || count <= 0 || packetDurationMilliseconds <= 0) return;
         long timestamp100ns = Math.Max(0, packetStartTimestamp - _startTimestamp) * 10_000L;
         long duration100ns = Math.Max(1, packetDurationMilliseconds) * 10_000L;
         if (_continuousAudioLastTimestamp100ns >= 0 && timestamp100ns <= _continuousAudioLastTimestamp100ns)
         {
-            AppLogger.Info($"Native combined audio timestamp adjusted by native writer | Source={source} | Timestamp100ns={timestamp100ns} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns} | Duration100ns={duration100ns} | Bytes={count}");
+            AppLogger.Info($"Native combined audio timestamp adjusted by native writer | Timestamp100ns={timestamp100ns} | LastTimestamp100ns={_continuousAudioLastTimestamp100ns} | Duration100ns={duration100ns} | Bytes={count}");
         }
 
         NativeResult result = NativeMethods.WriteRecordingAudio(_handle, NativeAudioStreamKind.System, buffer, (uint)count, timestamp100ns, duration100ns);
@@ -241,15 +266,17 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             if (_continuousAudioWriteCount <= 3 || now - _continuousAudioLastLogTimestamp >= 2_000)
             {
                 _continuousAudioLastLogTimestamp = now;
-                AppLogger.Info($"Native combined audio write | Source={source} | Count={_continuousAudioWriteCount} | Bytes={count} | TotalBytes={_continuousAudioWriteBytes} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format}");
+                AppLogger.Info($"Native combined audio write | Count={_continuousAudioWriteCount} | Bytes={count} | TotalBytes={_continuousAudioWriteBytes} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format}");
             }
             return;
         }
 
-        AppLogger.Info($"Native combined audio write skipped | Source={source} | Result={result} | Bytes={count} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format} | Path={_continuousRawPath}");
+        AppLogger.Info($"Native combined audio write skipped | Result={result} | Bytes={count} | Timestamp100ns={timestamp100ns} | Duration100ns={duration100ns} | Format={format} | Path={_continuousRawPath}");
         if (result != NativeResult.InvalidState)
             ThrowIfFailed(result, _handle);
     }
+    // ...Передавання змішаного аудіо в native writer
+
     public GpuCaptureStats GetStats()
     {
         if (_handle.IsInvalid || _handle.IsClosed) return default;
@@ -265,6 +292,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             native.IsRecording != 0);
     }
 
+    // Зупинка GPU pipeline захоплення ...
     public void Stop()
     {
         if (!_handle.IsInvalid && !_handle.IsClosed && IsRunning)
@@ -275,7 +303,9 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         _continuousFinalPath = null;
         _continuousStartedTimestamp = 0;
     }
+    // ...Зупинка GPU pipeline захоплення
 
+    // Звільнення ресурсів GPU pipeline ...
     public void Dispose()
     {
         if (_disposed) return;
@@ -284,6 +314,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         _handle.Dispose();
         TryDeleteDirectory(_sessionDirectory);
     }
+    // ...Звільнення ресурсів GPU pipeline
 
     private double CalculateExportFps(NativeExportResult export)
     {
@@ -327,11 +358,6 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
 
     private static IntPtr ResolveTarget(string captureTarget)
     {
-        if (captureTarget.StartsWith("Window|", StringComparison.Ordinal))
-        {
-            captureTarget = "PrimaryMonitor";
-        }
-
         DisplayMonitor screen = DisplayMonitorService.Resolve(captureTarget);
         IntPtr monitor = DisplayMonitorService.MonitorFromPoint(
             screen.Bounds.Left + 1,
@@ -368,6 +394,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
         return (partPath, finalPath, reservePath);
     }
 
+    // Відновлення перерваних відеозаписів ...
     public static void RecoverInterruptedRecordings(string outputFolder)
     {
         try
@@ -411,6 +438,7 @@ public sealed class GpuCapturePipeline : IVideoCapturePipeline, IContinuousAudio
             AppLogger.Error(nameof(GpuCapturePipeline), $"Interrupted recording scan failed | Folder={outputFolder} | Error={ex}");
         }
     }
+    // ...Відновлення перерваних відеозаписів
 
     private static void CreateFinalizeReserve(string reservePath)
     {
@@ -470,116 +498,3 @@ public readonly record struct GpuCaptureStats(
     ulong BufferedFrames,
     bool IsRunning,
     bool IsRecording);
-
-
-internal enum NativeAudioStreamKind { System = 0, Microphone = 1 }
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct NativeAudioStreamConfig
-{
-    public uint SampleRate;
-    public uint Channels;
-    public uint BitsPerSample;
-    public int Enabled;
-
-    public static NativeAudioStreamConfig From(WaveFormat? format)
-    {
-        if (format is null) return default;
-        int bits = format.Encoding == WaveFormatEncoding.IeeeFloat ? 16 : format.BitsPerSample;
-        if (format.SampleRate <= 0 || format.Channels <= 0 || bits <= 0) return default;
-        return new NativeAudioStreamConfig
-        {
-            SampleRate = (uint)format.SampleRate,
-            Channels = (uint)format.Channels,
-            BitsPerSample = (uint)bits,
-            Enabled = 1
-        };
-    }
-}
-internal enum NativeResult { Ok, InvalidArgument, InvalidState, NotSupported, Timeout, NativeFailure }
-internal enum NativeTargetKind { Monitor, Window }
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct NativeVideoConfig
-{
-    public uint StructSize;
-    public NativeTargetKind TargetKind;
-    public IntPtr TargetHandle;
-    public uint OutputWidth;
-    public uint OutputHeight;
-    public uint FramesPerSecond;
-    public uint BitrateKbps;
-    public uint ReplaySeconds;
-    public int EnableReplay;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct NativeExportResult
-{
-    public uint StructSize;
-    public long StartTimestamp100ns;
-    public long EndTimestamp100ns;
-    public ulong FrameCount;
-    public static NativeExportResult Create() => new() { StructSize = (uint)Marshal.SizeOf<NativeExportResult>() };
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal struct NativeVideoStats
-{
-    public uint StructSize;
-    public ulong CapturedFrames;
-    public ulong EncodedFrames;
-    public ulong DroppedFrames;
-    public ulong BufferedBytes;
-    public ulong BufferedFrames;
-    public int IsRunning;
-    public int IsRecording;
-    public static NativeVideoStats Create() => new() { StructSize = (uint)Marshal.SizeOf<NativeVideoStats>() };
-}
-
-[StructLayout(LayoutKind.Sequential)]
-internal readonly struct NativePoint(int x, int y)
-{
-    public readonly int X = x;
-    public readonly int Y = y;
-}
-
-
-internal sealed class SafeVideoEngineHandle : SafeHandleZeroOrMinusOneIsInvalid
-{
-    private SafeVideoEngineHandle() : base(true) { }
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.DestroyVideoEngine(handle);
-        return true;
-    }
-}
-
-internal static class NativeMethods
-{
-    private const string Library = "EventCapture.Native.dll";
-    [DllImport(Library, EntryPoint = "EcCreateVideoEngine")]
-    internal static extern NativeResult CreateVideoEngine(in NativeVideoConfig config, out SafeVideoEngineHandle handle);
-    [DllImport(Library, EntryPoint = "EcStartVideoEngine")]
-    internal static extern NativeResult StartVideoEngine(SafeVideoEngineHandle handle);
-    [DllImport(Library, EntryPoint = "EcSaveReplay", CharSet = CharSet.Unicode)]
-    internal static extern NativeResult SaveReplay(SafeVideoEngineHandle handle, string path, uint seconds, ref NativeExportResult result);
-    [DllImport(Library, EntryPoint = "EcStartRecording", CharSet = CharSet.Unicode)]
-    internal static extern NativeResult StartRecording(SafeVideoEngineHandle handle, string path);
-    [DllImport(Library, EntryPoint = "EcStartRecordingWithAudio", CharSet = CharSet.Unicode)]
-    internal static extern NativeResult StartRecordingWithAudio(SafeVideoEngineHandle handle, string path, ref NativeAudioStreamConfig systemAudio, ref NativeAudioStreamConfig microphoneAudio);
-    [DllImport(Library, EntryPoint = "EcWriteRecordingAudio")]
-    internal static extern NativeResult WriteRecordingAudio(SafeVideoEngineHandle handle, NativeAudioStreamKind streamKind, byte[] data, uint byteCount, long timestamp100ns, long duration100ns);
-    [DllImport(Library, EntryPoint = "EcStopRecording")]
-    internal static extern NativeResult StopRecording(SafeVideoEngineHandle handle, ref NativeExportResult result);
-    [DllImport(Library, EntryPoint = "EcGetVideoStats")]
-    internal static extern NativeResult GetVideoStats(SafeVideoEngineHandle handle, ref NativeVideoStats stats);
-    [DllImport(Library, EntryPoint = "EcStopVideoEngine")]
-    internal static extern NativeResult StopVideoEngine(SafeVideoEngineHandle handle);
-    [DllImport(Library, EntryPoint = "EcDestroyVideoEngine")]
-    internal static extern void DestroyVideoEngine(IntPtr handle);
-    [DllImport(Library, EntryPoint = "EcGetLastError", CharSet = CharSet.Unicode)]
-    internal static extern uint GetLastError(SafeVideoEngineHandle handle, StringBuilder? buffer, uint capacity);
-    [DllImport("user32.dll")]
-    internal static extern IntPtr MonitorFromPoint(NativePoint point, uint flags);
-}

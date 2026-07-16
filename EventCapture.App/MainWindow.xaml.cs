@@ -41,6 +41,7 @@ public partial class MainWindow : Window
 
     public bool IsPanelVisible => _panelVisible;
 
+    // Підготовка прихованого UI в background mode ...
     public void PrepareHidden()
     {
         if (_prepared)
@@ -54,7 +55,9 @@ public partial class MainWindow : Window
         Show();
         SetClickThrough(true);
     }
+    // ...Підготовка прихованого UI в background mode
 
+    // Плавне відображення головного UI ...
     public async Task ShowPanelAsync()
     {
         await _fadeLock.WaitAsync();
@@ -75,7 +78,9 @@ public partial class MainWindow : Window
             _fadeLock.Release();
         }
     }
+    // ...Плавне відображення головного UI
 
+    // Плавне приховування головного UI ...
     public async Task HidePanelAsync()
     {
         await _fadeLock.WaitAsync();
@@ -95,6 +100,7 @@ public partial class MainWindow : Window
             _fadeLock.Release();
         }
     }
+    // ...Плавне приховування головного UI
 
     private Task AnimateContentOpacityAsync(double targetOpacity)
     {

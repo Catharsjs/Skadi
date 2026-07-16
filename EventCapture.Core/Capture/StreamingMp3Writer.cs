@@ -59,19 +59,19 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
 
     public string OutputPath { get; }
 
+    // Запуск потокового MP3 writer ...
     public static StreamingMp3Writer Start(string outputFolder, WaveFormat format) =>
         new(outputFolder, format);
+    // ...Запуск потокового MP3 writer
 
+    // Передавання змішаного PCM-аудіо в MP3 writer ...
     public void WriteContinuousAudio(
-        ContinuousAudioSource source,
         WaveFormat format,
         byte[] buffer,
         int count,
         long packetStartTimestamp,
         long packetDurationMilliseconds)
     {
-        if (source != ContinuousAudioSource.Mixed)
-            throw new InvalidOperationException("Streaming MP3 accepts only mixed audio.");
         if (!FormatsMatch(format, _provider.WaveFormat))
             throw new InvalidOperationException(
                 $"Streaming MP3 format changed from {_provider.WaveFormat} to {format}.");
@@ -98,7 +98,9 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
                 $"ElapsedMs={_stopwatch.ElapsedMilliseconds}");
         }
     }
+    // ...Передавання змішаного PCM-аудіо в MP3 writer
 
+    // Фіналізація та збереження MP3-файлу ...
     public Task<string> CompleteAsync()
     {
         lock (_stateLock)
@@ -108,7 +110,9 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
             return _completionTask ??= CompleteCoreAsync();
         }
     }
+    // ...Фіналізація та збереження MP3-файлу
 
+    // Аварійне скасування MP3-запису ...
     public void Abort()
     {
         lock (_stateLock)
@@ -131,7 +135,9 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
             $"Streaming MP3 aborted | Temp={Path.GetFileName(_temporaryPath)} | " +
             $"Chunks={Interlocked.Read(ref _chunksWritten)} | Bytes={Interlocked.Read(ref _bytesWritten)}");
     }
+    // ...Аварійне скасування MP3-запису
 
+    // Звільнення ресурсів MP3 writer ...
     public void Dispose()
     {
         lock (_stateLock)
@@ -142,6 +148,7 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
 
         AbortCore();
     }
+    // ...Звільнення ресурсів MP3 writer
 
     private void Encode()
     {

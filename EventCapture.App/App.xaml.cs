@@ -18,6 +18,7 @@ public partial class App : System.Windows.Application
     private OverlayViewModel? _overlayViewModel;
     private bool _shutdownRequested;
 
+    // Запуск програми та ініціалізація глобальних сервісів ...
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -33,14 +34,6 @@ public partial class App : System.Windows.Application
         try
         {
             string baseDirectory = AppContext.BaseDirectory;
-            if (File.Exists(Path.Combine(baseDirectory, "ffmpeg.exe")))
-            {
-                FFMpegCore.GlobalFFOptions.Configure(new FFMpegCore.FFOptions
-                {
-                    BinaryFolder = baseDirectory
-                });
-            }
-
             var settings = AppSettings.Load();
             if (settings.BufferEnabled)
             {
@@ -55,7 +48,7 @@ public partial class App : System.Windows.Application
             _hotkeys = new GlobalHotkeyService(_window);
             var notifications = new NotificationService();
             _overlay = new OverlayWindow();
-            _overlayViewModel = new OverlayViewModel(_capture);
+            _overlayViewModel = new OverlayViewModel();
             _overlay.DataContext = _overlayViewModel;
             _tray = new TrayIconService(Path.Combine(baseDirectory, "EventCapture.ico"));
 
@@ -80,6 +73,7 @@ public partial class App : System.Windows.Application
             Shutdown();
         }
     }
+    // ...Запуск програми та ініціалізація глобальних сервісів
 
     private void HandleHotkey(int id)
     {
@@ -110,6 +104,7 @@ public partial class App : System.Windows.Application
         else await _window.ShowPanelAsync();
     }
 
+    // Безпечне завершення роботи програми ...
     private async Task ShutdownSkadiAsync()
     {
         if (_shutdownRequested)
@@ -143,7 +138,9 @@ public partial class App : System.Windows.Application
 
         Shutdown();
     }
+    // ...Безпечне завершення роботи програми
 
+    // Фінальне звільнення глобальних ресурсів програми ...
     protected override void OnExit(ExitEventArgs e)
     {
         try { _viewModel?.Dispose(); } catch { }
@@ -156,4 +153,5 @@ public partial class App : System.Windows.Application
         AppLogger.Info("Skadi stopped.");
         base.OnExit(e);
     }
+    // ...Фінальне звільнення глобальних ресурсів програми
 }

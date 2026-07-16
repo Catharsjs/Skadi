@@ -21,8 +21,7 @@ enum class EcResult : int32_t
 
 enum class EcTargetKind : int32_t
 {
-    Monitor = 0,
-    Window = 1
+    Monitor = 0
 };
 
 struct EcVideoConfig
@@ -77,6 +76,7 @@ struct EcAudioStreamConfig
 EC_API EcResult __cdecl EcCreateVideoEngine(const EcVideoConfig* config, EcEngineHandle* handle);
 EC_API EcResult __cdecl EcStartVideoEngine(EcEngineHandle handle);
 EC_API EcResult __cdecl EcSaveReplay(EcEngineHandle handle, const wchar_t* h264Path, uint32_t seconds, EcExportResult* result);
+EC_API EcResult __cdecl EcMuxReplayAudio(const wchar_t* videoPath, const wchar_t* audioPath, const wchar_t* outputPath);
 EC_API EcResult __cdecl EcStartRecording(EcEngineHandle handle, const wchar_t* h264Path);
 EC_API EcResult __cdecl EcStartRecordingWithAudio(EcEngineHandle handle, const wchar_t* h264Path, const EcAudioStreamConfig* systemAudio, const EcAudioStreamConfig* microphoneAudio);
 EC_API EcResult __cdecl EcWriteRecordingAudio(EcEngineHandle handle, EcAudioStreamKind streamKind, const uint8_t* data, uint32_t byteCount, int64_t timestamp100ns, int64_t duration100ns);

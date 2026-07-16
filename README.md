@@ -1,31 +1,31 @@
 # Skadi
 
-Skadi is a compact Windows desktop capture tool built around a WPF side-panel UI and a native GPU-accelerated recording pipeline.
+Skadi is a compact Windows desktop capture application with a WPF side-panel UI and a native GPU-accelerated recording pipeline.
 
-The application runs in the background and provides three main workflows:
+It runs in the background and provides three primary workflows:
 
-- quick screenshots with area selection;
-- instant replay export from a rolling buffer;
-- regular start/stop recording.
+- screenshot capture with monitor or region selection;
+- instant replay export from a rolling encoded buffer;
+- continuous video, audio, or combined recording.
 
-> Portfolio note: this project demonstrates WPF/MVVM desktop UI development, Windows Graphics Capture integration, Direct3D 11 interop, Media Foundation hardware encoding, audio capture, global hotkeys, DPI-aware layout, installer packaging, and native/managed interoperability.
+The recording and replay pipelines run in-process. Skadi does not bundle or launch FFmpeg.
 
 ## Download and Install
 
-The latest installer is included in the repository:
+The current installer is:
 
 ```text
 Installer/Output/Skadi_Setup_v2.0.1.exe
 ```
 
-To install Skadi on another Windows PC:
+The installer targets x64 Windows and installs the .NET 10 Desktop Runtime when it is missing.
 
-1. Download or clone this repository.
-2. Run `Installer/Output/Skadi_Setup_v2.0.1.exe`.
-3. Follow the installer steps.
-4. Launch Skadi from the Start Menu, desktop shortcut, or system tray.
+## Requirements
 
-The installer targets x64 Windows and automatically downloads and installs the .NET 10 Desktop Runtime if it is missing.
+- Windows 10 19041+ or Windows 11
+- x64 system
+- .NET 10 Desktop Runtime
+- a Direct3D 11-compatible display adapter
 
 ## Default Hotkeys
 
@@ -36,199 +36,181 @@ The installer targets x64 Windows and automatically downloads and installs the .
 | Save Replay | `Alt+F3` |
 | Show/Hide UI | `Alt+Z` |
 
-Hotkeys can be changed from the UI. A hotkey can also be cleared with `Backspace`, after which it is shown as `Not assigned`.
+Hotkeys can be changed or cleared in the UI.
 
 ## Features
 
-- Screenshot capture
-  - opens a dimmed multi-monitor selection overlay;
-  - click a monitor to capture the full monitor;
-  - drag-select an area to capture only that region;
-  - saves the screenshot as PNG;
-  - copies the screenshot to the clipboard.
-- Instant replay buffer
-  - keeps the latest configured duration in the background;
-  - exports the latest buffer with `Save Replay`;
-  - supports video, audio, and combined capture modes.
-- Regular recording
-  - `Start Recording` / `Stop Recording`;
-  - saves a complete recording from the moment recording starts;
-  - supports video, audio, and combined capture modes.
-- Capture target selection for video recording and replay
-  - monitors;
-  - Alt+Tab-style windows;
-  - preview grid with pagination.
-- Audio controls
-  - system audio device selection;
-  - microphone device selection;
-  - per-source recording volume;
-  - live activity indicators;
-  - automatic refresh when audio devices are added, removed, or changed.
-- Background-first workflow
-  - starts in the background;
-  - tray menu;
-  - show/hide UI via hotkey;
-  - hide button inside the UI.
-- DPI-aware WPF UI
-  - Per-Monitor DPI Awareness V2;
-  - fixed reference composition scaled with a `Viewbox`;
-  - consistent proportions across 1080p, 1440p, 4K, and ultrawide displays.
+### Screenshots
 
-## UI Design
+- Smooth multi-monitor selection overlay
+- Full-monitor or region capture
+- Windows 11 backend: Windows Graphics Capture (WGC)
+- Windows 10 backend: Desktop Duplication API (DDA/DXGI)
+- PNG output and clipboard copy
+- Reusable GPU resources with explicit cleanup
 
-Skadi uses a restrained dark UI with a compact side-panel layout.
+### Video and Replay
 
-Core design principles:
+- Monitor-only Capture Target selection
+- Windows 11 capture backend: WGC
+- Windows 10 capture backend: DDA/DXGI
+- 30 or 60 FPS constant-frame-rate scheduling
+- GPU BGRA-to-NV12 conversion
+- Hardware H.264 encoding where supported
+- Encoded replay ring buffer instead of raw-frame buffering
+- Streaming fragmented MP4 writer for continuous recording
+- In-process Media Foundation muxing and finalization
+- Portrait and landscape monitor support
 
-- no decorative gradients;
-- no nested card-heavy layout;
-- centralized WPF resource dictionaries;
-- MVVM bindings and commands;
-- smooth state transitions;
-- scalable reference layout.
+### Audio
 
-Main palette:
+- WASAPI loopback capture for system audio
+- WASAPI microphone capture
+- Per-source volume controls and live activity meters
+- Shared 48 kHz stereo timeline for combined recording
+- AAC audio in combined MP4 recordings
+- Streaming MP3 writer in Audio mode
+- In-process replay audio mixing and encoding
 
-| Token | Color |
-|---|---|
-| Background | `#1C1C1E` |
-| Surface | `#2A2A2E` |
-| Hover | `#323236` |
-| Border | `#3A3A3E` |
-| Accent | `#00C4A0` |
-| Danger | `#DC5050` |
-| Primary text | `#F0F0F0` |
-| Secondary text | `#969696` |
+### Reliability
+
+- Recording is rejected when available disk space is below 2 GiB
+- Active recording is safely stopped when disk space crosses the 2 GiB threshold
+- A 256 MiB finalize reserve is released before MP4 finalization
+- Interrupted fragmented MP4 recordings are recovered on the next start
+- Monitor topology changes safely stop an active recording
+- Replay buffer is restarted after monitor topology changes
+- Capture targets refresh with a fade transition
+- Recording and disk-performance diagnostics are written to the application logs
+
+### UI
+
+- Background-first tray workflow
+- Per-Monitor DPI Awareness V2
+- Smooth show/hide and screenshot-selection transitions
+- HUD modes: `None`, `Timer`, and `System Info`
+- Capture Target changes are locked while recording
 
 ## Architecture
 
-Skadi is split into three main parts:
-
 ```text
 EventCapture.App
-  WPF UI, MVVM, tray integration, global hotkeys, notifications
+  WPF UI, MVVM, settings, hotkeys, tray, notifications, HUD,
+  capture orchestration and screenshot selection
 
 EventCapture.Core
-  capture coordinator, audio recorder, screenshot selection, settings-facing services
+  audio capture and mixing, screenshot backends, replay export,
+  streaming MP3, managed/native capture boundary
 
 EventCapture.Native
-  native C++ GPU video pipeline:
-  Windows Graphics Capture -> Direct3D 11 -> GPU BGRA/NV12 conversion -> hardware H.264 encoder
+  C++20 capture, GPU processing, H.264 encoding,
+  encoded replay storage, fragmented MP4 writing and Media Foundation muxing
 ```
 
-### High-level video pipeline
+WGC and DDA are capture backends only. After a frame reaches the shared native pipeline, processing, pacing, encoding, replay storage, and file writing follow the same architecture.
+
+### Video Recording Pipeline
 
 ```text
-Selected monitor/window
-        ↓
-Windows Graphics Capture
-        ↓
-Direct3D 11 texture
-        ↓
-GPU color conversion / frame normalization
-        ↓
-Media Foundation H.264 hardware encoder
-        ↓
-Bounded encoded replay storage or continuous recording writer
-        ↓
-MP4 output
+Selected monitor
+    -> Windows 11: WGC / Windows 10: DDA-DXGI
+    -> bounded latest-frame or monitor-frame queue
+    -> constant 30/60 FPS scheduler
+    -> Direct3D 11 scaling, rotation and BGRA-to-NV12 conversion
+    -> H.264 encoder
+    -> fragmented MP4 mux/writer
+    -> Record YYYY-MM-DD HH-mm-ss.mp4
 ```
 
-The video pipeline avoids copying full frames into managed memory. Encoded samples are stored in bounded native storage for replay, which keeps memory usage predictable during background sessions.
+Frames are written continuously. A long recording is not accumulated as raw video in RAM.
 
-### Screenshot pipeline
+### Combined Audio Pipeline
 
 ```text
-Save Screenshot / Alt+F1
-        ↓
-Multi-monitor selection overlay
-        ↓
-Full monitor click or region selection
-        ↓
-Windows Graphics Capture screenshot
-        ↓
-PNG file + clipboard
+WASAPI system audio + WASAPI microphone
+    -> timestamp normalization and resampling
+    -> shared 48 kHz stereo mixer and limiter
+    -> native AAC input
+    -> the same fragmented MP4 writer as video
 ```
 
-Screenshot capture is intentionally independent from the selected video capture target.
+### Replay Pipeline
+
+```text
+Encoded H.264 packets + segmented audio
+    -> bounded time window
+    -> snapshot requested by Save Replay
+    -> in-process audio mix and Media Foundation mux
+    -> Replay YYYY-MM-DD HH-mm-ss.mp4
+```
+
+The replay buffer stores encoded packets and short audio segments, not uncompressed video frames.
+
+### Screenshot Pipeline
+
+```text
+Alt+F1
+    -> freeze every connected monitor
+    -> show selection overlays
+    -> full-monitor or region selection
+    -> PNG encoding
+    -> save file and update clipboard
+    -> release frozen bitmaps and reusable capture resources when appropriate
+```
+
+## Memory and Storage Behavior
+
+- GPU textures and encoder surfaces are bounded pools.
+- Replay video memory/storage is bounded by the configured replay duration.
+- Continuous video is streamed directly into a fragmented MP4 file.
+- Audio mode is streamed directly into MP3.
+- Screenshot working memory may temporarily grow while monitor-sized bitmaps and PNG buffers exist; those objects are disposed after the operation.
+- Windows and .NET may retain committed memory for reuse, so Task Manager working set does not always return immediately to its startup value.
+
+Actual file size depends on resolution, FPS, quality/bitrate, encoder, scene complexity, and audio settings. WGC versus DDA does not inherently determine the final file size because both backends feed the same encoder configuration.
 
 ## Technology Stack
 
-- C#
-- .NET 10
-- WPF
-- XAML
-- MVVM
-- C++20
-- C++/WinRT
+- C# and .NET 10
+- WPF, XAML, and MVVM
+- C++20 and C++/WinRT
 - Windows Graphics Capture
+- Desktop Duplication API / DXGI
 - Direct3D 11
-- Media Foundation hardware H.264 encoding
-- NAudio / WASAPI
-- FFmpeg
+- Media Foundation H.264, AAC, MP3, and MP4 APIs
+- Intel oneVPL/QSV compatibility runtime
+- NAudio and WASAPI
 - Inno Setup
-- Per-Monitor DPI Awareness V2
-
-## Requirements for Running
-
-- Windows 10 19041+ or Windows 11
-- x64 system
-- .NET 10 Desktop Runtime
-  - installed automatically by the installer if missing
-
-## Requirements for Development
-
-- Visual Studio 2026 with:
-  - .NET desktop development workload;
-  - Desktop development with C++;
-  - Windows SDK 10.0.26100.0 or compatible;
-  - MSVC toolset compatible with `v145`.
-- x64 build target.
-- Inno Setup 6 for installer builds.
 
 ## Build from Source
 
-Open:
+Development requirements:
 
-```text
-EventCapture.slnx
+- Visual Studio 2026
+- .NET desktop development workload
+- Desktop development with C++ workload
+- Windows SDK 10.0.26100.0 or compatible
+- MSVC toolset compatible with `v145`
+- Inno Setup 6 for installer builds
+
+Open `EventCapture.slnx` and build `Debug | x64` or `Release | x64`.
+
+Command-line Release build:
+
+```powershell
+MSBuild EventCapture.slnx /t:Build /p:Configuration=Release /p:Platform=x64 /m
 ```
 
-Recommended configuration:
-
-```text
-Debug | x64
-```
-
-or:
-
-```text
-Release | x64
-```
-
-Then run:
-
-```text
-Rebuild Solution
-```
-
-Rebuild is recommended because the WPF app depends on the native `EventCapture.Native.dll`. The app project copies the native DLL into the output directory after build.
+The app project copies `EventCapture.Native.dll` and the required oneVPL runtime into the application output directory.
 
 ## Build Installer
 
-Publish the WPF application for x64:
-
 ```powershell
 MSBuild EventCapture.App\EventCapture.App.csproj /t:Restore,Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=false
-```
-
-Then compile the installer:
-
-```powershell
 ISCC Installer\Skadi.iss
 ```
 
-The installer output is written to:
+Installer output:
 
 ```text
 Installer/Output/Skadi_Setup_v2.0.1.exe
@@ -237,46 +219,20 @@ Installer/Output/Skadi_Setup_v2.0.1.exe
 ## Project Structure
 
 ```text
-EventCapture.App/
-  WPF application, XAML views, view models, styles, tray and hotkey services
-
-EventCapture.Core/
-  capture coordination, audio capture, screenshot overlay integration, FFmpeg integration
-
-EventCapture.Native/
-  C++ native GPU video engine and exported C ABI
-
-Installer/
-  Inno Setup installer script and installer output
-
-ThirdParty/FFmpeg/
-  bundled FFmpeg binaries and license files
+EventCapture.App/       WPF application and orchestration
+EventCapture.Core/      managed capture, audio and storage services
+EventCapture.Native/    native GPU video engine and C ABI
+Installer/              Inno Setup installer
+ThirdParty/oneVPL/      pinned oneVPL runtime, import library, headers and license
+docs/screenshots/       README screenshots
 ```
 
-## Current Status
+## Known Platform Restrictions
 
-Implemented:
-
-- WPF UI integrated with capture backend;
-- monitor/window capture target selection;
-- instant replay export;
-- regular start/stop recording;
-- monitor/region screenshot capture;
-- system audio capture;
-- microphone capture path;
-- configurable hotkeys;
-- tray integration;
-- native GPU video pipeline;
-- hardware H.264 encoding;
-- MP4 output;
-- DPI-aware scalable side panel;
-- Windows installer with .NET runtime bootstrap.
-
-Known limitations:
-
-- Some protected or elevated windows may not be capturable because of OS-level restrictions, DRM, or application-specific rendering behavior.
-- Monitor capture currently uses Windows Graphics Capture; performance can vary depending on GPU load, compositor behavior, and the target application.
-- Further backend work is planned for more stable high-load monitor/game capture scenarios.
+- DRM-protected content may produce black frames or no capturable content.
+- Elevated or secure-desktop windows are subject to Windows capture restrictions.
+- Hardware encoder availability and performance depend on the active GPU and driver.
+- Changing display topology intentionally finalizes the current recording rather than continuing with a stale frame.
 
 ## Screenshots
 
@@ -285,10 +241,8 @@ Known limitations:
 
 ## License
 
-Copyright © 2026 Catharsjs. All rights reserved.
+Copyright (c) 2026 Catharsjs. All rights reserved.
 
-This repository is public for portfolio and source-code review purposes only.
+This repository is public for portfolio and source-code review purposes only. See [LICENSE.md](LICENSE.md) for the complete terms.
 
-Commercial use, redistribution, modification, sublicensing, or deployment in an organization is prohibited without explicit written permission from the author.
-
-Third-party components are licensed separately. FFmpeg is distributed under the GNU GPL v3; see `ThirdParty/FFmpeg/LICENSE` and `ThirdParty/FFmpeg/README.txt`.
+Third-party components remain subject to their own licenses. The pinned oneVPL license is available at `ThirdParty/oneVPL/LICENSE.txt`.

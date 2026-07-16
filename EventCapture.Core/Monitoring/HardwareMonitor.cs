@@ -37,7 +37,7 @@ public class HardwareMonitor : IDisposable
         LoadHardwareInfo();
     }
 
-    // Статична інформація про обладнання (...
+    // Статична інформація про обладнання ...
     private void LoadHardwareInfo()
     {
         LoadCpuInfo();
@@ -139,9 +139,9 @@ public class HardwareMonitor : IDisposable
             AppLogger.Debug($"LoadRamInfo warning: {ex.Message}");
         }
     }
-    // ...) Статична інформація про обладнання
+    // ...Статична інформація про обладнання
 
-    // Поточні показники обладнання (...
+    // Поточні показники обладнання ...
     public void Update()
     {
         UpdateCpuLoad();
@@ -232,9 +232,9 @@ public class HardwareMonitor : IDisposable
             }
         }
     }
-    // ...) Поточні показники обладнання
+    // ...Поточні показники обладнання
 
-    // Звільнення ресурсів (...
+    // Звільнення ресурсів ...
     public void Dispose()
     {
         try
@@ -249,5 +249,5 @@ public class HardwareMonitor : IDisposable
         _cpuCounter.Dispose();
         _ramCounter.Dispose();
     }
-    // ...) Звільнення ресурсів
+    // ...Звільнення ресурсів
 }

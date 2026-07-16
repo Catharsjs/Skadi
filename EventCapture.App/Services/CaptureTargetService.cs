@@ -12,6 +12,7 @@ namespace EventCapture.App.Services;
 
 public sealed class CaptureTargetService
 {
+    // Пошук моніторів та створення preview для Capture Target ...
     public Task<IReadOnlyList<CapturePreview>> GetMonitorsAsync() => Task.Run(() =>
     {
         var result = new List<CapturePreview>();
@@ -22,12 +23,13 @@ public sealed class CaptureTargetService
             string title = screen.IsPrimary ? $"Display {index} Primary" : $"Display {index}";
             string subtitle = $"{screen.Bounds.Width}x{screen.Bounds.Height}";
             result.Add(new CapturePreview(
-                $"monitor-{index}", title, subtitle, "в–Ј", target,
+                title, subtitle, target,
                 CaptureMonitorPreview(screen)));
             index++;
         }
         return (IReadOnlyList<CapturePreview>)result;
     });
+    // ...Пошук моніторів та створення preview для Capture Target
 
     private static ImageSource? CaptureMonitorPreview(DisplayMonitor screen)
     {

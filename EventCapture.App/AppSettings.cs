@@ -31,14 +31,14 @@ public class AppSettings
     public string HotkeyToggleUI { get; set; } = "Alt+Z";
 
 
-    // Загальні налаштування (...
+    // Загальні налаштування ...
     public string SaveFolder { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
         "Skadi");
-    // ...) Загальні налаштування
+    // ...Загальні налаштування
 
 
-    // Системні шляхи (...
+    // Системні шляхи ...
     private static readonly string _settingsPath =
         Environment.GetEnvironmentVariable("SKADI_SETTINGS_PATH") ??
         Path.Combine(
@@ -51,10 +51,10 @@ public class AppSettings
         System.Diagnostics.Process.GetCurrentProcess()
             .MainModule!
             .FileName;
-    // ...) Системні шляхи
+    // ...Системні шляхи
 
 
-    // Завантаження та збереження налаштувань (...
+    // Завантаження налаштувань ...
     public static AppSettings Load()
     {
         try
@@ -77,6 +77,7 @@ public class AppSettings
             settings.Fps = NormalizeFps(settings.Fps);
             settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
             settings.HudMode = NormalizeHudMode(settings.HudMode);
+            settings.CaptureTarget = NormalizeCaptureTarget(settings.CaptureTarget);
             settings.NormalizeHotkeys();
             return settings;
         }
@@ -89,6 +90,7 @@ public class AppSettings
             return new AppSettings();
         }
     }
+    // ...Завантаження налаштувань
 
     private static int NormalizeVideoQuality(int value)
     {
@@ -113,6 +115,12 @@ public class AppSettings
         _ => "None"
     };
 
+    private static string NormalizeCaptureTarget(string? captureTarget) =>
+        !string.IsNullOrWhiteSpace(captureTarget) &&
+        !captureTarget.StartsWith("Window|", StringComparison.Ordinal)
+            ? captureTarget
+            : "PrimaryMonitor";
+
     private void NormalizeHotkeys()
     {
         if (string.Equals(HotkeySaveVideo, "Alt+F2", StringComparison.OrdinalIgnoreCase) &&
@@ -128,6 +136,7 @@ public class AppSettings
         }
     }
 
+    // Збереження налаштувань ...
     public void Save()
     {
         try
@@ -151,10 +160,10 @@ public class AppSettings
                 $"Помилка збереження налаштувань: {ex}");
         }
     }
-    // ...) Завантаження та збереження налаштувань
+    // ...Збереження налаштувань
 
 
-    // Автозапуск через реєстр Windows (...
+    // Перевірка автозапуску через реєстр Windows ...
     public static bool IsAutoStartEnabled()
     {
         using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
@@ -162,7 +171,9 @@ public class AppSettings
 
         return key?.GetValue(_appName) != null;
     }
+    // ...Перевірка автозапуску через реєстр Windows
 
+    // Зміна автозапуску через реєстр Windows ...
     public static void SetAutoStart(bool enable)
     {
         using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
@@ -182,5 +193,5 @@ public class AppSettings
                 false);
         }
     }
-    // ...) Автозапуск через реєстр Windows
+    // ...Зміна автозапуску через реєстр Windows
 }

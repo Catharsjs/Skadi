@@ -397,7 +397,7 @@
                                                     Margin="0,0,0,5">
 
                                                         <Grid>
-                                                            <TextBlock Text="{Binding Glyph}"
+                                                            <TextBlock Text="&#x25A3;"
                                                                FontSize="40"
                                                                Foreground="{StaticResource DisabledTextBrush}"
                                                                HorizontalAlignment="Center"/>

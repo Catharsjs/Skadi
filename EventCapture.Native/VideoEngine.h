@@ -52,4 +52,9 @@ namespace EventCaptureNative
         class Implementation;
         std::unique_ptr<Implementation> implementation_;
     };
+
+    EcResult MuxReplayAudio(
+        const wchar_t* videoPath,
+        const wchar_t* audioPath,
+        const wchar_t* outputPath);
 }

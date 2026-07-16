@@ -103,17 +103,6 @@ public static class DisplayMonitorService
                    "No display monitors were found.");
     }
 
-    public static DisplayMonitor FromWindow(
-        IntPtr windowHandle)
-    {
-        IntPtr monitorHandle =
-            MonitorFromWindow(
-                windowHandle,
-                MonitorDefaultToNearest);
-
-        return FromHandle(monitorHandle);
-    }
-
     public static DisplayMonitor FromHandle(
         IntPtr monitorHandle)
     {
@@ -174,11 +163,6 @@ public static class DisplayMonitorService
     private static extern bool GetMonitorInfo(
         IntPtr monitorHandle,
         ref MonitorInfoEx monitorInfo);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr MonitorFromWindow(
-        IntPtr windowHandle,
-        uint flags);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(

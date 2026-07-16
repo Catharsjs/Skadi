@@ -31,6 +31,7 @@ public sealed class GlobalHotkeyService : IDisposable
         _source.AddHook(WndProc);
     }
 
+    // Реєстрація глобальних гарячих клавіш Windows ...
     public IReadOnlyList<int> RegisterAll(
         string screenshot,
         string record,
@@ -53,7 +54,9 @@ public sealed class GlobalHotkeyService : IDisposable
         _registered = true;
         return rejected;
     }
+    // ...Реєстрація глобальних гарячих клавіш Windows
 
+    // Скасування реєстрації глобальних гарячих клавіш ...
     public void UnregisterAll()
     {
         if (!_registered)
@@ -66,6 +69,7 @@ public sealed class GlobalHotkeyService : IDisposable
 
         _registered = false;
     }
+    // ...Скасування реєстрації глобальних гарячих клавіш
 
     private bool Register(int id, string hotkey)
     {

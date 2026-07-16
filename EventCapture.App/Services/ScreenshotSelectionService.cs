@@ -21,6 +21,7 @@ public sealed class ScreenshotSelectionService : IDisposable
     private sealed record FrozenMonitorCapture(
     DisplayMonitor Monitor,
     Bitmap Bitmap);
+    // Захоплення екранів, вибір області та збереження скріншота ...
     public async Task<string?> CaptureSelectionAsync(
         string outputFolder,
         Func<Task> toggleUi,
@@ -156,6 +157,7 @@ public sealed class ScreenshotSelectionService : IDisposable
             SchedulePostScreenshotMemoryWork(memoryLogVersion, allowBlockingMemoryCleanup);
         }
     }
+    // ...Захоплення екранів, вибір області та збереження скріншота
 
     private async Task<ScreenshotSelectionResult?> SelectRegionAsync(
     IReadOnlyList<FrozenMonitorCapture> frozenCaptures,
@@ -223,6 +225,7 @@ public sealed class ScreenshotSelectionService : IDisposable
         }
     }
 
+    // Оновлення reusable overlay після зміни моніторів ...
     public void InvalidateOverlayWindows()
     {
         void CloseWindows()
@@ -252,6 +255,7 @@ public sealed class ScreenshotSelectionService : IDisposable
         else
             dispatcher.BeginInvoke(CloseWindows);
     }
+    // ...Оновлення reusable overlay після зміни моніторів
 
     public void Dispose()
     {

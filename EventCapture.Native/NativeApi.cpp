@@ -183,6 +183,22 @@ namespace
         }
     }
 
+    EcResult EcMuxReplayAudioCore(
+        const wchar_t* videoPath,
+        const wchar_t* audioPath,
+        const wchar_t* outputPath) noexcept
+    {
+        try
+        {
+            return EventCaptureNative::MuxReplayAudio(videoPath, audioPath, outputPath);
+        }
+        catch (...)
+        {
+            AppendNativeApiLog(L"EcMuxReplayAudio caught C++ exception");
+            return EcResult::NativeFailure;
+        }
+    }
+
     EcResult EcStartRecordingCore(EcEngineHandle handle, const wchar_t* h264Path) noexcept
     {
         try
@@ -301,6 +317,24 @@ EcResult __cdecl EcSaveReplay(EcEngineHandle handle, const wchar_t* h264Path, ui
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         return LogSehFailure(L"EcSaveReplay", GetExceptionCode());
+    }
+}
+
+EcResult __cdecl EcMuxReplayAudio(
+    const wchar_t* videoPath,
+    const wchar_t* audioPath,
+    const wchar_t* outputPath)
+{
+    if (videoPath == nullptr || audioPath == nullptr || outputPath == nullptr)
+        return EcResult::InvalidArgument;
+
+    __try
+    {
+        return EcMuxReplayAudioCore(videoPath, audioPath, outputPath);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return LogSehFailure(L"EcMuxReplayAudio", GetExceptionCode());
     }
 }
 

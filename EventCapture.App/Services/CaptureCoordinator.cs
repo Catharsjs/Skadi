@@ -13,7 +13,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
     private readonly SemaphoreSlim _continuousLock = new(1, 1);
-    private IVideoCapturePipeline? _videoPipeline;
+    private GpuCapturePipeline? _videoPipeline;
     private AudioRecorder? _audioRecorder;
     private AppSettings? _settings;
     private CancellationTokenSource? _recordingDiskMonitorCts;
@@ -26,15 +26,11 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     public event EventHandler? ContinuousRecordingStopping;
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
-    public bool IsCapturingWindow => false;
     public bool IsContinuousRecording { get; private set; }
 
+    // Застосування налаштувань захоплення ...
     public async Task ApplySettingsAsync(AppSettings settings, bool restartPipeline)
     {
-        if (settings.CaptureTarget.StartsWith("Window|", StringComparison.Ordinal))
-        {
-            settings.CaptureTarget = "PrimaryMonitor";
-        }
         AppLogger.Info($"Coordinator state | Action=ApplySettings enter | Restart={restartPipeline} | NewBuffer={settings.BufferEnabled} | NewMode={settings.CaptureMode} | NewTarget={settings.CaptureTarget} | Current={DescribeState()}");
         _settings = settings;
         _audioRecorder?.SetSystemVolume(settings.SystemAudioVolume);
@@ -44,6 +40,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         AppLogger.Info($"Coordinator state | Action=ApplySettings exit | Restart={restartPipeline} | Current={DescribeState()}");
     }
 
+    // ...Застосування налаштувань захоплення
+
+    // Збереження replay ...
     public async Task<string> SaveRecordAsync()
     {
         AppLogger.Info($"Coordinator state | Action=SaveReplay enter | Current={DescribeState()}");
@@ -105,6 +104,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    // ...Збереження replay
+
+    // Запуск безперервного запису (continuous recording) ...
     public async Task StartContinuousRecordingAsync()
     {
         AppLogger.Info($"Coordinator state | Action=StartRecording enter | Current={DescribeState()}");
@@ -143,8 +145,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 _continuousNativeCombined = false;
                 if (_settings.CaptureMode == "VideoAudio")
                 {
-                    if (!wantsVideo || _videoPipeline is not GpuCapturePipeline gpuPipeline)
+                    if (!wantsVideo || _videoPipeline is null)
                         throw new InvalidOperationException("Native combined recording is unavailable.");
+
+                    GpuCapturePipeline gpuPipeline = _videoPipeline;
 
                     if (wantsAudio)
                     {
@@ -212,9 +216,14 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    // ...Запуск безперервного запису (continuous recording)
+
+    // Зупинка безперервного запису (continuous recording) ...
     public Task<string> StopContinuousRecordingAsync() =>
         StopContinuousRecordingCoreAsync(stopDiskMonitor: true);
+    // ...Зупинка безперервного запису (continuous recording)
 
+    // Обробка зміни конфігурації моніторів ...
     public async Task<string?> HandleDisplayTopologyChangedAsync()
     {
         AppLogger.Info($"Reload (Targets updated) | Action=DisplayTopologyChanged | Current={DescribeState()}");
@@ -262,6 +271,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         return finalizedRecordingPath;
     }
 
+    // ...Обробка зміни конфігурації моніторів
+
+    // Фіналізація безперервного запису ...
     private async Task<string> StopContinuousRecordingCoreAsync(bool stopDiskMonitor)
     {
         AppLogger.Info($"Coordinator state | Action=StopRecording enter | Current={DescribeState()}");
@@ -359,6 +371,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    // ...Фіналізація безперервного запису
+
+    // Перезапуск pipeline захоплення ...
     public async Task RestartPipelineAsync()
     {
         if (_settings is null) return;
@@ -390,6 +405,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    // ...Перезапуск pipeline захоплення
+
+    // Запуск pipeline захоплення ...
     private void StartPipelineCore(bool forceStart)
     {
         AppLogger.Info($"Coordinator state | Action=StartPipelineCore enter | ForceStart={forceStart} | Current={DescribeState()}");
@@ -466,6 +484,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         AppLogger.Info($"Coordinator state | Action=StartPipelineCore exit | WantsVideo={wantsVideo} | WantsAudio={wantsAudio} | SharedTimestamp={sharedTimestamp} | Current={DescribeState()}");
     }
 
+    // ...Запуск pipeline захоплення
+
+    // Запуск контролю вільного місця під час запису ...
     private void StartRecordingDiskSpaceMonitor()
     {
         StopRecordingDiskSpaceMonitor();
@@ -475,6 +496,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         CancellationToken token = _recordingDiskMonitorCts.Token;
         _recordingDiskMonitorTask = Task.Run(() => MonitorRecordingDiskSpaceAsync(token), token);
     }
+    // ...Запуск контролю вільного місця під час запису
 
     private void StopRecordingDiskSpaceMonitor()
     {
@@ -484,6 +506,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         _recordingDiskMonitorTask = null;
     }
 
+    // Контроль вільного місця під час запису ...
     private async Task MonitorRecordingDiskSpaceAsync(CancellationToken token)
     {
         try
@@ -544,6 +567,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             AppLogger.Error(nameof(CaptureCoordinator), $"Disk space monitor failed: {ex}");
         }
     }
+    // ...Контроль вільного місця під час запису
 
     private static void EnsureSufficientRecordingDiskSpace(AppSettings settings, string action)
     {
@@ -603,7 +627,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         catch { }
     }
 
-    private static IVideoCapturePipeline CreateVideoPipeline(
+    private static GpuCapturePipeline CreateVideoPipeline(
         AppSettings settings,
         int fps,
         int width,
@@ -734,6 +758,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     }
 
 
+    // Запуск контролю продуктивності запису ...
     private void StartRecordingPerformanceMonitor()
     {
         StopRecordingPerformanceMonitor();
@@ -741,6 +766,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         CancellationToken token = _recordingPerformanceCts.Token;
         _recordingPerformanceTask = Task.Run(() => MonitorRecordingPerformanceAsync(token), token);
     }
+    // ...Запуск контролю продуктивності запису
 
     private void StopRecordingPerformanceMonitor()
     {
@@ -750,6 +776,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         _recordingPerformanceTask = null;
     }
 
+    // Контроль продуктивності запису ...
     private async Task MonitorRecordingPerformanceAsync(CancellationToken token)
     {
         ulong lastCaptured = 0;
@@ -777,8 +804,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 lastCpu = cpu;
 
                 string videoDetail;
-                if (_videoPipeline is GpuCapturePipeline gpu)
+                if (_videoPipeline is not null)
                 {
+                    GpuCapturePipeline gpu = _videoPipeline;
                     GpuCaptureStats stats = gpu.GetStats();
                     ulong capturedDelta = stats.CapturedFrames >= lastCaptured ? stats.CapturedFrames - lastCaptured : 0;
                     ulong encodedDelta = stats.EncodedFrames >= lastEncoded ? stats.EncodedFrames - lastEncoded : 0;
@@ -805,11 +833,6 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                             "The active video encoder or file writer stopped.");
                         break;
                     }
-                }
-                else if (_videoPipeline is not null)
-                {
-                    long frames = _videoPipeline.FramesCaptured;
-                    videoDetail = $"VideoType={_videoPipeline.GetType().Name} | Frames={frames} | Running={_videoPipeline.IsRunning} | Recording={_videoPipeline.IsContinuousRecording}";
                 }
                 else
                 {
@@ -841,6 +864,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         }
     }
 
+    // ...Контроль продуктивності запису
+
+    // Примусова безпечна зупинка запису ...
     private async Task ForceStopContinuousRecordingAsync(string message, string detail)
     {
         if (!IsContinuousRecording)
@@ -888,6 +914,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             StopRecordingPerformanceMonitor();
         }
     }
+    // ...Примусова безпечна зупинка запису
+
     private long GetCurrentRecordingFreeDiskBytes()
     {
         if (_settings is null) return -1;
@@ -902,6 +930,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             return -1;
         }
     }
+    // Зупинка pipeline захоплення ...
     private void StopPipelineCore()
     {
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore enter | Current={DescribeState()}");
@@ -919,6 +948,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         AppLogger.Info($"Coordinator state | Action=StopPipelineCore exit | Current={DescribeState()}");
     }
 
+    // ...Зупинка pipeline захоплення
+
+    // Повна зупинка всіх підсистем захоплення ...
     public async Task StopAllAsync()
     {
         bool lockTaken = false;
@@ -934,6 +966,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 _pipelineLock.Release();
         }
     }
+
+    // ...Повна зупинка всіх підсистем захоплення
 
     private string DescribeState()
     {
@@ -952,6 +986,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 
+    // Звільнення ресурсів координатора захоплення ...
     public async ValueTask DisposeAsync()
     {
         await StopAllAsync();
@@ -963,7 +998,9 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     }
 }
 
-public sealed record ContinuousRecordingStoppedEventArgs(
+    // ...Звільнення ресурсів координатора захоплення
+
+    public sealed record ContinuousRecordingStoppedEventArgs(
     bool Forced,
     string Message,
     string? Path,

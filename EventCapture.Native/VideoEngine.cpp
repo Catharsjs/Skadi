@@ -6,7 +6,6 @@
 #include <icodecapi.h>
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
-#include <dwmapi.h>
 #include <dxgi1_6.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -164,24 +163,6 @@ namespace EventCaptureNative
             return text.str();
         }
 
-        RECT GetExtendedWindowFrameBounds(HWND window)
-        {
-            RECT rectangle{};
-            if (SUCCEEDED(DwmGetWindowAttribute(
-                    window,
-                    DWMWA_EXTENDED_FRAME_BOUNDS,
-                    &rectangle,
-                    sizeof(rectangle))) &&
-                rectangle.right > rectangle.left &&
-                rectangle.bottom > rectangle.top)
-            {
-                return rectangle;
-            }
-
-            GetWindowRect(window, &rectangle);
-            return rectangle;
-        }
-
         void LogNative(const std::wstring& message)
         {
             AppendNativeLogNoThrow(message);
@@ -310,6 +291,7 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (transform == nullptr) return E_POINTER;
 
             __try
             {
@@ -328,7 +310,8 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
-            if (transform != nullptr) *transform = nullptr;
+            if (activate == nullptr || transform == nullptr) return E_POINTER;
+            *transform = nullptr;
 
             __try
             {
@@ -347,7 +330,8 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
-            if (attributes != nullptr) *attributes = nullptr;
+            if (transform == nullptr || attributes == nullptr) return E_POINTER;
+            *attributes = nullptr;
 
             __try
             {
@@ -367,7 +351,8 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
-            if (result != nullptr) *result = nullptr;
+            if (transform == nullptr || result == nullptr) return E_POINTER;
+            *result = nullptr;
 
             __try
             {
@@ -386,6 +371,7 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (transform == nullptr || mediaType == nullptr) return E_POINTER;
 
             __try
             {
@@ -404,6 +390,7 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
+            if (transform == nullptr || mediaType == nullptr) return E_POINTER;
 
             __try
             {
@@ -423,7 +410,7 @@ namespace EventCaptureNative
             unsigned long* exceptionCode) noexcept
         {
             if (exceptionCode != nullptr) *exceptionCode = 0;
-            if (codec == nullptr) return S_FALSE;
+            if (codec == nullptr || key == nullptr || value == nullptr) return E_POINTER;
 
             __try
             {
@@ -467,9 +454,10 @@ namespace EventCaptureNative
         {
             const auto interop = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
             GraphicsCaptureItem item{ nullptr };
-            HRESULT result = config.targetKind == EcTargetKind::Window
-                ? interop->CreateForWindow(static_cast<HWND>(config.targetHandle), winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item))
-                : interop->CreateForMonitor(static_cast<HMONITOR>(config.targetHandle), winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item));
+            const HRESULT result = interop->CreateForMonitor(
+                static_cast<HMONITOR>(config.targetHandle),
+                winrt::guid_of<GraphicsCaptureItem>(),
+                winrt::put_abi(item));
             ThrowIfFailed(result);
             return item;
         }
@@ -590,6 +578,196 @@ namespace EventCaptureNative
             }
             return result;
         }
+
+        struct SourceSample
+        {
+            ComPtr<IMFSample> sample;
+            int64_t timestamp100ns{};
+            bool endOfStream{};
+        };
+
+        void ReadNextSourceSample(
+            IMFSourceReader* reader,
+            DWORD streamIndex,
+            SourceSample& result)
+        {
+            result.sample.Reset();
+            result.timestamp100ns = 0;
+
+            while (!result.endOfStream)
+            {
+                DWORD actualStreamIndex = 0;
+                DWORD flags = 0;
+                LONGLONG timestamp = 0;
+                ComPtr<IMFSample> sample;
+                ThrowIfFailed(reader->ReadSample(
+                    streamIndex,
+                    0,
+                    &actualStreamIndex,
+                    &flags,
+                    &timestamp,
+                    &sample));
+
+                if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0)
+                {
+                    result.endOfStream = true;
+                    return;
+                }
+
+                if (sample != nullptr)
+                {
+                    result.sample = sample;
+                    result.timestamp100ns = timestamp;
+                    return;
+                }
+            }
+        }
+
+        void WriteNormalizedSourceSample(
+            IMFSinkWriter* writer,
+            DWORD streamIndex,
+            SourceSample& source,
+            int64_t baseTimestamp100ns)
+        {
+            if (source.sample == nullptr) return;
+            ThrowIfFailed(source.sample->SetSampleTime(
+                std::max<int64_t>(0, source.timestamp100ns - baseTimestamp100ns)));
+            ThrowIfFailed(writer->WriteSample(streamIndex, source.sample.Get()));
+        }
+
+        void MuxReplayAudioCore(
+            const wchar_t* videoPath,
+            const wchar_t* audioPath,
+            const wchar_t* outputPath)
+        {
+            constexpr DWORD allStreams = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
+            constexpr DWORD videoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+            constexpr DWORD audioStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM);
+
+            ComPtr<IMFSourceReader> videoReader;
+            ThrowIfFailed(MFCreateSourceReaderFromURL(videoPath, nullptr, &videoReader));
+            ThrowIfFailed(videoReader->SetStreamSelection(allStreams, FALSE));
+            ThrowIfFailed(videoReader->SetStreamSelection(videoStream, TRUE));
+
+            ComPtr<IMFMediaType> videoType;
+            ThrowIfFailed(videoReader->GetNativeMediaType(
+                videoStream,
+                0,
+                &videoType));
+            GUID videoSubtype{};
+            ThrowIfFailed(videoType->GetGUID(MF_MT_SUBTYPE, &videoSubtype));
+            if (videoSubtype != MFVideoFormat_H264)
+                throw std::runtime_error("Replay video source is not H.264");
+            ThrowIfFailed(videoReader->SetCurrentMediaType(
+                videoStream,
+                nullptr,
+                videoType.Get()));
+
+            ComPtr<IMFSourceReader> audioReader;
+            ThrowIfFailed(MFCreateSourceReaderFromURL(audioPath, nullptr, &audioReader));
+            ThrowIfFailed(audioReader->SetStreamSelection(allStreams, FALSE));
+            ThrowIfFailed(audioReader->SetStreamSelection(audioStream, TRUE));
+
+            ComPtr<IMFMediaType> audioInputType;
+            ThrowIfFailed(audioReader->GetNativeMediaType(
+                audioStream,
+                0,
+                &audioInputType));
+            ThrowIfFailed(audioReader->SetCurrentMediaType(
+                audioStream,
+                nullptr,
+                audioInputType.Get()));
+
+            UINT32 sampleRate = 0;
+            UINT32 channels = 0;
+            ThrowIfFailed(audioInputType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sampleRate));
+            ThrowIfFailed(audioInputType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels));
+
+            ComPtr<IMFAttributes> attributes;
+            ThrowIfFailed(MFCreateAttributes(&attributes, 2));
+            ThrowIfFailed(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
+            ThrowIfFailed(attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE));
+
+            ComPtr<IMFSinkWriter> writer;
+            ThrowIfFailed(MFCreateSinkWriterFromURL(outputPath, nullptr, attributes.Get(), &writer));
+
+            DWORD videoStreamIndex = 0;
+            ThrowIfFailed(writer->AddStream(videoType.Get(), &videoStreamIndex));
+            ThrowIfFailed(writer->SetInputMediaType(videoStreamIndex, videoType.Get(), nullptr));
+
+            ComPtr<IMFMediaType> audioOutputType;
+            ThrowIfFailed(MFCreateMediaType(&audioOutputType));
+            ThrowIfFailed(audioOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
+            ThrowIfFailed(audioOutputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
+            ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels));
+            ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate));
+            ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16));
+            ThrowIfFailed(audioOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24'000));
+
+            DWORD audioStreamIndex = 0;
+            ThrowIfFailed(writer->AddStream(audioOutputType.Get(), &audioStreamIndex));
+            ThrowIfFailed(writer->SetInputMediaType(audioStreamIndex, audioInputType.Get(), nullptr));
+            ThrowIfFailed(writer->BeginWriting());
+
+            SourceSample videoSample{};
+            SourceSample audioSample{};
+            ReadNextSourceSample(videoReader.Get(), videoStream, videoSample);
+            ReadNextSourceSample(audioReader.Get(), audioStream, audioSample);
+            if (videoSample.endOfStream || videoSample.sample == nullptr)
+                throw std::runtime_error("Replay video source has no samples");
+            if (audioSample.endOfStream || audioSample.sample == nullptr)
+                throw std::runtime_error("Replay audio source has no samples");
+
+            const int64_t videoBaseTimestamp100ns = videoSample.timestamp100ns;
+            const int64_t audioBaseTimestamp100ns = audioSample.timestamp100ns;
+            uint64_t videoSamplesWritten = 0;
+            uint64_t audioSamplesWritten = 0;
+
+            while (!videoSample.endOfStream || !audioSample.endOfStream)
+            {
+                const int64_t videoTime = videoSample.endOfStream
+                    ? std::numeric_limits<int64_t>::max()
+                    : videoSample.timestamp100ns - videoBaseTimestamp100ns;
+                const int64_t audioTime = audioSample.endOfStream
+                    ? std::numeric_limits<int64_t>::max()
+                    : audioSample.timestamp100ns - audioBaseTimestamp100ns;
+
+                if (videoTime <= audioTime)
+                {
+                    WriteNormalizedSourceSample(
+                        writer.Get(),
+                        videoStreamIndex,
+                        videoSample,
+                        videoBaseTimestamp100ns);
+                    ++videoSamplesWritten;
+                    ReadNextSourceSample(
+                        videoReader.Get(),
+                        videoStream,
+                        videoSample);
+                }
+                else
+                {
+                    WriteNormalizedSourceSample(
+                        writer.Get(),
+                        audioStreamIndex,
+                        audioSample,
+                        audioBaseTimestamp100ns);
+                    ++audioSamplesWritten;
+                    ReadNextSourceSample(
+                        audioReader.Get(),
+                        audioStream,
+                        audioSample);
+                }
+            }
+
+            ThrowIfFailed(writer->Finalize());
+            std::wstringstream message;
+            message << L"Replay audio mux completed in-process | VideoSamples=" << videoSamplesWritten
+                << L" | AudioSamples=" << audioSamplesWritten
+                << L" | SampleRate=" << sampleRate
+                << L" | Channels=" << channels;
+            LogNative(message.str());
+        }
     }
 
     class VideoEngine::Implementation final
@@ -606,9 +784,7 @@ namespace EventCaptureNative
         explicit Implementation(const EcVideoConfig& config) : config_(config)
         {
             InstallNativeDiagnostics();
-            const bool useDesktopDuplication =
-                config_.targetKind == EcTargetKind::Monitor &&
-                !IsWindows11OrGreater();
+            const bool useDesktopDuplication = !IsWindows11OrGreater();
             captureBackend_ = useDesktopDuplication
                 ? CaptureBackend::DesktopDuplication
                 : CaptureBackend::WindowsGraphicsCapture;
@@ -618,7 +794,7 @@ namespace EventCaptureNative
                 << L"VideoEngine ctor | Pipeline=mp4-encoded-sample-v2"
                 << L" | Backend="
                 << (captureBackend_ == CaptureBackend::DesktopDuplication ? L"DDA" : L"WGC")
-                << L" | MonitorRotated=" << (config_.targetKind == EcTargetKind::Monitor && IsMonitorRotated(static_cast<HMONITOR>(config_.targetHandle)) ? 1 : 0)
+                << L" | MonitorRotated=" << (IsMonitorRotated(static_cast<HMONITOR>(config_.targetHandle)) ? 1 : 0)
                 << L" | TargetKind=" << static_cast<int32_t>(config_.targetKind)
                 << L" | TargetHandle=0x" << std::hex << reinterpret_cast<uintptr_t>(config_.targetHandle)
                 << std::dec
@@ -629,7 +805,8 @@ namespace EventCaptureNative
                 << L" | EnableReplay=" << config_.enableReplay;
             LogNative(configLog.str());
 
-            if (config_.outputWidth == 0 || config_.outputHeight == 0 || config_.framesPerSecond == 0 ||
+            if (config_.targetKind != EcTargetKind::Monitor ||
+                config_.outputWidth == 0 || config_.outputHeight == 0 || config_.framesPerSecond == 0 ||
                 config_.bitrateKbps == 0 || config_.replaySeconds == 0 || config_.targetHandle == nullptr)
             {
                 throw std::invalid_argument("Invalid video configuration");
@@ -1239,8 +1416,7 @@ namespace EventCaptureNative
 
         ComPtr<IDXGIAdapter1> FindAdapterForTargetMonitor()
         {
-            if (config_.targetKind != EcTargetKind::Monitor ||
-                config_.targetHandle == nullptr)
+            if (config_.targetHandle == nullptr)
             {
                 return nullptr;
             }
@@ -1342,22 +1518,6 @@ namespace EventCaptureNative
                 log << L"CaptureItem size=" << size.Width << L"x" << size.Height;
                 LogNative(log.str());
             }
-            if (config_.targetKind == EcTargetKind::Window)
-            {
-                initialWindowMonitor_ = MonitorFromWindow(
-                    static_cast<HWND>(config_.targetHandle),
-                    MONITOR_DEFAULTTONEAREST);
-
-                RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
-                windowFrameWidth_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.right - windowRect.left));
-                windowFrameHeight_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.bottom - windowRect.top));
-                std::wstringstream log;
-                log
-                    << L"Initial window monitor=0x" << std::hex << reinterpret_cast<uintptr_t>(initialWindowMonitor_)
-                    << std::dec
-                    << L" | WindowRect=" << RectToString(windowRect);
-                LogNative(log.str());
-            }
             CreateLatestTexture(static_cast<uint32_t>(size.Width), static_cast<uint32_t>(size.Height));
             framePool_ = Direct3D11CaptureFramePool::CreateFreeThreaded(
                 winRtDevice_,
@@ -1378,49 +1538,9 @@ namespace EventCaptureNative
                         texture->GetDesc(&description);
                         const uint32_t contentWidth = static_cast<uint32_t>(contentSize.Width);
                         const uint32_t contentHeight = static_cast<uint32_t>(contentSize.Height);
-                        if (config_.targetKind == EcTargetKind::Window && !IsWindowOnInitialMonitor())
-                        {
-                            std::wstringstream log;
-                            RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
-                            log
-                                << L"Window source invalid | CurrentMonitor=0x" << std::hex
-                                << reinterpret_cast<uintptr_t>(MonitorFromWindow(static_cast<HWND>(config_.targetHandle), MONITOR_DEFAULTTONEAREST))
-                                << L" | InitialMonitor=0x"
-                                << reinterpret_cast<uintptr_t>(initialWindowMonitor_)
-                                << std::dec
-                                << L" | Texture=" << description.Width << L"x" << description.Height
-                                << L" | Source=" << sourceWidth_ << L"x" << sourceHeight_
-                                << L" | Content=" << contentSize.Width << L"x" << contentSize.Height
-                                << L" | WindowRect=" << RectToString(windowRect);
-                            LogNative(log.str());
-
-                            windowSourceInvalid_.store(true);
-                            hasTexture_ = true;
-                            ++textureVersion_;
-                            frameCondition_.notify_one();
-                            return;
-                        }
-
-                        if (config_.targetKind == EcTargetKind::Window)
-                        {
-                            RECT windowRect = GetExtendedWindowFrameBounds(static_cast<HWND>(config_.targetHandle));
-                            windowFrameWidth_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.right - windowRect.left));
-                            windowFrameHeight_ = static_cast<uint32_t>(std::max<LONG>(1, windowRect.bottom - windowRect.top));
-                        }
-
-                        bool recreateFramePool = false;
-                        if (config_.targetKind == EcTargetKind::Window &&
-                            (contentWidth != sourceContentWidth_ ||
-                             contentHeight != sourceContentHeight_))
-                        {
-                            recreateFramePool = true;
-                        }
-                        else if (config_.targetKind != EcTargetKind::Window &&
-                            (contentWidth != sourceContentWidth_ ||
-                             contentHeight != sourceContentHeight_))
-                        {
-                            recreateFramePool = true;
-                        }
+                        const bool recreateFramePool =
+                            contentWidth != sourceContentWidth_ ||
+                            contentHeight != sourceContentHeight_;
 
                         if (description.Width != sourceWidth_ ||
                             description.Height != sourceHeight_)
@@ -1430,7 +1550,6 @@ namespace EventCaptureNative
                                 description.Height);
                         }
 
-                        if (config_.targetKind == EcTargetKind::Monitor)
                         {
                             const int64_t captureTimestamp100ns = CurrentTimestamp100ns();
                             monitorQueueMaxDepth_.store(std::max<uint64_t>(
@@ -1479,13 +1598,8 @@ namespace EventCaptureNative
                                 monitorQueueMaxDepth_.load(),
                                 static_cast<uint64_t>(queuedMonitorFrameSlots_.size())));
                         }
-                        else
-                        {
-                            context_->CopyResource(latestTexture_.Get(), texture.Get());
-                        }
                         sourceContentWidth_ = std::max<uint32_t>(1, std::min<uint32_t>(contentWidth, sourceWidth_));
                         sourceContentHeight_ = std::max<uint32_t>(1, std::min<uint32_t>(contentHeight, sourceHeight_));
-                        windowSourceInvalid_.store(false);
                         hasTexture_ = true;
                         ++textureVersion_;
                         capturedFrames_.fetch_add(1);
@@ -1541,11 +1655,6 @@ namespace EventCaptureNative
 
         void CreateDesktopDuplicationCapture()
         {
-            if (config_.targetKind != EcTargetKind::Monitor)
-            {
-                throw std::runtime_error("Desktop Duplication backend supports monitor targets only");
-            }
-
             LogNative(L"CreateDesktopDuplicationCapture entered.");
 
             ComPtr<IDXGIDevice> dxgiDevice;
@@ -2020,24 +2129,21 @@ namespace EventCaptureNative
             description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 
             ComPtr<ID3D11Texture2D> nextLatestTexture;
-            ComPtr<ID3D11RenderTargetView> nextLatestRenderTarget;
             ComPtr<ID3D11ShaderResourceView> nextLatestShaderResource;
             ComPtr<ID3D11Texture2D> nextEncoderTexture;
-            ComPtr<ID3D11Texture2D> nextBlackTexture;
             ComPtr<ID3D11VideoProcessorEnumerator> nextProcessorEnumerator;
             ComPtr<ID3D11VideoProcessor> nextProcessor;
             ComPtr<ID3D11VideoProcessorInputView> nextProcessorInput;
             ComPtr<ID3D11VideoProcessorOutputView> nextProcessorOutput;
 
             ThrowIfFailed(device_->CreateTexture2D(&description, nullptr, &nextLatestTexture));
-            ThrowIfFailed(device_->CreateRenderTargetView(nextLatestTexture.Get(), nullptr, &nextLatestRenderTarget));
 
-            if (config_.targetKind == EcTargetKind::Window || useDdaShaderRotation_)
+            if (useDdaShaderRotation_)
             {
                 ThrowIfFailed(device_->CreateShaderResourceView(nextLatestTexture.Get(), nullptr, &nextLatestShaderResource));
                 if (canvasTexture_ == nullptr)
                 {
-                    CreateWindowCompositorPipeline();
+                    CreateDdaRotationPipeline();
                 }
                 if (useDdaShaderRotation_)
                 {
@@ -2058,14 +2164,12 @@ namespace EventCaptureNative
                     width,
                     height,
                     nextEncoderTexture,
-                    nextBlackTexture,
                     nextProcessorEnumerator,
                     nextProcessor,
                     nextProcessorInput,
                     nextProcessorOutput);
 
                 encoderTexture_ = nextEncoderTexture;
-                blackTexture_ = nextBlackTexture;
                 processorEnumerator_ = nextProcessorEnumerator;
                 processor_ = nextProcessor;
                 processorInput_ = nextProcessorInput;
@@ -2075,7 +2179,6 @@ namespace EventCaptureNative
             }
 
             latestTexture_ = nextLatestTexture;
-            latestRenderTarget_ = nextLatestRenderTarget;
             latestShaderResource_ = nextLatestShaderResource;
             sourceWidth_ = width;
             sourceHeight_ = height;
@@ -2089,7 +2192,7 @@ namespace EventCaptureNative
             queuedMonitorFrameSlots_.clear();
             nextMonitorFrameSlot_ = 0;
 
-            if (config_.targetKind != EcTargetKind::Monitor || processorEnumerator_ == nullptr) return;
+            if (processorEnumerator_ == nullptr) return;
 
             D3D11_TEXTURE2D_DESC description{};
             description.Width = width;
@@ -2167,22 +2270,6 @@ namespace EventCaptureNative
             LogNative(L"DDA direct encoder surface pool created | Count=16");
         }
 
-        bool IsWindowOnInitialMonitor() const
-        {
-            if (config_.targetKind != EcTargetKind::Window) return true;
-
-            const HWND window = static_cast<HWND>(config_.targetHandle);
-            if (!IsWindow(window)) return false;
-
-            const HMONITOR currentMonitor =
-                MonitorFromWindow(
-                    window,
-                    MONITOR_DEFAULTTONEAREST);
-
-            return currentMonitor != nullptr &&
-                currentMonitor == initialWindowMonitor_;
-        }
-
         D3D11_VIDEO_PROCESSOR_ROTATION GetDesktopDuplicationVideoRotation() const
         {
             switch (desktopDuplicationRotation_)
@@ -2203,7 +2290,6 @@ namespace EventCaptureNative
             uint32_t sourceWidth,
             uint32_t sourceHeight,
             ComPtr<ID3D11Texture2D>& encoderTexture,
-            ComPtr<ID3D11Texture2D>& blackTexture,
             ComPtr<ID3D11VideoProcessorEnumerator>& processorEnumerator,
             ComPtr<ID3D11VideoProcessor>& processor,
             ComPtr<ID3D11VideoProcessorInputView>& processorInput,
@@ -2220,7 +2306,6 @@ namespace EventCaptureNative
             outputDescription.Usage = D3D11_USAGE_DEFAULT;
             outputDescription.BindFlags = D3D11_BIND_RENDER_TARGET;
             ThrowIfFailed(device_->CreateTexture2D(&outputDescription, nullptr, &encoderTexture));
-            CreateBlackTexture(outputDescription, blackTexture);
 
             D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
             content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
@@ -2246,13 +2331,8 @@ namespace EventCaptureNative
             ThrowIfFailed(videoDevice_->CreateVideoProcessorOutputView(encoderTexture.Get(), processorEnumerator.Get(), &outputView, &processorOutput));
             const RECT sourceRect{ 0, 0, static_cast<LONG>(sourceWidth), static_cast<LONG>(sourceHeight) };
             const RECT outputRect{ 0, 0, static_cast<LONG>(config_.outputWidth), static_cast<LONG>(config_.outputHeight) };
-            const RECT centeredWindowRect = CalculateCenteredActualSizeRect(sourceWidth, sourceHeight);
-            const RECT& streamDestRect =
-                config_.targetKind == EcTargetKind::Window
-                    ? centeredWindowRect
-                    : outputRect;
             videoContext_->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &sourceRect);
-            videoContext_->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &streamDestRect);
+            videoContext_->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &outputRect);
             videoContext_->VideoProcessorSetOutputTargetRect(processor.Get(), TRUE, &outputRect);
             if (captureBackend_ == CaptureBackend::DesktopDuplication)
             {
@@ -2352,45 +2432,6 @@ namespace EventCaptureNative
             encoderSurfaceCondition_.notify_one();
         }
 
-        RECT CalculateCenteredActualSizeRect(uint32_t sourceWidth, uint32_t sourceHeight) const
-        {
-            const LONG width = static_cast<LONG>(std::min<uint32_t>(sourceWidth, config_.outputWidth));
-            const LONG height = static_cast<LONG>(std::min<uint32_t>(sourceHeight, config_.outputHeight));
-            const LONG left = (static_cast<LONG>(config_.outputWidth) - width) / 2;
-            const LONG top = (static_cast<LONG>(config_.outputHeight) - height) / 2;
-
-            return RECT
-            {
-                left,
-                top,
-                left + width,
-                top + height
-            };
-        }
-
-        void CreateBlackTexture(
-            const D3D11_TEXTURE2D_DESC& description,
-            ComPtr<ID3D11Texture2D>& blackTexture)
-        {
-            const uint32_t pitch = description.Width;
-            const uint32_t chromaHeight = (description.Height + 1) / 2;
-            std::vector<uint8_t> blackFrame(static_cast<size_t>(pitch) * (description.Height + chromaHeight));
-            std::fill(
-                blackFrame.begin(),
-                blackFrame.begin() + static_cast<size_t>(pitch) * description.Height,
-                static_cast<uint8_t>(16));
-            std::fill(
-                blackFrame.begin() + static_cast<size_t>(pitch) * description.Height,
-                blackFrame.end(),
-                static_cast<uint8_t>(128));
-
-            D3D11_SUBRESOURCE_DATA data{};
-            data.pSysMem = blackFrame.data();
-            data.SysMemPitch = pitch;
-            data.SysMemSlicePitch = pitch * description.Height;
-            ThrowIfFailed(device_->CreateTexture2D(&description, &data, &blackTexture));
-        }
-
         ComPtr<ID3DBlob> CompileShader(
             const char* source,
             const char* entryPoint,
@@ -2425,7 +2466,7 @@ namespace EventCaptureNative
             return shader;
         }
 
-        void CreateWindowCompositorPipeline()
+        void CreateDdaRotationPipeline()
         {
             D3D11_TEXTURE2D_DESC canvasDescription{};
             canvasDescription.Width = config_.outputWidth;
@@ -2464,14 +2505,6 @@ namespace EventCaptureNative
                 Texture2D sourceTexture : register(t0);
                 SamplerState sourceSampler : register(s0);
 
-                float4 PSMain(VSOut input) : SV_TARGET
-                {
-                    float4 color = sourceTexture.Sample(sourceSampler, input.uv);
-                    color.rgb *= saturate(color.a);
-                    color.a = 1.0f;
-                    return color;
-                }
-
                 float4 PSMainOpaque(VSOut input) : SV_TARGET
                 {
                     float4 color = sourceTexture.Sample(sourceSampler, input.uv);
@@ -2480,7 +2513,6 @@ namespace EventCaptureNative
             )";
 
             ComPtr<ID3DBlob> vertexBlob = CompileShader(shaderSource, "VSMain", "vs_5_0");
-            ComPtr<ID3DBlob> pixelBlob = CompileShader(shaderSource, "PSMain", "ps_5_0");
             ComPtr<ID3DBlob> opaquePixelBlob = CompileShader(shaderSource, "PSMainOpaque", "ps_5_0");
 
             ThrowIfFailed(device_->CreateVertexShader(
@@ -2488,12 +2520,6 @@ namespace EventCaptureNative
                 vertexBlob->GetBufferSize(),
                 nullptr,
                 &compositorVertexShader_));
-
-            ThrowIfFailed(device_->CreatePixelShader(
-                pixelBlob->GetBufferPointer(),
-                pixelBlob->GetBufferSize(),
-                nullptr,
-                &compositorPixelShader_));
 
             ThrowIfFailed(device_->CreatePixelShader(
                 opaquePixelBlob->GetBufferPointer(),
@@ -2530,7 +2556,6 @@ namespace EventCaptureNative
             ThrowIfFailed(device_->CreateSamplerState(&samplerDescription, &compositorSampler_));
 
             ComPtr<ID3D11Texture2D> nextEncoderTexture;
-            ComPtr<ID3D11Texture2D> nextBlackTexture;
             ComPtr<ID3D11VideoProcessorEnumerator> nextProcessorEnumerator;
             ComPtr<ID3D11VideoProcessor> nextProcessor;
             ComPtr<ID3D11VideoProcessorInputView> nextProcessorInput;
@@ -2541,7 +2566,6 @@ namespace EventCaptureNative
                 config_.outputWidth,
                 config_.outputHeight,
                 nextEncoderTexture,
-                nextBlackTexture,
                 nextProcessorEnumerator,
                 nextProcessor,
                 nextProcessorInput,
@@ -2549,123 +2573,10 @@ namespace EventCaptureNative
                 !useDdaShaderRotation_);
 
             encoderTexture_ = nextEncoderTexture;
-            blackTexture_ = nextBlackTexture;
             processorEnumerator_ = nextProcessorEnumerator;
             processor_ = nextProcessor;
             processorInput_ = nextProcessorInput;
             processorOutput_ = nextProcessorOutput;
-        }
-
-        void RenderWindowSourceToCanvas()
-        {
-            const uint32_t contentWidth = std::min<uint32_t>(
-                sourceContentWidth_ > 0 ? sourceContentWidth_ : sourceWidth_,
-                sourceWidth_);
-
-            const uint32_t contentHeight = std::min<uint32_t>(
-                sourceContentHeight_ > 0 ? sourceContentHeight_ : sourceHeight_,
-                sourceHeight_);
-
-            const uint32_t frameWidth = contentWidth;
-            const uint32_t frameHeight = contentHeight;
-
-            constexpr uint32_t windowEdgeGuardPixels = 2;
-            const uint32_t guardX = contentWidth > windowEdgeGuardPixels * 2 + 8
-                ? windowEdgeGuardPixels
-                : 0;
-
-            const uint32_t guardY = contentHeight > windowEdgeGuardPixels * 2 + 8
-                ? windowEdgeGuardPixels
-                : 0;
-
-            const uint32_t guardedContentWidth = contentWidth > guardX * 2
-                ? contentWidth - guardX * 2
-                : contentWidth;
-
-            const uint32_t guardedContentHeight = contentHeight > guardY * 2
-                ? contentHeight - guardY * 2
-                : contentHeight;
-
-            const uint32_t guardedFrameWidth = frameWidth > guardX * 2
-                ? frameWidth - guardX * 2
-                : frameWidth;
-
-            const uint32_t guardedFrameHeight = frameHeight > guardY * 2
-                ? frameHeight - guardY * 2
-                : frameHeight;
-
-            const uint32_t renderWidth = std::max<uint32_t>(
-                1,
-                std::min<uint32_t>(
-                    std::min<uint32_t>(guardedContentWidth, guardedFrameWidth),
-                    config_.outputWidth));
-
-            const uint32_t renderHeight = std::max<uint32_t>(
-                1,
-                std::min<uint32_t>(
-                    std::min<uint32_t>(guardedContentHeight, guardedFrameHeight),
-                    config_.outputHeight));
-
-            const RECT destination = CalculateCenteredActualSizeRect(renderWidth, renderHeight);
-            const uint32_t cropLeft = guardX + (guardedContentWidth > renderWidth ? (guardedContentWidth - renderWidth) / 2 : 0);
-            const uint32_t cropTop = guardY + (guardedContentHeight > renderHeight ? (guardedContentHeight - renderHeight) / 2 : 0);
-            const uint32_t cropRight = std::min<uint32_t>(sourceWidth_, cropLeft + renderWidth);
-            const uint32_t cropBottom = std::min<uint32_t>(sourceHeight_, cropTop + renderHeight);
-            const float u0 = static_cast<float>(cropLeft) / static_cast<float>(sourceWidth_);
-            const float v0 = static_cast<float>(cropTop) / static_cast<float>(sourceHeight_);
-            const float u1 = static_cast<float>(cropRight) / static_cast<float>(sourceWidth_);
-            const float v1 = static_cast<float>(cropBottom) / static_cast<float>(sourceHeight_);
-            const float outputWidth = static_cast<float>(config_.outputWidth);
-            const float outputHeight = static_cast<float>(config_.outputHeight);
-            const float left = (static_cast<float>(destination.left) / outputWidth) * 2.0f - 1.0f;
-            const float right = (static_cast<float>(destination.right) / outputWidth) * 2.0f - 1.0f;
-            const float top = 1.0f - (static_cast<float>(destination.top) / outputHeight) * 2.0f;
-            const float bottom = 1.0f - (static_cast<float>(destination.bottom) / outputHeight) * 2.0f;
-
-            const CompositorVertex vertices[]
-            {
-                { left, top, u0, v0 },
-                { right, top, u1, v0 },
-                { left, bottom, u0, v1 },
-                { left, bottom, u0, v1 },
-                { right, top, u1, v0 },
-                { right, bottom, u1, v1 }
-            };
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            ThrowIfFailed(context_->Map(compositorVertexBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
-            std::memcpy(mapped.pData, vertices, sizeof(vertices));
-            context_->Unmap(compositorVertexBuffer_.Get(), 0);
-
-            const FLOAT clearColor[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
-            context_->ClearRenderTargetView(canvasRenderTarget_.Get(), clearColor);
-
-            D3D11_VIEWPORT viewport{};
-            viewport.Width = static_cast<float>(config_.outputWidth);
-            viewport.Height = static_cast<float>(config_.outputHeight);
-            viewport.MinDepth = 0.0f;
-            viewport.MaxDepth = 1.0f;
-            context_->RSSetViewports(1, &viewport);
-
-            const UINT stride = sizeof(CompositorVertex);
-            const UINT offset = 0;
-            ID3D11Buffer* vertexBuffers[] { compositorVertexBuffer_.Get() };
-            ID3D11ShaderResourceView* shaderResources[] { latestShaderResource_.Get() };
-            ID3D11SamplerState* samplers[] { compositorSampler_.Get() };
-            ID3D11RenderTargetView* renderTargets[] { canvasRenderTarget_.Get() };
-
-            context_->IASetInputLayout(compositorInputLayout_.Get());
-            context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            context_->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
-            context_->VSSetShader(compositorVertexShader_.Get(), nullptr, 0);
-            context_->PSSetShader(compositorPixelShader_.Get(), nullptr, 0);
-            context_->PSSetShaderResources(0, 1, shaderResources);
-            context_->PSSetSamplers(0, 1, samplers);
-            context_->OMSetRenderTargets(1, renderTargets, nullptr);
-            context_->Draw(6, 0);
-
-            ID3D11ShaderResourceView* nullShaderResources[] { nullptr };
-            context_->PSSetShaderResources(0, 1, nullShaderResources);
         }
 
         void RenderDesktopDuplicationToCanvas()
@@ -3077,7 +2988,13 @@ namespace EventCaptureNative
                     wchar_t clsidText[64]{};
                     if (SUCCEEDED(activates[index]->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &candidateClsid)))
                     {
-                        StringFromGUID2(candidateClsid, clsidText, static_cast<int>(std::size(clsidText)));
+                        if (StringFromGUID2(
+                                candidateClsid,
+                                clsidText,
+                                static_cast<int>(std::size(clsidText))) == 0)
+                        {
+                            clsidText[0] = L'\0';
+                        }
                     }
 
                     {
@@ -3827,17 +3744,13 @@ namespace EventCaptureNative
             {
                 LogNative(L"EncodeLoop started.");
                 const int64_t frameDuration = TicksPerSecond / config_.framesPerSecond;
-                const bool useMonitorCfrScheduler =
-                    config_.targetKind == EcTargetKind::Monitor;
                 const auto fixedFrameInterval =
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::nanoseconds(frameDuration * 100));
-                int64_t nextFrameDue100ns = -1;
                 uint64_t monitorCfrFrameIndex = 0;
                 std::chrono::steady_clock::time_point nextMonitorCfrWake{};
                 std::chrono::steady_clock::time_point lastBlitDiagnostic{};
                 std::chrono::steady_clock::time_point lastSubmitDiagnostic{};
-                uint64_t lastEncodedTextureVersion = 0;
                 size_t lastMonitorCfrSlot = std::numeric_limits<size_t>::max();
 
                 while (running_)
@@ -3852,7 +3765,6 @@ namespace EventCaptureNative
                     ComPtr<ID3D11VideoProcessorInputView> selectedProcessorInput;
                     size_t preparedEncoderSurface = std::numeric_limits<size_t>::max();
 
-                    if (useMonitorCfrScheduler)
                     {
                         if (captureBackend_ == CaptureBackend::DesktopDuplication)
                         {
@@ -4038,96 +3950,12 @@ namespace EventCaptureNative
                             frameCondition_.notify_one();
                         }
                     }
-                    else
-                    {
-                        {
-                            std::unique_lock lock(textureMutex_);
-                            frameCondition_.wait(lock, [this, lastEncodedTextureVersion]
-                                {
-                                    return !running_ ||
-                                        (config_.targetKind == EcTargetKind::Monitor && !queuedMonitorFrameSlots_.empty()) ||
-                                        (config_.targetKind != EcTargetKind::Monitor && hasTexture_ && textureVersion_ != lastEncodedTextureVersion);
-                                });
-                            if (!running_) break;
-
-                            if (config_.targetKind == EcTargetKind::Monitor)
-                            {
-                                if (queuedMonitorFrameSlots_.empty()) continue;
-                                const size_t slotIndex = queuedMonitorFrameSlots_.front();
-                                queuedMonitorFrameSlots_.pop_front();
-                                if (slotIndex >= monitorFrameSlots_.size()) continue;
-                                selectedProcessorInput = monitorFrameSlots_[slotIndex].inputView;
-                                preparedCaptureTimestamp100ns = monitorFrameSlots_[slotIndex].captureTimestamp100ns;
-                                preparedTextureVersion = textureVersion_;
-                            }
-                            else
-                            {
-                                if (!hasTexture_ || textureVersion_ == lastEncodedTextureVersion) continue;
-
-                                if (config_.targetKind == EcTargetKind::Window)
-                                {
-                                    context_->CopyResource(encoderTexture_.Get(), blackTexture_.Get());
-                                    if (!windowSourceInvalid_.load())
-                                    {
-                                        RenderWindowSourceToCanvas();
-                                    }
-                                }
-
-                                selectedProcessorInput = processorInput_;
-                                preparedCaptureTimestamp100ns = CurrentTimestamp100ns();
-                                preparedTextureVersion = textureVersion_;
-                            }
-
-                            if (!(config_.targetKind == EcTargetKind::Window && windowSourceInvalid_.load()))
-                            {
-                                D3D11_VIDEO_PROCESSOR_STREAM stream{};
-                                stream.Enable = TRUE;
-                                stream.pInputSurface = selectedProcessorInput.Get();
-                                const auto blitStart = std::chrono::steady_clock::now();
-                                const HRESULT blit = videoContext_->VideoProcessorBlt(processor_.Get(), processorOutput_.Get(), 0, 1, &stream);
-                                const double blitMs = ElapsedMilliseconds(blitStart);
-                                LogNativeTimingIfSlow(L"VideoProcessorBlt", blitMs, 10.0);
-                                if (FAILED(blit))
-                                {
-                                    SetError(HResultMessage(blit));
-                                    continue;
-                                }
-                            }
-
-                            preparedEncoderTexture = encoderTexture_;
-
-                            framePrepared = true;
-                        }
-                    }
 
                     if (framePrepared)
                     {
-                        if (!useMonitorCfrScheduler)
-                        {
-                            if (nextFrameDue100ns < 0)
-                            {
-                                nextFrameDue100ns = preparedCaptureTimestamp100ns;
-                            }
-
-                            const int64_t pacingTolerance100ns = std::max<int64_t>(1, frameDuration / 4);
-                            if (preparedCaptureTimestamp100ns + pacingTolerance100ns < nextFrameDue100ns)
-                            {
-                                lastEncodedTextureVersion = preparedTextureVersion;
-                                continue;
-                            }
-
-                            do
-                            {
-                                nextFrameDue100ns += frameDuration;
-                            }
-                            while (nextFrameDue100ns <= preparedCaptureTimestamp100ns);
-                        }
-
                         try
                         {
-                            const int64_t submitTimestamp = useMonitorCfrScheduler
-                                ? preparedCaptureTimestamp100ns
-                                : static_cast<int64_t>(submittedFrames_.load()) * frameDuration;
+                            const int64_t submitTimestamp = preparedCaptureTimestamp100ns;
                             if (captureBackend_ == CaptureBackend::DesktopDuplication)
                             {
                                 if (!QueueConvertedQsvFrame(
@@ -4142,15 +3970,12 @@ namespace EventCaptureNative
                                     continue;
                                 }
                                 preparedEncoderSurface = std::numeric_limits<size_t>::max();
-                                lastEncodedTextureVersion = preparedTextureVersion;
                                 continue;
                             }
 
-                            const uint64_t submittedIndex = submittedFrames_.fetch_add(1);
+                            submittedFrames_.fetch_add(1);
                             AddDiagnosticTimestamp(submittedTimeline100ns_, preparedCaptureTimestamp100ns);
-                            const int64_t mftSubmitTimestamp = useMonitorCfrScheduler
-                                ? preparedCaptureTimestamp100ns
-                                : static_cast<int64_t>(submittedIndex) * frameDuration;
+                            const int64_t mftSubmitTimestamp = preparedCaptureTimestamp100ns;
                             const auto submitStart = std::chrono::steady_clock::now();
                             SubmitFrame(preparedEncoderTexture.Get(), mftSubmitTimestamp, frameDuration, preparedEncoderSurface);
                             const double submitMs = ElapsedMilliseconds(submitStart);
@@ -4169,14 +3994,13 @@ namespace EventCaptureNative
                                     << L" | DrainMs=" << drainMs
                                     << L" | Async=" << (useQsvEncoder_ || asyncEncoder_)
                                     << L" | EncoderBackend=" << (useQsvEncoder_ ? L"QSV" : L"MFT")
-                                    << L" | MonitorCfr=" << useMonitorCfrScheduler
+                                    << L" | MonitorCfr=1"
                                     << L" | Submitted=" << submittedFrames_.load()
                                     << L" | Encoded=" << encodedFrames_.load()
                                     << L" | Captured=" << capturedFrames_.load()
                                     << L" | TextureVersion=" << preparedTextureVersion;
                                 LogNativeTimingIfSlow(L"Encode submit/drain", submitMs + drainMs, 10.0, details.str());
                             }
-                            lastEncodedTextureVersion = preparedTextureVersion;
                         }
                         catch (const winrt::hresult_error& error)
                         {
@@ -4406,7 +4230,6 @@ namespace EventCaptureNative
             int64_t timestamp = CurrentTimestamp100ns();
             int64_t duration = configuredFrameDuration;
 
-            if (config_.targetKind == EcTargetKind::Monitor)
             {
                 int64_t sampleTimestamp = 0;
                 if (SUCCEEDED(sample->GetSampleTime(&sampleTimestamp)))
@@ -4419,13 +4242,6 @@ namespace EventCaptureNative
                 {
                     duration = sampleDuration;
                 }
-            }
-            else
-            {
-                if (lastPacketTimestamp100ns_ >= 0 && timestamp <= lastPacketTimestamp100ns_) timestamp = lastPacketTimestamp100ns_ + 1;
-                duration = lastPacketTimestamp100ns_ >= 0
-                    ? std::max<int64_t>(1, timestamp - lastPacketTimestamp100ns_)
-                    : configuredFrameDuration;
             }
 
             UINT32 cleanPoint = FALSE;
@@ -4914,7 +4730,7 @@ namespace EventCaptureNative
             frame.storageOffset = static_cast<uint64_t>(position);
             frame.storageLength = static_cast<uint32_t>(frame.bytes.size());
             bufferedBytes_.fetch_add(size);
-            if (config_.targetKind == EcTargetKind::Monitor && !packets_.empty())
+            if (!packets_.empty())
             {
                 packets_.back().duration100ns = std::max<int64_t>(
                     1,
@@ -5331,18 +5147,15 @@ namespace EventCaptureNative
             encoderSurfaceSlots_.clear();
             submittedEncoderSurfaces_.clear();
             encoderTexture_.Reset();
-            blackTexture_.Reset();
             compositorSampler_.Reset();
             compositorVertexBuffer_.Reset();
             compositorInputLayout_.Reset();
             ddaRotationPixelShader_.Reset();
-            compositorPixelShader_.Reset();
             compositorVertexShader_.Reset();
             canvasRenderTarget_.Reset();
             canvasTexture_.Reset();
             latestShaderResource_.Reset();
             latestTexture_.Reset();
-            latestRenderTarget_.Reset();
             videoContext_.Reset();
             videoDevice_.Reset();
             context_.Reset();
@@ -5399,12 +5212,10 @@ namespace EventCaptureNative
         mutable std::mutex textureMutex_;
         std::condition_variable frameCondition_;
         ComPtr<ID3D11Texture2D> latestTexture_;
-        ComPtr<ID3D11RenderTargetView> latestRenderTarget_;
         ComPtr<ID3D11ShaderResourceView> latestShaderResource_;
         ComPtr<ID3D11Texture2D> canvasTexture_;
         ComPtr<ID3D11RenderTargetView> canvasRenderTarget_;
         ComPtr<ID3D11VertexShader> compositorVertexShader_;
-        ComPtr<ID3D11PixelShader> compositorPixelShader_;
         ComPtr<ID3D11PixelShader> ddaRotationPixelShader_;
         ComPtr<ID3D11InputLayout> compositorInputLayout_;
         ComPtr<ID3D11Buffer> compositorVertexBuffer_;
@@ -5415,7 +5226,6 @@ namespace EventCaptureNative
         std::condition_variable encoderSurfaceCondition_;
         std::deque<size_t> submittedEncoderSurfaces_;
         size_t nextEncoderSurface_{};
-        ComPtr<ID3D11Texture2D> blackTexture_;
         ComPtr<ID3D11VideoProcessorEnumerator> processorEnumerator_;
         ComPtr<ID3D11VideoProcessor> processor_;
         ComPtr<ID3D11VideoProcessorInputView> processorInput_;
@@ -5429,15 +5239,11 @@ namespace EventCaptureNative
         bool ddaSourceTextureLogged_{};
         uint32_t sourceContentWidth_{};
         uint32_t sourceContentHeight_{};
-        uint32_t windowFrameWidth_{};
-        uint32_t windowFrameHeight_{};
         bool hasTexture_{ false };
         uint64_t textureVersion_{};
         std::vector<MonitorFrameSlot> monitorFrameSlots_;
         std::deque<size_t> queuedMonitorFrameSlots_;
         size_t nextMonitorFrameSlot_{};
-        HMONITOR initialWindowMonitor_{ nullptr };
-        std::atomic_bool windowSourceInvalid_{ false };
 
         ComPtr<IMFTransform> encoder_;
         std::unique_ptr<QsvEncoder> qsvEncoder_;
@@ -5544,4 +5350,50 @@ namespace EventCaptureNative
     EcResult VideoEngine::StopRecording(EcExportResult& result) { return implementation_->StopRecording(result); }
     EcResult VideoEngine::GetStats(EcVideoStats& stats) const { return implementation_->GetStats(stats); }
     std::wstring VideoEngine::LastError() const { return implementation_->LastError(); }
+
+    EcResult MuxReplayAudio(
+        const wchar_t* videoPath,
+        const wchar_t* audioPath,
+        const wchar_t* outputPath)
+    {
+        if (videoPath == nullptr || audioPath == nullptr || outputPath == nullptr)
+            return EcResult::InvalidArgument;
+
+        const HRESULT apartmentResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool uninitializeApartment = SUCCEEDED(apartmentResult);
+        if (FAILED(apartmentResult) && apartmentResult != RPC_E_CHANGED_MODE)
+            return EcResult::NativeFailure;
+
+        bool mediaFoundationStarted = false;
+        try
+        {
+            ThrowIfFailed(MFStartup(MF_VERSION, MFSTARTUP_FULL));
+            mediaFoundationStarted = true;
+            MuxReplayAudioCore(videoPath, audioPath, outputPath);
+            MFShutdown();
+            if (uninitializeApartment) CoUninitialize();
+            return EcResult::Ok;
+        }
+        catch (const winrt::hresult_error& error)
+        {
+            std::wstringstream message;
+            message << L"Replay audio mux failed with HRESULT 0x" << std::hex
+                << static_cast<uint32_t>(error.code()) << L": " << error.message().c_str();
+            LogNative(message.str());
+        }
+        catch (const std::exception& error)
+        {
+            LogNative(
+                L"Replay audio mux failed | std::exception | " +
+                std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())));
+        }
+        catch (...)
+        {
+            LogNative(L"Replay audio mux failed | unknown exception");
+        }
+
+        if (mediaFoundationStarted) MFShutdown();
+        if (uninitializeApartment) CoUninitialize();
+        return EcResult::NativeFailure;
+    }
 }

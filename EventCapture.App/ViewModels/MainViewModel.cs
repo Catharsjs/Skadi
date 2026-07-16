@@ -11,7 +11,6 @@ using EventCapture.App.Services;
 using EventCapture.Core.Capture;
 using EventCapture.Core.Diagnostics;
 using NAudio.CoreAudioApi;
-using NAudio.CoreAudioApi.Interfaces;
 namespace EventCapture.App.ViewModels;
 
 public sealed class MainViewModel : ObservableObject, IDisposable
@@ -88,7 +87,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isRecordStateChanging;
     private DateTimeOffset _recordingStartedAt;
     private TimeSpan _recordingElapsed;
-    private string _eventMessage = "Initializing captureвЂ¦";
+    private string _eventMessage = "Initializing capture...";
     private bool _isEventVisible = true;
     private double _targetPreviewOpacity = 1.0;
 
@@ -119,7 +118,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         _bufferEnabled = settings.BufferEnabled;
         _captureMode = FromStoredMode(settings.CaptureMode);
-        _selectedTargetValue = NormalizeCaptureTarget(settings.CaptureTarget);
+        _selectedTargetValue = settings.CaptureTarget;
         _resolution = FromStoredResolution(settings.Resolution);
         _quality = settings.VideoQuality switch { <= 50 => "Low", <= 70 => "Medium", _ => "High" };
         _frameRate = NormalizeFrameRate(settings.Fps);
@@ -233,6 +232,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public ICommand ExitCommand { get; }
     public ICommand SettingsLockedCommand { get; }
 
+    // Ініціалізація головної моделі та підсистем захоплення ...
     public async Task InitializeAsync()
     {
         StartDisplayChangeMonitoring();
@@ -259,6 +259,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _notifications.Show("Capture initialization failed");
         }
     }
+    // ...Ініціалізація головної моделі та підсистем захоплення
 
     public bool BufferEnabled
     {
@@ -464,12 +465,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private static string NormalizeCaptureTarget(string captureTarget)
-    {
-        return captureTarget.StartsWith("Window|", StringComparison.Ordinal)
-            ? "PrimaryMonitor"
-            : captureTarget;
-    }
     private void RefreshVisiblePreviews(
     bool selectStoredTarget = false,
     bool preserveMissingSelection = false)
@@ -1153,6 +1148,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    // Створення та збереження скріншота ...
     private async Task SaveScreenshotAsync()
     {
         var stopwatch = Stopwatch.StartNew();
@@ -1238,6 +1234,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             screenshotCts.Dispose();
         }
     }
+    // ...Створення та збереження скріншота
 
     private static bool IsSkadiPanelVisible()
     {
@@ -1248,6 +1245,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             .IsPanelVisible == true;
     }
 
+    // Збереження replay за командою користувача ...
     private async Task SaveRecordAsync()
     {
         AppLogger.Info($"UI state | Action=SaveReplay clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
@@ -1288,6 +1286,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _notifications.Show("Replay save failed");
         }
     }
+    // ...Збереження replay за командою користувача
 
     private void OnContinuousRecordingStopping(object? sender, EventArgs eventArgs)
     {
@@ -1318,6 +1317,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _notifications.Show(eventArgs.Message);
         });
     }
+    // Запуск або зупинка безперервного запису з UI ...
     private async Task ToggleContinuousRecordingAsync()
     {
         if (_isRecordStateChanging)
@@ -1375,7 +1375,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _isRecordStateChanging = false;
         }
     }
+    // ...Запуск або зупинка безперервного запису з UI
 
+    // Реєстрація глобальних гарячих клавіш ...
     private void ApplyHotkeys()
     {
         try
@@ -1416,6 +1418,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             LogEvent("Hotkey registration failed");
         }
     }
+    // ...Реєстрація глобальних гарячих клавіш
 
     private void QueueSettingsUpdate(bool restartCapture)
     {
@@ -1426,6 +1429,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _ = ApplySettingsAfterDelayAsync(_settingsCts.Token);
     }
 
+    // Відкладене застосування змінених налаштувань ...
     private async Task ApplySettingsAfterDelayAsync(
     CancellationToken token)
     {
@@ -1468,7 +1472,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 "Could not apply settings");
         }
     }
+    // ...Відкладене застосування змінених налаштувань
 
+    // Негайне застосування змінених налаштувань ...
     private async Task ApplySettingsImmediatelyAsync(
         bool restartCapture)
     {
@@ -1501,7 +1507,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 warning: true);
         }
     }
+    // ...Негайне застосування змінених налаштувань
 
+    // Негайне застосування стану replay buffer ...
     private async Task ApplyBufferStateImmediatelyAsync()
     {
         try
@@ -1532,6 +1540,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 warning: true);
         }
     }
+    // ...Негайне застосування стану replay buffer
 
     private void ApplyToSettings()
     {
@@ -1540,7 +1549,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.Resolution = ToStoredResolution(Resolution);
         _settings.BufferEnabled = BufferEnabled;
         _settings.CaptureMode = ToStoredMode(CaptureMode);
-        _settings.CaptureTarget = NormalizeCaptureTarget(_selectedTargetValue);
+        _settings.CaptureTarget = _selectedTargetValue;
         _settings.VideoQuality = Quality switch { "Low" => 50, "Medium" => 70, _ => 90 };
         _settings.RecordSystemAudio = SystemAudioEnabled;
         _settings.RecordMicrophone = MicrophoneEnabled;
@@ -1749,52 +1758,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private sealed class AudioDeviceNotificationClient
-    : IMMNotificationClient
-    {
-        private readonly Action _devicesChanged;
-
-        public AudioDeviceNotificationClient(
-            Action devicesChanged)
-        {
-            _devicesChanged = devicesChanged;
-        }
-
-        public void OnDeviceStateChanged(
-            string deviceId,
-            DeviceState newState)
-        {
-            _devicesChanged();
-        }
-
-        public void OnDeviceAdded(
-            string deviceId)
-        {
-            _devicesChanged();
-        }
-
-        public void OnDeviceRemoved(
-            string deviceId)
-        {
-            _devicesChanged();
-        }
-
-        public void OnDefaultDeviceChanged(
-            DataFlow flow,
-            Role role,
-            string defaultDeviceId)
-        {
-            _devicesChanged();
-        }
-
-        public void OnPropertyValueChanged(
-            string deviceId,
-            PropertyKey key)
-        {
-            _devicesChanged();
-        }
-    }
-
+    // Зупинка UI monitoring та звільнення ресурсів моделі ...
     public void Dispose()
     {
         if (_recordingTimer is not null)
@@ -1822,4 +1786,5 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _systemVolumeAnimationCts?.Dispose();
         _microphoneVolumeAnimationCts?.Dispose();
     }
+    // ...Зупинка UI monitoring та звільнення ресурсів моделі
 }
