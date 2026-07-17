@@ -116,25 +116,10 @@ jobs:
             Write-Error "Installer .exe was not found."
           }
 
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $assetName = "SkadiSetup-${{ github.ref_name }}.exe"
-            $releaseTag = "${{ github.ref_name }}"
-            $releaseName = "Skadi ${{ github.ref_name }}"
-            $prerelease = "false"
-          } else {
-            $assetName = "SkadiSetup-dev.exe"
-            $releaseTag = "dev-latest"
-            $releaseName = "Skadi dev latest"
-            $prerelease = "true"
-          }
-
-          $target = Join-Path $env:DIST_DIR $assetName
+          $target = Join-Path $env:DIST_DIR "SkadiSetup.exe"
           Copy-Item $source.FullName $target -Force
 
           "asset_path=$target" >> $env:GITHUB_OUTPUT
-          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
-          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
-          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -143,16 +128,38 @@ jobs:
           path: dist/*.exe
 
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.asset.outputs.release_tag }}
-          name: ${{ steps.asset.outputs.release_name }}
-          prerelease: ${{ steps.asset.outputs.prerelease }}
-          make_latest: false
+          tag_name: ${{ github.ref_name }}
+          name: Skadi
+          prerelease: false
+          make_latest: true
           overwrite_files: true
           files: dist/*.exe
           body: |
-            Automated Skadi build.
+            Skadi 2.0.2
 
             Commit: ${{ github.sha }}
-            Branch/Tag: ${{ github.ref_name }}
+            Tag: ${{ github.ref_name }}
+
+      - name: Remove legacy rolling release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repository = $env:GITHUB_REPOSITORY
+          $releaseJson = gh api "repos/$repository/releases/tags/dev-latest" 2>$null
+
+          if ($LASTEXITCODE -eq 0 -and $releaseJson) {
+            $release = $releaseJson | ConvertFrom-Json
+            gh api --method DELETE "repos/$repository/releases/$($release.id)"
+          }
+
+          $tagJson = gh api "repos/$repository/git/ref/tags/dev-latest" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $tagJson) {
+            gh api --method DELETE "repos/$repository/git/refs/tags/dev-latest"
+          }
+
+          exit 0

@@ -12,10 +12,10 @@ The recording and replay pipelines run in-process. Skadi does not bundle or laun
 
 ## Download and Install
 
-The current installer is:
+Download the current installer from the latest GitHub release:
 
 ```text
-Installer/Output/Skadi_Setup_v2.0.1.exe
+https://github.com/Catharsjs/Skadi/releases/latest/download/SkadiSetup.exe
 ```
 
 The installer targets x64 Windows and installs the .NET 10 Desktop Runtime when it is missing.
@@ -213,7 +213,7 @@ ISCC Installer\Skadi.iss
 Installer output:
 
 ```text
-Installer/Output/Skadi_Setup_v2.0.1.exe
+Installer/Output/SkadiSetup.exe
 ```
 
 ## Project Structure

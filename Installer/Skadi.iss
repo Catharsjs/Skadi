@@ -1,5 +1,5 @@
 #define AppName      "Skadi"
-#define AppVersion   "2.0.1"
+#define AppVersion   "2.0.2"
 #define AppPublisher "Catharsjs"
 #define AppExe       "Skadi.exe"
 #ifndef SourceDir
@@ -10,13 +10,14 @@
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#AppName}
 AppVersion={#AppVersion}
+AppVerName={#AppName}
 AppPublisher={#AppPublisher}
 AppPublisherURL=https://github.com/Catharsjs/Skadi
 AppSupportURL=https://github.com/Catharsjs/Skadi/issues
 AppUpdatesURL=https://github.com/Catharsjs/Skadi/releases
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
-OutputBaseFilename=Skadi_Setup_v2.0.1
+OutputBaseFilename=SkadiSetup
 #ifndef InstallerOutputDir
 #define InstallerOutputDir "Output"
 #endif
@@ -31,6 +32,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.19041
 SetupIconFile={#SourceDir}\EventCapture.ico
 UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayName={#AppName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

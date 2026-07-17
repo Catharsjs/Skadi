@@ -5,6 +5,10 @@
 		<TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
 		<ApplicationIcon>EventCapture.ico</ApplicationIcon>
 		<AssemblyName>Skadi</AssemblyName>
+		<Product>Skadi</Product>
+		<Version>2.0.2</Version>
+		<AssemblyVersion>2.0.2.0</AssemblyVersion>
+		<FileVersion>2.0.2.0</FileVersion>
 		<Nullable>enable</Nullable>
 		<UseWPF>true</UseWPF>
 		<UseWindowsForms>true</UseWindowsForms>
