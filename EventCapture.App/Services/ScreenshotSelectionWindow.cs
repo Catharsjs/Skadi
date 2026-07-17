@@ -53,11 +53,12 @@ internal sealed class ScreenshotSelectionWindow : Window
 
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
-        AllowsTransparency = true;
-        Background = WpfBrushes.Transparent;
+        AllowsTransparency = false;
+        Background = WpfBrushes.Black;
         Topmost = true;
         ShowInTaskbar = false;
         Focusable = true;
+        WindowStartupLocation = WindowStartupLocation.Manual;
         Cursor = WpfCursors.Cross;
 
         var root = new Grid();
@@ -142,11 +143,15 @@ internal sealed class ScreenshotSelectionWindow : Window
 
     public async Task ShowPreparedAsync()
     {
+        IsHitTestVisible = true;
         Show();
+        EnforceTopmostPlacement();
 
         await Dispatcher.InvokeAsync(
             () => { },
             DispatcherPriority.Render);
+
+        EnforceTopmostPlacement();
 
         var animation = new DoubleAnimation(
             0,
@@ -162,7 +167,6 @@ internal sealed class ScreenshotSelectionWindow : Window
 
         Opacity = 1;
         BeginAnimation(OpacityProperty, animation);
-        IsHitTestVisible = true;
         Activate();
         Focus();
     }
@@ -170,7 +174,6 @@ internal sealed class ScreenshotSelectionWindow : Window
     public async Task ResetForReuseAsync()
     {
         ReleaseMouseCapture();
-        IsHitTestVisible = false;
 
         if (IsVisible && Opacity > 0)
         {
@@ -201,6 +204,7 @@ internal sealed class ScreenshotSelectionWindow : Window
         _selectionRectangle.Visibility = Visibility.Collapsed;
 
         Hide();
+        IsHitTestVisible = false;
     }
 
     private static void CopyBitmapPixels(
@@ -296,7 +300,15 @@ internal sealed class ScreenshotSelectionWindow : Window
             Height = bottomRight.Y - topLeft.Y;
         }
 
-        SetWindowPos(
+        EnforceTopmostPlacement();
+    }
+
+    private void EnforceTopmostPlacement()
+    {
+        IntPtr handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        bool positioned = SetWindowPos(
             handle,
             HwndTopmost,
             _screen.Bounds.Left,
@@ -304,6 +316,11 @@ internal sealed class ScreenshotSelectionWindow : Window
             _screen.Bounds.Width,
             _screen.Bounds.Height,
             SwpShowWindow);
+
+        AppLogger.Info(
+            $"Screenshot selection window presented | Device={_screen.DeviceName} | " +
+            $"Topmost={Topmost} | HitTest={IsHitTestVisible} | Positioned={positioned} | " +
+            $"Bounds={_screen.Bounds}");
     }
 
     private void OnMouseLeftButtonDown(

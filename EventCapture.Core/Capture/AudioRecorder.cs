@@ -372,7 +372,7 @@ public sealed class AudioRecorder : IDisposable
             _nativeMicrophoneTimelineFrames = 0;
             _nativeSystemTimelineInitialized = false;
             _nativeMicrophoneTimelineInitialized = false;
-            _nativeMixClockPumped = sink is StreamingMp3Writer;
+            _nativeMixClockPumped = true;
             _nativeMixFailure = null;
         }
         _continuousRecording = true;
@@ -722,7 +722,7 @@ public sealed class AudioRecorder : IDisposable
             {
                 _nativeMixFailure ??= ex;
             }
-            AppLogger.Error(nameof(AudioRecorder), $"Continuous MP3 clock pump failed: {ex}");
+            AppLogger.Error(nameof(AudioRecorder), $"Continuous audio clock pump failed: {ex}");
         }
     }
 
@@ -788,16 +788,6 @@ public sealed class AudioRecorder : IDisposable
             int samplesToWrite = force
                 ? Math.Min(chunkSamples, maxAvailable - (maxAvailable % NativeMixChannels))
                 : synchronizedAvailable >= chunkSamples ? chunkSamples : 0;
-
-            if (!force &&
-                samplesToWrite == 0 &&
-                !_nativeMixClockPumped &&
-                _nativeMixSystemEnabled &&
-                _nativeMixMicrophoneEnabled &&
-                maxAvailable >= chunkSamples * 2)
-            {
-                samplesToWrite = chunkSamples;
-            }
 
             if (samplesToWrite <= 0)
                 break;
