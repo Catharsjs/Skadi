@@ -29,9 +29,17 @@ internal sealed class ScreenshotSelectionWindow : Window
     private static readonly TimeSpan FadeOutDuration = TimeSpan.FromMilliseconds(140);
     private static readonly IntPtr HwndTopmost = new(-1);
     private const uint SwpShowWindow = 0x0040;
+    private const uint SwpFrameChanged = 0x0020;
+    private const int GwlExStyle = -20;
+    private const int WsExTopmost = 0x00000008;
+    private const int WsExTransparent = 0x00000020;
+    private const int WsExLayered = 0x00080000;
+    private const int WmNcHitTest = 0x0084;
+    private const int HtClient = 1;
 
     private readonly DisplayMonitor _screen;
     private readonly Canvas _canvas;
+    private readonly Border _dimmingOverlay;
     private readonly ShapesRectangle _selectionRectangle;
     private WpfImage? _frozenImage;
     private WriteableBitmap? _reusableBitmap;
@@ -70,10 +78,13 @@ internal sealed class ScreenshotSelectionWindow : Window
 
         root.Children.Add(_frozenImage);
 
-        root.Children.Add(new Border
+        _dimmingOverlay = new Border
         {
-            Background = new SolidColorBrush(WpfColor.FromArgb(92, 0, 0, 0))
-        });
+            Background = new SolidColorBrush(WpfColor.FromArgb(92, 0, 0, 0)),
+            Opacity = 0
+        };
+
+        root.Children.Add(_dimmingOverlay);
 
         _canvas = new Canvas { Background = WpfBrushes.Transparent };
 
@@ -108,8 +119,8 @@ internal sealed class ScreenshotSelectionWindow : Window
         Bitmap frozenImage,
         Action<ScreenshotSelectionResult?> complete)
     {
-        BeginAnimation(OpacityProperty, null);
-        Opacity = 0;
+        _dimmingOverlay.BeginAnimation(OpacityProperty, null);
+        _dimmingOverlay.Opacity = 0;
         IsHitTestVisible = false;
 
         _complete = complete;
@@ -165,8 +176,8 @@ internal sealed class ScreenshotSelectionWindow : Window
             FillBehavior = FillBehavior.Stop
         };
 
-        Opacity = 1;
-        BeginAnimation(OpacityProperty, animation);
+        _dimmingOverlay.Opacity = 1;
+        _dimmingOverlay.BeginAnimation(OpacityProperty, animation);
         Activate();
         Focus();
     }
@@ -175,13 +186,13 @@ internal sealed class ScreenshotSelectionWindow : Window
     {
         ReleaseMouseCapture();
 
-        if (IsVisible && Opacity > 0)
+        if (IsVisible && _dimmingOverlay.Opacity > 0)
         {
             var completion = new TaskCompletionSource(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
             var animation = new DoubleAnimation(
-                Opacity,
+                _dimmingOverlay.Opacity,
                 0,
                 FadeOutDuration)
             {
@@ -193,12 +204,12 @@ internal sealed class ScreenshotSelectionWindow : Window
             };
 
             animation.Completed += (_, _) => completion.TrySetResult();
-            BeginAnimation(OpacityProperty, animation);
+            _dimmingOverlay.BeginAnimation(OpacityProperty, animation);
             await completion.Task;
         }
 
-        BeginAnimation(OpacityProperty, null);
-        Opacity = 0;
+        _dimmingOverlay.BeginAnimation(OpacityProperty, null);
+        _dimmingOverlay.Opacity = 0;
         _startPoint = null;
         _complete = null;
         _selectionRectangle.Visibility = Visibility.Collapsed;
@@ -277,6 +288,8 @@ internal sealed class ScreenshotSelectionWindow : Window
         var source =
             HwndSource.FromHwnd(handle);
 
+        source?.AddHook(WindowProcedure);
+
         if (source?.CompositionTarget is not null)
         {
             Matrix fromDevice =
@@ -308,6 +321,13 @@ internal sealed class ScreenshotSelectionWindow : Window
         IntPtr handle = new WindowInteropHelper(this).Handle;
         if (handle == IntPtr.Zero) return;
 
+        int originalExtendedStyle = GetWindowLong(handle, GwlExStyle);
+        int hardenedExtendedStyle = originalExtendedStyle &
+            ~WsExTransparent &
+            ~WsExLayered;
+        if (hardenedExtendedStyle != originalExtendedStyle)
+            SetWindowLong(handle, GwlExStyle, hardenedExtendedStyle);
+
         bool positioned = SetWindowPos(
             handle,
             HwndTopmost,
@@ -315,12 +335,39 @@ internal sealed class ScreenshotSelectionWindow : Window
             _screen.Bounds.Top,
             _screen.Bounds.Width,
             _screen.Bounds.Height,
-            SwpShowWindow);
+            SwpShowWindow | SwpFrameChanged);
+
+        int extendedStyle = GetWindowLong(handle, GwlExStyle);
+        bool rectangleAvailable = GetWindowRect(handle, out NativeRectangle rectangle);
+        var center = new NativePoint(
+            _screen.Bounds.Left + _screen.Bounds.Width / 2,
+            _screen.Bounds.Top + _screen.Bounds.Height / 2);
+        IntPtr windowAtCenter = WindowFromPoint(center);
 
         AppLogger.Info(
             $"Screenshot selection window presented | Device={_screen.DeviceName} | " +
             $"Topmost={Topmost} | HitTest={IsHitTestVisible} | Positioned={positioned} | " +
-            $"Bounds={_screen.Bounds}");
+            $"Bounds={_screen.Bounds} | NativeBounds={rectangleAvailable}:{rectangle} | " +
+            $"ExStyle=0x{extendedStyle:X8} | NativeTopmost={(extendedStyle & WsExTopmost) != 0} | " +
+            $"Layered={(extendedStyle & WsExLayered) != 0} | " +
+            $"Transparent={(extendedStyle & WsExTransparent) != 0} | " +
+            $"WindowAtCenter=0x{windowAtCenter.ToInt64():X} | Self=0x{handle.ToInt64():X}");
+    }
+
+    private IntPtr WindowProcedure(
+        IntPtr windowHandle,
+        int message,
+        IntPtr wordParameter,
+        IntPtr longParameter,
+        ref bool handled)
+    {
+        if (message == WmNcHitTest && IsVisible)
+        {
+            handled = true;
+            return new IntPtr(HtClient);
+        }
+
+        return IntPtr.Zero;
     }
 
     private void OnMouseLeftButtonDown(
@@ -517,4 +564,48 @@ internal sealed class ScreenshotSelectionWindow : Window
         int width,
         int height,
         uint flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLong(
+        IntPtr windowHandle,
+        int index);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLong(
+        IntPtr windowHandle,
+        int index,
+        int newValue);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(
+        IntPtr windowHandle,
+        out NativeRectangle rectangle);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(NativePoint point);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct NativePoint
+    {
+        public NativePoint(int x, int y)
+        {
+            X = x;
+            Y = y;
+        }
+
+        public readonly int X;
+        public readonly int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRectangle
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+
+        public override string ToString() =>
+            $"{{X={Left},Y={Top},Width={Right - Left},Height={Bottom - Top}}}";
+    }
 }
