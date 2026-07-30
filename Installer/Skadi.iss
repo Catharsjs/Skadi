@@ -1,5 +1,5 @@
 #define AppName      "Skadi"
-#define AppVersion   "2.0.2"
+#define AppVersion   "2.0.3"
 #define AppPublisher "Catharsjs"
 #define AppExe       "Skadi.exe"
 #ifndef SourceDir

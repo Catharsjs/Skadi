@@ -138,7 +138,7 @@ jobs:
           overwrite_files: true
           files: dist/*.exe
           body: |
-            Skadi 2.0.2
+            Skadi 2.0.3
 
             Commit: ${{ github.sha }}
             Tag: ${{ github.ref_name }}
