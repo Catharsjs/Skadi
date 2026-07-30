@@ -54,6 +54,8 @@ public sealed class GpuCapturePipeline : IDisposable, IContinuousAudioSink
 
     public bool IsRunning { get; private set; }
     public bool IsContinuousRecording => _continuousRawPath is not null;
+    public long CurrentContinuousRecordingBytes =>
+        GetFileLength(_continuousRawPath);
     public long StartTimestamp => _startTimestamp;
     public long FramesCaptured => checked((long)GetStats().CapturedFrames);
 
@@ -482,6 +484,22 @@ public sealed class GpuCapturePipeline : IDisposable, IContinuousAudioSink
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
     private static void TryDelete(string path) { try { File.Delete(path); } catch { } }
     private static void TryDeleteDirectory(string path) { try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch { } }
+
+    private static long GetFileLength(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return 0;
+        try
+        {
+            return File.Exists(path)
+                ? new FileInfo(path).Length
+                : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 }
 
 public sealed record ContinuousVideoResult(

@@ -8,7 +8,17 @@ namespace EventCapture.App.Services;
 
 public sealed class CaptureCoordinator : IAsyncDisposable
 {
+    [Flags]
+    private enum StorageSpaceIssue
+    {
+        None = 0,
+        Local = 1,
+        SelectedStorage = 2
+    }
+
     private const long MinimumRecordingFreeDiskBytes = 2L * 1024 * 1024 * 1024;
+    private const long DestinationMonitorReserveBytes =
+        1L * 1024 * 1024 * 1024;
     private static readonly TimeSpan RecordingDiskMonitorInterval = TimeSpan.FromSeconds(1);
     private readonly SemaphoreSlim _pipelineLock = new(1, 1);
     private readonly SemaphoreSlim _saveLock = new(1, 1);
@@ -20,11 +30,14 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     private Task? _recordingDiskMonitorTask;
     private CancellationTokenSource? _recordingPerformanceCts;
     private Task? _recordingPerformanceTask;
+    private CancellationTokenSource? _recordingDurationLimitCts;
+    private Task? _recordingDurationLimitTask;
     private bool _continuousNativeCombined;
     private StreamingMp3Writer? _continuousMp3Writer;
 
     public event EventHandler? ContinuousRecordingStopping;
     public event EventHandler<ContinuousRecordingStoppedEventArgs>? ContinuousRecordingStopped;
+    public event EventHandler? MediaDeliveryStarting;
     public long CapturedFrames => (long)(_videoPipeline?.FramesCaptured ?? 0);
     public bool IsContinuousRecording { get; private set; }
 
@@ -53,6 +66,11 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
         try
         {
+            EnsureSufficientRecordingDiskSpace(
+                _settings,
+                "SaveReplay",
+                includeDestination: false);
+
             string? result;
             if (_settings.CaptureMode == "Audio")
             {
@@ -95,6 +113,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
 
             if (string.IsNullOrWhiteSpace(result) || !File.Exists(result))
                 throw new InvalidOperationException("The replay could not be exported.");
+            result = await MediaFileDelivery.DeliverAsync(
+                result,
+                _settings.SmbFolder,
+                deliveryStarting: RaiseMediaDeliveryStarting);
             AppLogger.Info($"Coordinator state | Action=SaveReplay exit | Result={Path.GetFileName(result)} | Current={DescribeState()}");
             return result;
         }
@@ -197,6 +219,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 IsContinuousRecording = true;
                 StartRecordingDiskSpaceMonitor();
                 StartRecordingPerformanceMonitor();
+                StartRecordingDurationLimitMonitor();
                 AppLogger.Info($"Continuous recording started | Mode={_settings.CaptureMode}");
                 AppLogger.Info($"Coordinator state | Action=StartRecording exit | Current={DescribeState()}");
             }
@@ -334,6 +357,10 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 throw new InvalidOperationException("Continuous recording produced no media.");
             }
 
+            result = await MediaFileDelivery.DeliverAsync(
+                result,
+                _settings.SmbFolder,
+                deliveryStarting: RaiseMediaDeliveryStarting);
             IsContinuousRecording = false;
             _continuousNativeCombined = false;
             AppLogger.Info($"Continuous recording saved | Path={result}");
@@ -367,6 +394,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
             if (stopDiskMonitor)
                 StopRecordingDiskSpaceMonitor();
             StopRecordingPerformanceMonitor();
+            StopRecordingDurationLimitMonitor();
             _continuousLock.Release();
         }
     }
@@ -517,10 +545,20 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 if (token.IsCancellationRequested || !IsContinuousRecording || _settings is null)
                     continue;
 
-                if (HasSufficientRecordingDiskSpace(_settings, out string detail))
+                long currentRecordingBytes = GetCurrentRecordingBytes();
+                if (HasSufficientRecordingDiskSpace(
+                        _settings,
+                        currentRecordingBytes,
+                        detail: out string detail,
+                        issue: out StorageSpaceIssue issue,
+                        includeDestination: true))
                     continue;
 
-                AppLogger.Info($"Recording stopped, disk is full | {detail}");
+                string userMessage =
+                    $"Recording stopped. {GetStorageSpaceMessage(issue)}";
+                AppLogger.Info(
+                    $"{userMessage} | " +
+                    $"CurrentRecordingBytes={currentRecordingBytes} | {detail}");
                 ContinuousRecordingStopping?.Invoke(this, EventArgs.Empty);
                 string? path = null;
                 Exception? failure = null;
@@ -549,11 +587,12 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                         this,
                         new ContinuousRecordingStoppedEventArgs(
                             Forced: true,
-                            Message: "Recording stopped, disk is full",
+                            Message: userMessage,
                             Path: path,
                             Error: failure));
                     StopRecordingDiskSpaceMonitor();
                     StopRecordingPerformanceMonitor();
+                    StopRecordingDurationLimitMonitor();
                 }
 
                 break;
@@ -569,37 +608,78 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     }
     // ...Контроль вільного місця під час запису
 
-    private static void EnsureSufficientRecordingDiskSpace(AppSettings settings, string action)
+    private static void EnsureSufficientRecordingDiskSpace(
+        AppSettings settings,
+        string action,
+        bool includeDestination = true)
     {
-        if (HasSufficientRecordingDiskSpace(settings, out string detail))
+        if (HasSufficientRecordingDiskSpace(
+                settings,
+                currentRecordingBytes: 0,
+                detail: out string detail,
+                issue: out StorageSpaceIssue issue,
+                includeDestination: includeDestination))
             return;
 
-        AppLogger.Info($"Disk is full | Action={action} | {detail}");
-        throw new InvalidOperationException("Disk is full");
+        AppLogger.Info($"Storage space is low | Action={action} | {detail}");
+        throw new InvalidOperationException(
+            GetStorageSpaceMessage(issue));
     }
 
-    private static bool HasSufficientRecordingDiskSpace(AppSettings settings, out string detail)
+    private static bool HasSufficientRecordingDiskSpace(
+        AppSettings settings,
+        long currentRecordingBytes,
+        out string detail,
+        out StorageSpaceIssue issue,
+        bool includeDestination)
     {
         List<string> low = [];
-        foreach (string path in GetRecordingStoragePaths(settings))
-        {
-            try
-            {
-                Directory.CreateDirectory(path);
-                string? root = Path.GetPathRoot(Path.GetFullPath(path));
-                if (string.IsNullOrWhiteSpace(root))
-                    continue;
+        issue = StorageSpaceIssue.None;
+        bool hasRemoteDestination =
+            !string.IsNullOrWhiteSpace(settings.SmbFolder);
 
-                var drive = new DriveInfo(root);
-                long available = drive.AvailableFreeSpace;
-                if (available < MinimumRecordingFreeDiskBytes)
-                {
-                    low.Add($"Path={path} | Drive={drive.Name} | AvailableBytes={available} | RequiredBytes={MinimumRecordingFreeDiskBytes}");
-                }
-            }
-            catch (Exception ex)
+        if (!CheckStoragePath(
+            settings.SaveFolder,
+            MinimumRecordingFreeDiskBytes,
+            hasRemoteDestination ? "Local staging" : "Selected storage",
+            createIfMissing: true,
+            low))
+        {
+            issue |= hasRemoteDestination
+                ? StorageSpaceIssue.Local
+                : StorageSpaceIssue.SelectedStorage;
+        }
+
+        if (settings.BufferEnabled)
+        {
+            if (!CheckStoragePath(
+                Path.Combine(Path.GetTempPath(), "SkadiReplay"),
+                MinimumRecordingFreeDiskBytes,
+                "Replay staging",
+                createIfMissing: true,
+                low))
             {
-                low.Add($"Path={path} | Error={ex.Message} | RequiredBytes={MinimumRecordingFreeDiskBytes}");
+                issue |= StorageSpaceIssue.Local;
+            }
+        }
+
+        if (includeDestination &&
+            hasRemoteDestination)
+        {
+            string destinationPath = settings.SmbFolder!;
+            long requiredDestinationBytes = Math.Max(
+                MinimumRecordingFreeDiskBytes,
+                checked(
+                    currentRecordingBytes +
+                    DestinationMonitorReserveBytes));
+            if (!CheckStoragePath(
+                destinationPath,
+                requiredDestinationBytes,
+                "Destination",
+                createIfMissing: false,
+                low))
+            {
+                issue |= StorageSpaceIssue.SelectedStorage;
             }
         }
 
@@ -609,10 +689,66 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         return low.Count == 0;
     }
 
-    private static IEnumerable<string> GetRecordingStoragePaths(AppSettings settings)
+    private static bool CheckStoragePath(
+        string path,
+        long requiredBytes,
+        string role,
+        bool createIfMissing,
+        List<string> low)
     {
-        yield return settings.SaveFolder;
+        try
+        {
+            if (createIfMissing)
+                Directory.CreateDirectory(path);
+            else if (!Directory.Exists(path))
+                throw new DirectoryNotFoundException(
+                    "Storage does not exist.");
+
+            long availableBytes =
+                StorageSpaceService.GetAvailableFreeBytes(path);
+            if (availableBytes < requiredBytes)
+            {
+                low.Add(
+                    $"Role={role} | Path={path} | " +
+                    $"AvailableBytes={availableBytes} | " +
+                    $"RequiredBytes={requiredBytes}");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            low.Add(
+                $"Role={role} | Path={path} | Error={ex.Message} | " +
+                $"RequiredBytes={requiredBytes}");
+            return false;
+        }
     }
+
+    private static string GetStorageSpaceMessage(
+        StorageSpaceIssue issue) => issue switch
+        {
+            StorageSpaceIssue.Local |
+            StorageSpaceIssue.SelectedStorage =>
+                "Not enough local storage to process the recording, and " +
+                "not enough space on the selected storage.",
+            StorageSpaceIssue.Local =>
+                "Not enough local storage to process the recording.",
+            StorageSpaceIssue.SelectedStorage =>
+                "Not enough space on the selected storage.",
+            _ => "Not enough storage space."
+        };
+
+    private long GetCurrentRecordingBytes()
+    {
+        if (_settings?.CaptureMode == "Audio")
+            return _continuousMp3Writer?.CurrentRecordingBytes ?? 0;
+        return _videoPipeline?.CurrentContinuousRecordingBytes ?? 0;
+    }
+
+    private void RaiseMediaDeliveryStarting() =>
+        MediaDeliveryStarting?.Invoke(this, EventArgs.Empty);
 
     private static void CleanupRecordingTempFiles(string folder)
     {
@@ -776,6 +912,57 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         _recordingPerformanceTask = null;
     }
 
+    private void StartRecordingDurationLimitMonitor()
+    {
+        StopRecordingDurationLimitMonitor();
+
+        int limitMinutes = _settings?.RecordDurationLimitMinutes ?? 0;
+        if (limitMinutes <= 0)
+            return;
+
+        _recordingDurationLimitCts = new CancellationTokenSource();
+        CancellationToken token = _recordingDurationLimitCts.Token;
+        _recordingDurationLimitTask = Task.Run(
+            () => MonitorRecordingDurationLimitAsync(limitMinutes, token),
+            token);
+        AppLogger.Info($"Recording duration limit started | LimitMinutes={limitMinutes}");
+    }
+
+    private void StopRecordingDurationLimitMonitor()
+    {
+        try { _recordingDurationLimitCts?.Cancel(); } catch { }
+        _recordingDurationLimitCts?.Dispose();
+        _recordingDurationLimitCts = null;
+        _recordingDurationLimitTask = null;
+    }
+
+    private async Task MonitorRecordingDurationLimitAsync(
+        int limitMinutes,
+        CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMinutes(limitMinutes), token);
+            if (token.IsCancellationRequested || !IsContinuousRecording)
+                return;
+
+            await ForceStopContinuousRecordingAsync(
+                "Record duration limit reached",
+                $"LimitMinutes={limitMinutes}",
+                successMessage: "Record Saved",
+                failureMessage: "Recording stopped with an error");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(
+                nameof(CaptureCoordinator),
+                $"Recording duration limit monitor failed: {ex}");
+        }
+    }
+
     // Контроль продуктивності запису ...
     private async Task MonitorRecordingPerformanceAsync(CancellationToken token)
     {
@@ -867,7 +1054,11 @@ public sealed class CaptureCoordinator : IAsyncDisposable
     // ...Контроль продуктивності запису
 
     // Примусова безпечна зупинка запису ...
-    private async Task ForceStopContinuousRecordingAsync(string message, string detail)
+    private async Task ForceStopContinuousRecordingAsync(
+        string message,
+        string detail,
+        string? successMessage = null,
+        string? failureMessage = null)
     {
         if (!IsContinuousRecording)
             return;
@@ -906,12 +1097,15 @@ public sealed class CaptureCoordinator : IAsyncDisposable
                 this,
                 new ContinuousRecordingStoppedEventArgs(
                     Forced: true,
-                    Message: message,
+                    Message: failure is null
+                        ? successMessage ?? message
+                        : failureMessage ?? message,
                     Path: path,
                     Error: failure));
 
             StopRecordingDiskSpaceMonitor();
             StopRecordingPerformanceMonitor();
+            StopRecordingDurationLimitMonitor();
         }
     }
     // ...Примусова безпечна зупинка запису
@@ -921,9 +1115,8 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         if (_settings is null) return -1;
         try
         {
-            string? root = Path.GetPathRoot(Path.GetFullPath(_settings.SaveFolder));
-            if (string.IsNullOrWhiteSpace(root)) return -1;
-            return new DriveInfo(root).AvailableFreeSpace;
+            return StorageSpaceService.GetAvailableFreeBytes(
+                _settings.SaveFolder);
         }
         catch
         {
@@ -940,6 +1133,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         try { _videoPipeline?.Dispose(); } catch { }
         StopRecordingDiskSpaceMonitor();
         StopRecordingPerformanceMonitor();
+        StopRecordingDurationLimitMonitor();
         IsContinuousRecording = false;
         _continuousNativeCombined = false;
         _continuousMp3Writer = null;
@@ -992,6 +1186,7 @@ public sealed class CaptureCoordinator : IAsyncDisposable
         await StopAllAsync();
         StopRecordingDiskSpaceMonitor();
         StopRecordingPerformanceMonitor();
+        StopRecordingDurationLimitMonitor();
         _pipelineLock.Dispose();
         _saveLock.Dispose();
         _continuousLock.Dispose();

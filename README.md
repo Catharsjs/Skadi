@@ -34,7 +34,7 @@ The installer targets x64 Windows and installs the .NET 10 Desktop Runtime when 
 | Save Screenshot | `Alt+F1` |
 | Start/Stop Recording | `Alt+F2` |
 | Save Replay | `Alt+F3` |
-| Show/Hide UI | `Alt+Z` |
+| Show/Hide UI | `Alt+X` |
 
 Hotkeys can be changed or cleared in the UI.
 

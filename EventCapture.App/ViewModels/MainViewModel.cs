@@ -79,6 +79,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isMicrophoneInputEnabled;
     private string _saveFolder;
     private string _hudMode;
+    private string _recordDurationLimit;
     private string _screenshotHotkey;
     private string _recordHotkey;
     private string _startStopRecordHotkey;
@@ -112,6 +113,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _overlayViewModel = overlayViewModel;
         _capture.ContinuousRecordingStopping += OnContinuousRecordingStopping;
         _capture.ContinuousRecordingStopped += OnContinuousRecordingStopped;
+        _capture.MediaDeliveryStarting += OnMediaDeliveryStarting;
         _toggleUi = toggleUi;
         _ = exit;
         _updateTrayHotkeys = updateTrayHotkeys;
@@ -140,14 +142,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 : 0;
         _saveFolder = settings.SaveFolder;
         _hudMode = settings.HudMode;
+        _recordDurationLimit = FromStoredRecordDurationLimit(
+            settings.RecordDurationLimitMinutes);
         _screenshotHotkey = settings.HotkeyScreenshot;
         _recordHotkey = settings.HotkeySaveVideo;
         _startStopRecordHotkey = settings.HotkeyStartStopRecord;
         _toggleUiHotkey = settings.HotkeyToggleUI;
         UpdateCaptureSectionState(_captureMode, immediate: true);
 
-        OpenSaveFolderCommand = new RelayCommand(_ => OpenSaveFolder());
-        SelectFolderCommand = new AsyncRelayCommand(SelectFolderAsync);
+        OpenStorageCommand = new RelayCommand(_ => OpenStorage());
+        ChangeStorageCommand = new AsyncRelayCommand(ChangeStorageAsync);
         SaveScreenshotCommand = new AsyncRelayCommand(
             SaveScreenshotAsync,
             commandName: "SaveScreenshot",
@@ -219,8 +223,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public int[] FrameRates { get; } = [30, 60];
     public int[] BufferDurations { get; } = [15, 30, 60, 120];
 
-    public ICommand OpenSaveFolderCommand { get; }
-    public ICommand SelectFolderCommand { get; }
+    public ICommand OpenStorageCommand { get; }
+    public ICommand ChangeStorageCommand { get; }
     public ICommand SaveScreenshotCommand { get; }
     public ICommand SaveRecordCommand { get; }
     public ICommand StartStopRecordCommand { get; }
@@ -396,7 +400,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public bool IsSystemAudioInputEnabled { get => _isSystemAudioInputEnabled; private set => SetProperty(ref _isSystemAudioInputEnabled, value); }
     public bool IsMicrophoneInputEnabled { get => _isMicrophoneInputEnabled; private set => SetProperty(ref _isMicrophoneInputEnabled, value); }
-    public string SaveFolder { get => _saveFolder; set { if (SetProperty(ref _saveFolder, value)) QueueSettingsUpdate(false); } }
+    public string SaveFolder
+    {
+        get => _saveFolder;
+        set
+        {
+            if (!SetProperty(ref _saveFolder, value)) return;
+            OnPropertyChanged(nameof(DestinationFolder));
+            QueueSettingsUpdate(false);
+        }
+    }
+    public string DestinationFolder =>
+        string.IsNullOrWhiteSpace(_settings.SmbFolder)
+            ? SaveFolder
+            : _settings.SmbFolder;
     public string HudMode
     {
         get => _hudMode;
@@ -406,6 +423,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             if (!SetProperty(ref _hudMode, normalizedMode)) return;
             ApplyHudMode();
             LogEvent($"HUD: {normalizedMode}");
+            QueueSettingsUpdate(false);
+        }
+    }
+    public string RecordDurationLimit
+    {
+        get => _recordDurationLimit;
+        set
+        {
+            string normalizedLimit = value is "30 min" or "1 hour" or "2 hours"
+                ? value
+                : "Disabled";
+            if (!SetProperty(ref _recordDurationLimit, normalizedLimit)) return;
+            LogEvent($"RDL: {normalizedLimit}");
             QueueSettingsUpdate(false);
         }
     }
@@ -1111,40 +1141,91 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private static string? FindDeviceName(Dictionary<string, string?> map, string? id) =>
         map.FirstOrDefault(pair => pair.Value == id).Key;
 
-    private async Task SelectFolderAsync()
+    private async Task ChangeStorageAsync()
     {
-        var dialog = new Microsoft.Win32.OpenFolderDialog
-        {
-            Title = "Select Skadi save folder",
-            InitialDirectory = Directory.Exists(SaveFolder) ? SaveFolder : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
-        };
-        if (dialog.ShowDialog() == true)
-        {
-            SaveFolder = dialog.FolderName;
-            LogEvent($"Save folder: {Path.GetFileName(SaveFolder)}");
-        }
-        await Task.CompletedTask;
-    }
+        MainWindow? owner = System.Windows.Application.Current?.Windows
+            .OfType<MainWindow>()
+            .FirstOrDefault() ??
+            System.Windows.Application.Current?.MainWindow as MainWindow;
+        bool restorePanelVisible = owner?.IsPanelVisible == true;
+        bool restoreOwnerTopmost = owner?.Topmost == true;
+        bool restoreOwnerEnabled = owner?.IsEnabled ?? true;
 
-    private void OpenSaveFolder()
-    {
         try
         {
-            Directory.CreateDirectory(SaveFolder);
+            if (restorePanelVisible && owner is not null)
+                await owner.HidePanelAsync();
 
-            Process.Start(
-                new ProcessStartInfo
-                {
-                    FileName = SaveFolder,
-                    UseShellExecute = true
-                });
+            var dialog = new StorageBrowserWindow(DestinationFolder);
+            if (owner is not null)
+            {
+                owner.Topmost = false;
+                owner.IsEnabled = false;
+                dialog.Owner = owner;
+            }
 
-            LogEvent($"Opened folder: {Path.GetFileName(SaveFolder)}");
+            if (dialog.ShowDialog() != true ||
+                string.IsNullOrWhiteSpace(dialog.SelectedPath))
+                return;
+
+            string selectedPath = dialog.SelectedPath;
+            if (StoragePathService.IsRemote(selectedPath))
+            {
+                _settings.SmbFolder = selectedPath;
+            }
+            else
+            {
+                SaveFolder = selectedPath;
+                _settings.SmbFolder = null;
+            }
+
+            ApplyToSettings();
+            _settings.Save();
+            OnPropertyChanged(nameof(DestinationFolder));
+            LogEvent($"Storage changed: {selectedPath}");
+            _notifications.Show("Storage changed");
+        }
+        catch (OperationCanceledException)
+        {
+            LogEvent("Storage selection canceled");
         }
         catch (Exception ex)
         {
-            AppLogger.Error(nameof(MainViewModel), ex.ToString());
-            LogEvent("Could not open save folder", warning: true);
+            AppLogger.Error(nameof(MainViewModel), $"Storage selection failed: {ex}");
+            LogEvent(ex.Message, warning: true);
+            _notifications.Show("Storage connection failed");
+        }
+        finally
+        {
+            if (owner is not null)
+            {
+                owner.IsEnabled = restoreOwnerEnabled;
+                owner.Topmost = restoreOwnerTopmost;
+                if (restorePanelVisible)
+                    await owner.ShowPanelAsync();
+            }
+        }
+    }
+
+    private void OpenStorage()
+    {
+        try
+        {
+            string path = DestinationFolder;
+            Directory.CreateDirectory(path);
+            Process.Start(
+                new ProcessStartInfo
+                {
+                    FileName = path,
+                    UseShellExecute = true
+                });
+            LogEvent($"Opened storage: {path}");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(nameof(MainViewModel), $"Could not open storage: {ex}");
+            LogEvent("Could not open storage", warning: true);
+            _notifications.Show("Could not open storage");
         }
     }
 
@@ -1199,6 +1280,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            path = await MediaFileDelivery.DeliverAsync(
+                path,
+                _settings.SmbFolder,
+                screenshotCts.Token,
+                ShowStorageProcessing);
+
             AppLogger.Info($"Screenshot command completed | Path={path} | ElapsedMs={stopwatch.ElapsedMilliseconds}");
 
             LogEvent(
@@ -1209,6 +1296,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException)
         {
+            _notifications.Dismiss();
             AppLogger.Info($"Screenshot command canceled by display topology change | ElapsedMs={stopwatch.ElapsedMilliseconds}");
             LogEvent(
                 "Screenshot canceled");
@@ -1219,12 +1307,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 nameof(MainViewModel),
                 $"Screenshot command failed after {stopwatch.ElapsedMilliseconds} ms: {ex}");
 
-            LogEvent(
-                "Screenshot failed",
-                warning: true);
-
-            _notifications.Show(
-                "Screenshot failed");
+            string message = GetStorageFailureMessage(ex) ??
+                "Screenshot failed";
+            LogEvent(message, warning: true);
+            _notifications.Show(message);
         }
         finally
         {
@@ -1282,8 +1368,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
             AppLogger.Info($"UI state | Action=SaveReplay failed | Message={ex.Message} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
 
-            LogEvent(ex.Message);
-            _notifications.Show("Replay save failed");
+            string message = GetStorageFailureMessage(ex) ??
+                "Replay save failed";
+            LogEvent(message);
+            _notifications.Show(message);
         }
     }
     // ...Збереження replay за командою користувача
@@ -1300,6 +1388,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         });
     }
 
+    private void OnMediaDeliveryStarting(object? sender, EventArgs eventArgs) =>
+        ShowStorageProcessing();
+
+    private void ShowStorageProcessing()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        {
+            LogEvent("Processing...");
+            _notifications.ShowProgress("Processing...");
+        });
+    }
+
     private void OnContinuousRecordingStopped(object? sender, ContinuousRecordingStoppedEventArgs eventArgs)
     {
         _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
@@ -1313,7 +1413,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 $"Error={eventArgs.Error?.Message} | Buffer={BufferEnabled} | " +
                 $"CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
 
-            LogEvent(eventArgs.Message, warning: true);
+            LogEvent(
+                eventArgs.Message,
+                warning: eventArgs.Error is not null ||
+                         !string.Equals(
+                             eventArgs.Message,
+                             "Record Saved",
+                             StringComparison.Ordinal));
             _notifications.Show(eventArgs.Message);
         });
     }
@@ -1334,11 +1440,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (wasRecording)
             {
+                IsContinuousRecording = false;
                 string path = await _capture.StopContinuousRecordingAsync();
                 AppLogger.Info($"UI state | Action=StopRecording success-before-ui-state | Path={Path.GetFileName(path)} | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Frames={_capture.CapturedFrames}");
                 IsContinuousRecording = false;
                 LogEvent($"Record saved: {Path.GetFileName(path)}");
-                _notifications.Show("Record saved");
+                _notifications.Show("Record Saved");
                 return;
             }
 
@@ -1364,10 +1471,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                     ? wasRecording ? "Recording stop failed" : "Recording start failed"
                     : ex.Message,
                 warning: true);
-                        _notifications.Show(
-                string.Equals(ex.Message, "Disk is full", StringComparison.Ordinal)
-                    ? "Disk is full"
-                    : wasRecording ? "Recording stop failed" : "Recording start failed");
+            _notifications.Show(
+                GetStorageFailureMessage(ex) ??
+                (wasRecording
+                    ? "Recording stop failed"
+                    : "Recording start failed"));
         }
         finally
         {
@@ -1378,6 +1486,62 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     // ...Запуск або зупинка безперервного запису з UI
 
     // Реєстрація глобальних гарячих клавіш ...
+    private static string? GetStorageFailureMessage(Exception exception)
+    {
+        for (Exception? current = exception;
+             current is not null;
+             current = current.InnerException)
+        {
+            if (current.Message.StartsWith(
+                    "Not enough local storage to process the recording, and",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "Not enough local storage to process the recording, " +
+                       "and not enough space on the selected storage.";
+            }
+
+            if (current.Message.StartsWith(
+                    "Not enough local storage to process the recording",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "Not enough local storage to process the recording.";
+            }
+
+            if (current.Message.StartsWith(
+                    "Not enough space on the selected storage",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return current.Message.Contains(
+                        "retained locally",
+                        StringComparison.OrdinalIgnoreCase)
+                    ? "Not enough space on the selected storage. " +
+                      "File retained locally."
+                    : "Not enough space on the selected storage.";
+            }
+
+            // Compatibility with errors produced by older delivery paths.
+            if (current.Message.StartsWith(
+                    "Not enough space in storage",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return current.Message.Contains(
+                        "retained locally",
+                        StringComparison.OrdinalIgnoreCase)
+                    ? "Not enough space in storage. File retained locally."
+                    : "Not enough space in storage.";
+            }
+
+            if (current.Message.StartsWith(
+                    "Storage does not exist",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return "Storage does not exist. File retained locally.";
+            }
+        }
+
+        return null;
+    }
+
     private void ApplyHotkeys()
     {
         try
@@ -1563,6 +1727,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.HotkeyToggleUI = ToggleUiHotkey;
         _settings.SaveFolder = SaveFolder;
         _settings.HudMode = HudMode;
+        _settings.RecordDurationLimitMinutes =
+            ToStoredRecordDurationLimit(RecordDurationLimit);
     }
 
     private void UpdateCaptureSectionState(
@@ -1671,6 +1837,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             case "FrameRate": FrameRate = Cycle(FrameRates, FrameRate, direction); break;
             case "BufferDuration": BufferDuration = Cycle(BufferDurations, BufferDuration, direction); break;
             case "HudMode": HudMode = Cycle(["None", "Timer", "System Info"], HudMode, direction); break;
+            case "RecordDurationLimit": RecordDurationLimit = Cycle(["Disabled", "30 min", "1 hour", "2 hours"], RecordDurationLimit, direction); break;
         }
     }
 
@@ -1694,6 +1861,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private static string FromStoredMode(string mode) => mode == "VideoAudio" ? "Combined" : mode;
     private static string ToStoredMode(string mode) => mode == "Combined" ? "VideoAudio" : mode;
+    private static string FromStoredRecordDurationLimit(int minutes) => minutes switch
+    {
+        30 => "30 min",
+        60 => "1 hour",
+        120 => "2 hours",
+        _ => "Disabled"
+    };
+    private static int ToStoredRecordDurationLimit(string value) => value switch
+    {
+        "30 min" => 30,
+        "1 hour" => 60,
+        "2 hours" => 120,
+        _ => 0
+    };
     private static int NormalizeFrameRate(int value) => value <= 30 ? 30 : 60;
     private static bool IsWindows10()
     {
@@ -1773,6 +1954,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ScreenCapturer.ReleaseScreenshotCaptureResources();
         _capture.ContinuousRecordingStopping -= OnContinuousRecordingStopping;
         _capture.ContinuousRecordingStopped -= OnContinuousRecordingStopped;
+        _capture.MediaDeliveryStarting -= OnMediaDeliveryStarting;
 
         StopAudioDeviceMonitoring();
 

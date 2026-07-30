@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using EventCapture.Core.Diagnostics;
+using EventCapture.App.Services;
 using System.IO;
 namespace EventCapture.App;
 
@@ -23,18 +24,22 @@ public class AppSettings
     public int SystemAudioVolume { get; set; } = 100;
     public int MicVolume { get; set; } = 100;
     public string HudMode { get; set; } = "None";
+    public int RecordDurationLimitMinutes { get; set; }
 
     // Гарячі клавіші
     public string HotkeyScreenshot { get; set; } = "Alt+F1";
     public string HotkeySaveVideo { get; set; } = "Alt+F3";
     public string HotkeyStartStopRecord { get; set; } = "Alt+F2";
-    public string HotkeyToggleUI { get; set; } = "Alt+Z";
+    public string HotkeyToggleUI { get; set; } = "Alt+X";
 
 
     // Загальні налаштування ...
-    public string SaveFolder { get; set; } = Path.Combine(
+    public static string DefaultSaveFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
         "Skadi");
+
+    public string SaveFolder { get; set; } = DefaultSaveFolder;
+    public string? SmbFolder { get; set; }
     // ...Загальні налаштування
 
 
@@ -77,8 +82,11 @@ public class AppSettings
             settings.Fps = NormalizeFps(settings.Fps);
             settings.VideoQuality = NormalizeVideoQuality(settings.VideoQuality);
             settings.HudMode = NormalizeHudMode(settings.HudMode);
+            settings.RecordDurationLimitMinutes =
+                NormalizeRecordDurationLimit(settings.RecordDurationLimitMinutes);
             settings.CaptureTarget = NormalizeCaptureTarget(settings.CaptureTarget);
             settings.NormalizeHotkeys();
+            settings.NormalizeStoragePaths();
             return settings;
         }
         catch (Exception ex)
@@ -115,6 +123,9 @@ public class AppSettings
         _ => "None"
     };
 
+    private static int NormalizeRecordDurationLimit(int value) =>
+        value is 30 or 60 or 120 ? value : 0;
+
     private static string NormalizeCaptureTarget(string? captureTarget) =>
         !string.IsNullOrWhiteSpace(captureTarget) &&
         !captureTarget.StartsWith("Window|", StringComparison.Ordinal)
@@ -130,9 +141,30 @@ public class AppSettings
             HotkeyStartStopRecord = "Alt+F2";
         }
 
-        if (string.Equals(HotkeyToggleUI, "Alt+F3", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(HotkeyToggleUI, "Alt+F3", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(HotkeyToggleUI, "Alt+Z", StringComparison.OrdinalIgnoreCase))
         {
-            HotkeyToggleUI = "Alt+Z";
+            HotkeyToggleUI = "Alt+X";
+        }
+    }
+
+    private void NormalizeStoragePaths()
+    {
+        if (string.IsNullOrWhiteSpace(SaveFolder))
+            SaveFolder = DefaultSaveFolder;
+
+        if (StoragePathService.IsRemote(SaveFolder))
+        {
+            if (string.IsNullOrWhiteSpace(SmbFolder))
+                SmbFolder = SaveFolder;
+            SaveFolder = DefaultSaveFolder;
+        }
+
+        if (!string.IsNullOrWhiteSpace(SmbFolder) &&
+            !StoragePathService.IsRemote(SmbFolder))
+        {
+            SaveFolder = SmbFolder;
+            SmbFolder = null;
         }
     }
 

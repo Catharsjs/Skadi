@@ -58,6 +58,22 @@ public sealed class StreamingMp3Writer : IContinuousAudioSink, IDisposable
     }
 
     public string OutputPath { get; }
+    public long CurrentRecordingBytes
+    {
+        get
+        {
+            try
+            {
+                return File.Exists(_temporaryPath)
+                    ? new FileInfo(_temporaryPath).Length
+                    : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
 
     // Запуск потокового MP3 writer ...
     public static StreamingMp3Writer Start(string outputFolder, WaveFormat format) =>

@@ -162,12 +162,12 @@
                         Margin="0,0,0,8"/>
                 
                 <!-- Save Folder залишається доступним -->
-    <TextBlock Text="Save Folder"
+    <TextBlock Text="Storage"
        FontSize="18"
        Foreground="{StaticResource SecondaryTextBrush}"
        Margin="6,6,0,2"/>
 
-    <TextBlock Text="{Binding SaveFolder}"
+    <TextBlock Text="{Binding DestinationFolder}"
        FontSize="18"
        Foreground="{StaticResource AccentBrush}"
        Margin="6,0,0,5"
@@ -182,15 +182,15 @@
 
                     <Button Style="{StaticResource BaseButtonStyle}"
                             Height="36"
-                            Command="{Binding OpenSaveFolderCommand}"
+                            Command="{Binding OpenStorageCommand}"
                             Content="Browse"
                             FontSize="16"/>
 
                     <Button Grid.Column="2"
                             Style="{StaticResource BaseButtonStyle}"
                             Height="36"
-                            Command="{Binding SelectFolderCommand}"
-                            Content="Save Folder"
+                            Command="{Binding ChangeStorageCommand}"
+                            Content="Change Storage"
                             FontSize="16"/>
                 </Grid>
 
@@ -829,40 +829,77 @@
                         IsHitTestVisible="{Binding CanEditSettings}"
                         Style="{StaticResource FadeSectionStyle}">
 
-                            <Grid Height="50"
-                          Margin="6,2,6,0">
+                            <StackPanel>
+                                <Grid Height="50"
+                                      Margin="6,2,6,0">
 
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition Width="320"/>
-                                </Grid.ColumnDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
 
-                                <TextBlock Text="HUD"
-                                   FontSize="17"
-                                   VerticalAlignment="Center"/>
+                                    <TextBlock Text="HUD"
+                                               FontSize="17"
+                                               VerticalAlignment="Center"/>
 
-                                <Grid Grid.Column="1">
-                                    <Button Style="{StaticResource ArrowButtonStyle}"
-                                            Content="&#x25C0;"
-                                            Command="{Binding CycleVideoSettingCommand}"
-                                            CommandParameter="HudMode:-1"/>
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="&#x25C0;"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="HudMode:-1"/>
 
-                                    <controls:AnimatedTextBlock
-                                        Value="{Binding HudMode}"
-                                        Foreground="{StaticResource AccentBrush}"
-                                        FontFamily="Segoe UI"
-                                        FontSize="19"
-                                        FontWeight="SemiBold"
-                                        HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"/>
+                                        <controls:AnimatedTextBlock
+                                            Value="{Binding HudMode}"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
 
-                                    <Button HorizontalAlignment="Right"
-                                            Style="{StaticResource ArrowButtonStyle}"
-                                            Content="&#x25B6;"
-                                            Command="{Binding CycleVideoSettingCommand}"
-                                            CommandParameter="HudMode:1"/>
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="&#x25B6;"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="HudMode:1"/>
+                                    </Grid>
                                 </Grid>
-                            </Grid>
+
+                                <Grid Height="50"
+                                      Margin="6,0,6,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="320"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="RDL"
+                                               ToolTip="Record Duration Limit"
+                                               FontSize="17"
+                                               VerticalAlignment="Center"/>
+
+                                    <Grid Grid.Column="1">
+                                        <Button Style="{StaticResource ArrowButtonStyle}"
+                                                Content="&#x25C0;"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="RecordDurationLimit:-1"/>
+
+                                        <controls:AnimatedTextBlock
+                                            Value="{Binding RecordDurationLimit}"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            FontFamily="Segoe UI"
+                                            FontSize="19"
+                                            FontWeight="SemiBold"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"/>
+
+                                        <Button HorizontalAlignment="Right"
+                                                Style="{StaticResource ArrowButtonStyle}"
+                                                Content="&#x25B6;"
+                                                Command="{Binding CycleVideoSettingCommand}"
+                                                CommandParameter="RecordDurationLimit:1"/>
+                                    </Grid>
+                                </Grid>
+                            </StackPanel>
                         </Border>
 
                     </StackPanel>

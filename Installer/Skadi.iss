@@ -240,7 +240,7 @@ begin
       'Alt+F1 - Save Screenshot' + #13#10 +
       'Alt+F2 - Start/Stop Recording' + #13#10 +
       'Alt+F3 - Save Replay' + #13#10 +
-      'Alt+Z - Show/Hide UI' + #13#10#13#10 +
+      'Alt+X - Show/Hide UI' + #13#10#13#10 +
       'You can also open Skadi from the system tray.',
       mbInformation, MB_OK);
 end;

@@ -91,6 +91,15 @@ public partial class App : System.Windows.Application
     }
     private async Task ShowUiAsync()
     {
+        StorageBrowserWindow? storageDialog =
+            Windows.OfType<StorageBrowserWindow>()
+                .FirstOrDefault(window => window.IsVisible);
+        if (storageDialog is not null)
+        {
+            storageDialog.Activate();
+            return;
+        }
+
         if (_window is null || _window.IsPanelVisible)
             return;
 
@@ -99,7 +108,11 @@ public partial class App : System.Windows.Application
 
     private async Task ToggleUiAsync()
     {
-        if (_window is null) return;
+        if (_window is null ||
+            Windows.OfType<StorageBrowserWindow>()
+                .Any(window => window.IsVisible))
+            return;
+
         if (_window.IsPanelVisible) await _window.HidePanelAsync();
         else await _window.ShowPanelAsync();
     }

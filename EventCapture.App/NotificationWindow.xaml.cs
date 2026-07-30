@@ -7,10 +7,18 @@ namespace EventCapture.App;
 
 public partial class NotificationWindow : Window
 {
-    public NotificationWindow(string message)
+    private readonly bool _persistent;
+    private readonly CancellationTokenSource _lifetimeCts = new();
+
+    public NotificationWindow(string message, bool persistent = false)
     {
+        _persistent = persistent;
         InitializeComponent();
         MessageText.Text = message;
+        Closed += (_, _) =>
+        {
+            _lifetimeCts.Cancel();
+        };
         SourceInitialized += (_, _) =>
         {
             IntPtr handle = new WindowInteropHelper(this).Handle;
@@ -26,11 +34,20 @@ public partial class NotificationWindow : Window
             Top =
                 SystemParameters.WorkArea.Top + 12;
 
-            await FadeAsync(1);
-            await Task.Delay(1800);
-            await FadeAsync(0);
+            try
+            {
+                await FadeAsync(1);
+                if (_persistent)
+                    return;
 
-            Close();
+                await Task.Delay(1800, _lifetimeCts.Token);
+                await FadeAsync(0);
+                if (IsLoaded)
+                    Close();
+            }
+            catch (OperationCanceledException)
+            {
+            }
         };
     }
 
