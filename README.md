@@ -1,5 +1,10 @@
 # Skadi
 
+[![Release](https://img.shields.io/github/v/release/Catharsjs/Skadi?label=release)](https://github.com/Catharsjs/Skadi/releases/latest)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4)](#requirements)
+[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com/)
+[![License](https://img.shields.io/badge/license-source--available-lightgrey)](LICENSE.md)
+
 Skadi is a compact Windows desktop capture application with a WPF side-panel UI and a native GPU-accelerated recording pipeline.
 
 It runs in the background and provides three primary workflows:
@@ -19,6 +24,8 @@ https://github.com/Catharsjs/Skadi/releases/latest/download/SkadiSetup.exe
 ```
 
 The installer targets x64 Windows and installs the .NET 10 Desktop Runtime when it is missing.
+
+> The installer is currently not code-signed. Windows Defender SmartScreen may therefore ask for confirmation before the first installation.
 
 ## Requirements
 
@@ -81,7 +88,17 @@ Hotkeys can be changed or cleared in the UI.
 - Monitor topology changes safely stop an active recording
 - Replay buffer is restarted after monitor topology changes
 - Capture targets refresh with a fade transition
+- Optional recording duration limit: 30 minutes, 1 hour, or 2 hours
 - Recording and disk-performance diagnostics are written to the application logs
+
+### Storage
+
+- Custom storage browser for local folders, mapped network drives, and UNC paths
+- SMB authentication through the active Windows network session or user-supplied credentials
+- Credentials are used for the Windows session and are not stored in Skadi settings
+- Network-bound media is finalized locally before delivery to the selected storage
+- Uploads use a temporary destination file, verify the copied size, and then rename atomically
+- If network delivery fails, the completed local file is retained instead of being deleted
 
 ### UI
 
@@ -96,7 +113,7 @@ Hotkeys can be changed or cleared in the UI.
 ```text
 EventCapture.App
   WPF UI, MVVM, settings, hotkeys, tray, notifications, HUD,
-  capture orchestration and screenshot selection
+  capture orchestration, screenshot selection and media delivery
 
 EventCapture.Core
   audio capture and mixing, screenshot backends, replay export,
@@ -120,6 +137,7 @@ Selected monitor
     -> H.264 encoder
     -> fragmented MP4 mux/writer
     -> Record YYYY-MM-DD HH-mm-ss.mp4
+    -> optional verified delivery to network storage
 ```
 
 Frames are written continuously. A long recording is not accumulated as raw video in RAM.
@@ -142,6 +160,7 @@ Encoded H.264 packets + segmented audio
     -> snapshot requested by Save Replay
     -> in-process audio mix and Media Foundation mux
     -> Replay YYYY-MM-DD HH-mm-ss.mp4
+    -> optional verified delivery to network storage
 ```
 
 The replay buffer stores encoded packets and short audio segments, not uncompressed video frames.
@@ -155,6 +174,7 @@ Alt+F1
     -> full-monitor or region selection
     -> PNG encoding
     -> save file and update clipboard
+    -> optional verified delivery to network storage
     -> release frozen bitmaps and reusable capture resources when appropriate
 ```
 
@@ -164,6 +184,8 @@ Alt+F1
 - Replay video memory/storage is bounded by the configured replay duration.
 - Continuous video is streamed directly into a fragmented MP4 file.
 - Audio mode is streamed directly into MP3.
+- Network destinations use the local save folder as staging; only a finalized file is copied to the remote destination.
+- Network delivery requires free destination space for the file plus a 512 MiB reserve.
 - Screenshot working memory may temporarily grow while monitor-sized bitmaps and PNG buffers exist; those objects are disposed after the operation.
 - Windows and .NET may retain committed memory for reuse, so Task Manager working set does not always return immediately to its startup value.
 
@@ -206,6 +228,7 @@ The app project copies `EventCapture.Native.dll` and the required oneVPL runtime
 ## Build Installer
 
 ```powershell
+MSBuild EventCapture.slnx /t:Clean /p:Configuration=Release /p:Platform=x64
 MSBuild EventCapture.App\EventCapture.App.csproj /t:Restore,Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=false
 ISCC Installer\Skadi.iss
 ```
@@ -225,6 +248,7 @@ EventCapture.Native/    native GPU video engine and C ABI
 Installer/              Inno Setup installer
 ThirdParty/oneVPL/      pinned oneVPL runtime, import library, headers and license
 docs/screenshots/       README screenshots
+THIRD-PARTY-NOTICES.md  dependency licenses and attribution
 ```
 
 ## Known Platform Restrictions
@@ -236,13 +260,21 @@ docs/screenshots/       README screenshots
 
 ## Screenshots
 
-![Skadi Basic Settings](docs/screenshots/basicsettings.png)
-![Skadi Advanced Settings](docs/screenshots/advancedsettings.png)
+| Basic settings | Advanced settings |
+|---|---|
+| ![Skadi Basic Settings](docs/screenshots/basicsettings.png) | ![Skadi Advanced Settings](docs/screenshots/advancedsettings.png) |
+
+### Storage Browser
+
+![Skadi Storage Browser](docs/screenshots/storagebrowser.png)
 
 ## License
 
 Copyright (c) 2026 Catharsjs. All rights reserved.
 
-This repository is public for portfolio and source-code review purposes only. See [LICENSE.md](LICENSE.md) for the complete terms.
+The compiled application is free for personal, non-commercial use. Company, organizational, employment-related, and revenue-generating use requires a separate commercial license. See the [End-User License Agreement](EULA.txt).
+
+This repository is source-available for portfolio and source-code review purposes. The source code may not be redistributed or used commercially without written permission. See [LICENSE.md](LICENSE.md) for the complete source terms.
 
 Third-party components remain subject to their own licenses. The pinned oneVPL license is available at `ThirdParty/oneVPL/LICENSE.txt`.
+The complete dependency summary is available in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

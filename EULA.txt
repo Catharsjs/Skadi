@@ -1,0 +1,68 @@
+SKADI END-USER LICENSE AGREEMENT
+
+Effective date: July 31, 2026
+
+Copyright (c) 2026 Catharsjs. All rights reserved.
+
+This End-User License Agreement ("Agreement") governs the installation and use of the compiled Skadi application ("Software"). The Skadi source code is governed separately by LICENSE.md.
+
+By installing, copying, or using the Software, you agree to this Agreement. If you do not agree, do not install or use the Software.
+
+1. PERSONAL USE LICENSE
+
+The copyright holder grants an individual person a limited, non-exclusive, non-transferable license to install and use the Software free of charge for personal, non-commercial purposes.
+
+Personal use does not include work performed for an employer or client, activity intended to generate business revenue, or use on behalf of an organization.
+
+2. COMMERCIAL AND ORGANIZATIONAL USE
+
+A separate written commercial license is required to use the Software by or on behalf of a company, partnership, nonprofit organization, educational institution, government entity, employer, client, or any other organization.
+
+A commercial license is also required when the Software is:
+
+- installed on a company-owned or organization-managed device;
+- used by an employee, contractor, or service provider as part of their work;
+- used to provide paid services or generate business revenue;
+- centrally deployed, managed, or made available within an organization.
+
+Payment, scope, deployment rights, support, and duration are defined in the applicable commercial license agreement.
+
+Commercial licensing inquiries may be submitted through:
+https://github.com/Catharsjs/Skadi/issues
+
+3. RESTRICTIONS
+
+Unless explicitly permitted by a separate written agreement, you may not:
+
+- redistribute, sublicense, sell, rent, lease, host, or provide the Software to another person or organization;
+- modify, adapt, translate, or create derivative works from the Software;
+- remove or alter copyright, attribution, or proprietary notices;
+- reverse engineer, decompile, or disassemble the Software, except to the limited extent that applicable law expressly permits such activity.
+
+4. OWNERSHIP
+
+The Software is licensed, not sold. The copyright holder retains all ownership and intellectual-property rights in Skadi. This Agreement grants only the limited usage rights stated above.
+
+5. THIRD-PARTY COMPONENTS
+
+Third-party components included with the Software remain subject to their respective license terms. Their licenses and attribution are summarized in THIRD-PARTY-NOTICES.md. Nothing in this Agreement restricts rights granted directly by a third-party license.
+
+6. TERMINATION
+
+This license terminates automatically if you violate this Agreement. After termination, you must stop using the Software and remove all copies under your control. Terms concerning ownership, restrictions, warranty, and liability survive termination.
+
+7. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+8. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, LOSS, DAMAGE, OR OTHER LIABILITY ARISING FROM OR RELATED TO THE SOFTWARE OR ITS USE.
+
+9. SEVERABILITY
+
+If any provision of this Agreement is held unenforceable, the remaining provisions remain in effect to the fullest extent permitted by law.
+
+10. ENTIRE AGREEMENT
+
+This Agreement is the entire agreement for the free personal-use license. A separately signed commercial license may replace or supplement these terms for the licensed organization.

@@ -79,6 +79,9 @@ jobs:
         run: |
           $nativeDll = Join-Path "${{ steps.publish.outputs.publish_dir }}" "EventCapture.Native.dll"
           $vplDll = Join-Path "${{ steps.publish.outputs.publish_dir }}" "libvpl.dll"
+          $sourceLicense = Join-Path "${{ steps.publish.outputs.publish_dir }}" "LICENSE.md"
+          $eula = Join-Path "${{ steps.publish.outputs.publish_dir }}" "EULA.txt"
+          $thirdPartyNotices = Join-Path "${{ steps.publish.outputs.publish_dir }}" "THIRD-PARTY-NOTICES.md"
 
           if (!(Test-Path $nativeDll)) {
             Write-Error "EventCapture.Native.dll was not copied to publish directory."
@@ -86,6 +89,16 @@ jobs:
 
           if (!(Test-Path $vplDll)) {
             Write-Error "libvpl.dll was not copied to publish directory."
+          }
+
+          if (!(Test-Path $sourceLicense) -or !(Test-Path $eula) -or !(Test-Path $thirdPartyNotices)) {
+            Write-Error "Required license files were not copied to publish directory."
+          }
+
+          foreach ($forbiddenFile in @("ffmpeg.exe", "ffprobe.exe")) {
+            if (Test-Path (Join-Path "${{ steps.publish.outputs.publish_dir }}" $forbiddenFile)) {
+              Write-Error "$forbiddenFile must not be included in the Skadi release."
+            }
           }
 
       - name: Install Inno Setup
@@ -138,7 +151,7 @@ jobs:
           overwrite_files: true
           files: dist/*.exe
           body: |
-            Skadi 2.0.3
+            Skadi 2.0.4
 
             Commit: ${{ github.sha }}
             Tag: ${{ github.ref_name }}

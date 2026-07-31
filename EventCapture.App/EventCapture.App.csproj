@@ -6,9 +6,9 @@
 		<ApplicationIcon>EventCapture.ico</ApplicationIcon>
 		<AssemblyName>Skadi</AssemblyName>
 		<Product>Skadi</Product>
-		<Version>2.0.3</Version>
-		<AssemblyVersion>2.0.3.0</AssemblyVersion>
-		<FileVersion>2.0.3.0</FileVersion>
+		<Version>2.0.4</Version>
+		<AssemblyVersion>2.0.4.0</AssemblyVersion>
+		<FileVersion>2.0.4.0</FileVersion>
 		<Nullable>enable</Nullable>
 		<UseWPF>true</UseWPF>
 		<UseWindowsForms>true</UseWindowsForms>
@@ -37,6 +37,18 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
     <Content Include="..\ThirdParty\oneVPL\README.txt" Link="ThirdParty\oneVPL\README.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\LICENSE.md" Link="LICENSE.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\EULA.txt" Link="EULA.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

@@ -1,5 +1,5 @@
 #define AppName      "Skadi"
-#define AppVersion   "2.0.3"
+#define AppVersion   "2.0.4"
 #define AppPublisher "Catharsjs"
 #define AppExe       "Skadi.exe"
 #ifndef SourceDir
@@ -33,6 +33,7 @@ MinVersion=10.0.19041
 SetupIconFile={#SourceDir}\EventCapture.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
+LicenseFile=..\EULA.txt
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -50,9 +51,6 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\Skadi"
 
 [Code]
 const
