@@ -35,12 +35,7 @@ public partial class App : System.Windows.Application
         {
             string baseDirectory = AppContext.BaseDirectory;
             var settings = AppSettings.Load();
-            if (settings.BufferEnabled)
-            {
-                AppLogger.Info("Startup guard disabled persisted replay buffer before initializing capture.");
-                settings.BufferEnabled = false;
-                settings.Save();
-            }
+            AppLogger.Info($"Startup capture preferences | ReplayBufferRequested={settings.BufferEnabled}");
 
             _window = new MainWindow();
             _ = new System.Windows.Interop.WindowInteropHelper(_window).EnsureHandle();
@@ -124,6 +119,7 @@ public partial class App : System.Windows.Application
             return;
 
         _shutdownRequested = true;
+        _viewModel?.CancelStartup();
 
         try
         {

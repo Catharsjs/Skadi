@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ReleaseAssemblyDirectory Condition="'$(ReleaseAssemblyDirectory)' == ''">$(MSBuildThisFileDirectory)../../EventCapture.App/bin/x64/Release/net10.0-windows10.0.19041.0/win-x64/publish</ReleaseAssemblyDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Skadi">
+      <HintPath>$(ReleaseAssemblyDirectory)/Skadi.dll</HintPath>
+    </Reference>
+    <Reference Include="EventCapture.Core">
+      <HintPath>$(ReleaseAssemblyDirectory)/EventCapture.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="System.CodeDom">
+      <HintPath>$(ReleaseAssemblyDirectory)/System.CodeDom.dll</HintPath>
+    </Reference>
+    <Content Include="../../EventCapture.App/EventCapture.ico" Link="EventCapture.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(ReleaseAssemblyDirectory)/EventCapture.Native.dll" Link="EventCapture.Native.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(ReleaseAssemblyDirectory)/libvpl.dll" Link="libvpl.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../../EventCapture.App/Services/AtomicSettingsFile.cs" Link="AtomicSettingsFile.cs" />
+    <Compile Include="../../EventCapture.App/Services/StartupReplayRecovery.cs" Link="StartupReplayRecovery.cs" />
+  </ItemGroup>
+</Project>

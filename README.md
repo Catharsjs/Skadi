@@ -15,6 +15,13 @@ It runs in the background and provides three primary workflows:
 
 The recording and replay pipelines run in-process. Skadi does not bundle or launch FFmpeg.
 
+The panel and tray menu use WPF; no Windows Forms dependency is required.
+An enabled replay buffer is restored at startup, with up to four attempts if devices are temporarily unavailable.
+Failed startup preserves the user's preference and disables replay export until capture is running.
+Settings are committed atomically, with a backup of the previous version.
+
+Startup, settings persistence, and tray lifecycle regression checks run before installer publication.
+
 ## Download and Install
 
 Download the current installer from the latest GitHub release:

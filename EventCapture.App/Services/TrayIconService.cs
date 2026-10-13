@@ -1,482 +1,179 @@
-using System.Drawing;
-using System.Windows.Forms;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+using EventCapture.Core.Diagnostics;
 
 namespace EventCapture.App.Services;
 
 public sealed class TrayIconService : IDisposable
 {
-    private static readonly Color BackgroundColor =
-        Color.FromArgb(28, 28, 30);
-
-    private static readonly Color PrimaryTextColor =
-        Color.FromArgb(240, 240, 240);
-
-    private static readonly Color DangerColor =
-        Color.FromArgb(220, 80, 80);
-
-    private readonly NotifyIcon _icon;
-    private readonly Icon _trayIconImage;
-    private readonly ToolStripMenuItem _autoStartItem;
+    private const int CallbackMessage = 0x8001;
+    private readonly HwndSource _source;
+    private readonly ContextMenu _menu;
+    private readonly MenuItem _autoStartItem;
+    private readonly DispatcherTimer _retryTimer;
+    private readonly uint _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
+    private NotifyIconData _data;
+    private bool _added;
+    private bool _disposed;
 
     public event Action? ToggleUiRequested;
     public event Action? ExitRequested;
 
     public TrayIconService(string iconPath)
     {
-        var menu = new ContextMenuStrip
+        _source = new HwndSource(new HwndSourceParameters("Skadi.Tray")
         {
-            BackColor = BackgroundColor,
-            ForeColor = PrimaryTextColor,
-
-            Font = new Font(
-                "Segoe UI",
-                9.5f,
-                FontStyle.Regular),
-
-            ShowImageMargin = false,
-            ShowCheckMargin = false,
-
-            Padding = new Padding(1),
-            Renderer = new SkadiMenuRenderer()
+            Width = 0, Height = 0, WindowStyle = 0, ExtendedWindowStyle = 0x80
+        });
+        _source.AddHook(WndProc);
+        _data = new NotifyIconData
+        {
+            Size = (uint)Marshal.SizeOf<NotifyIconData>(), Window = _source.Handle,
+            Id = 1, Flags = 1 | 2 | 4, Callback = CallbackMessage,
+            Icon = LoadImage(IntPtr.Zero, iconPath, 1, 0, 0, 0x10 | 0x40),
+            Tip = "Skadi", Info = string.Empty, InfoTitle = string.Empty
         };
-
-        var openItem =
-            CreateMenuItem("Open Skadi");
-
-        _autoStartItem =
-            CreateMenuItem("Launch at Startup");
-
-        _autoStartItem.Text =
-    "Launch at Startup";
-
-        _autoStartItem.Checked =
-            AppSettings.IsAutoStartEnabled();
-        UpdateAutoStartAppearance();
-        var exitItem =
-            CreateMenuItem(
-                "Exit",
-                DangerColor);
-
-        openItem.Click += (_, _) =>
-            ToggleUiRequested?.Invoke();
-
-        _autoStartItem.CheckOnClick = false;
-
+        if (_data.Icon == IntPtr.Zero)
+        {
+            _source.Dispose();
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        _menu = new ContextMenu
+        {
+            Background = GetBrush("BackgroundBrush"), Foreground = GetBrush("PrimaryTextBrush"),
+            BorderBrush = GetBrush("BorderBrush"), BorderThickness = new Thickness(1),
+            FontFamily = new FontFamily("Segoe UI"), FontSize = 13,
+            Placement = PlacementMode.MousePoint
+        };
+        var style = new Style(typeof(MenuItem));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, GetBrush("BackgroundBrush")));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, GetBrush("PrimaryTextBrush")));
+        var template = new ControlTemplate(typeof(MenuItem));
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding("Background")
+            { RelativeSource = System.Windows.Data.RelativeSource.TemplatedParent });
+        var panel = new FrameworkElementFactory(typeof(StackPanel));
+        panel.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+        panel.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 7, 20, 7));
+        var label = new FrameworkElementFactory(typeof(ContentPresenter));
+        label.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        panel.AppendChild(label);
+        var check = new FrameworkElementFactory(typeof(TextBlock));
+        check.Name = "Check";
+        check.SetValue(TextBlock.TextProperty, "\u2713");
+        check.SetValue(TextBlock.ForegroundProperty, GetBrush("AccentBrush"));
+        check.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 0, 0, 0));
+        check.SetValue(UIElement.VisibilityProperty, Visibility.Hidden);
+        panel.AppendChild(check);
+        border.AppendChild(panel);
+        template.VisualTree = border;
+        var checkedTrigger = new Trigger { Property = MenuItem.IsCheckedProperty, Value = true };
+        checkedTrigger.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Visible, "Check"));
+        template.Triggers.Add(checkedTrigger);
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+        var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
+        hover.Setters.Add(new Setter(Control.BackgroundProperty, GetBrush("HoverBrush")));
+        style.Triggers.Add(hover);
+        _menu.Resources.Add(typeof(MenuItem), style);
+        var open = new MenuItem { Header = "Open Skadi" };
+        open.Click += (_, _) => ToggleUiRequested?.Invoke();
+        _autoStartItem = new MenuItem { Header = "Launch at Startup", StaysOpenOnClick = true };
         _autoStartItem.Click += (_, _) =>
         {
-            bool newState =
-                !_autoStartItem.Checked;
-
-            _autoStartItem.Checked =
-                newState;
-
-            AppSettings.SetAutoStart(
-                newState);
-
-            UpdateAutoStartAppearance();
-
-            menu.BeginInvoke(
-                new Action(() =>
-                {
-                    _autoStartItem.Select();
-                    menu.Refresh();
-                }));
-        };
-
-        exitItem.Click += (_, _) =>
-            ExitRequested?.Invoke();
-
-        menu.Opening += (_, _) =>
-        {
-            _autoStartItem.Checked =
-                AppSettings.IsAutoStartEnabled();
-
-            UpdateAutoStartAppearance();
-        };
-
-        bool keepMenuOpen = false;
-
-        menu.ItemClicked += (_, eventArgs) =>
-        {
-            keepMenuOpen =
-                ReferenceEquals(
-                    eventArgs.ClickedItem,
-                    _autoStartItem);
-        };
-
-        menu.Closing += (_, eventArgs) =>
-        {
-            if (eventArgs.CloseReason !=
-                    ToolStripDropDownCloseReason.ItemClicked ||
-                !keepMenuOpen)
+            try
             {
-                return;
+                AppSettings.SetAutoStart(!AppSettings.IsAutoStartEnabled());
+                _autoStartItem.IsChecked = AppSettings.IsAutoStartEnabled();
             }
-
-            eventArgs.Cancel = true;
-            keepMenuOpen = false;
-
-            menu.BeginInvoke(
-                new Action(() =>
-                {
-                    _autoStartItem.Select();
-                    _autoStartItem.Invalidate();
-                    menu.Refresh();
-                }));
+            catch (Exception ex) { AppLogger.Error(nameof(TrayIconService), ex.ToString()); }
         };
+        var exit = new MenuItem { Header = "Exit", Foreground = GetBrush("DangerBrush") };
+        exit.Click += (_, _) => ExitRequested?.Invoke();
+        _menu.Items.Add(open);
+        _menu.Items.Add(new Separator());
+        _menu.Items.Add(_autoStartItem);
+        _menu.Items.Add(new Separator());
+        _menu.Items.Add(exit);
+        _retryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _retryTimer.Tick += (_, _) => AddIcon();
+        AddIcon();
+    }
 
-        void UpdateAutoStartAppearance()
+    private static Brush GetBrush(string key) => (Brush)Application.Current.FindResource(key);
+
+    private void AddIcon()
+    {
+        if (_disposed) return;
+        _added = Shell_NotifyIcon(0, ref _data);
+        if (_added) _retryTimer.Stop();
+        else _retryTimer.Start();
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if ((uint)message == _taskbarCreated) AddIcon();
+        if (message == CallbackMessage)
         {
-            _autoStartItem.Invalidate();
-            menu.Invalidate();
+            handled = true;
+            if (lParam.ToInt32() == 0x203) ToggleUiRequested?.Invoke();
+            else if (lParam.ToInt32() is 0x205 or 0x7B)
+            {
+                _autoStartItem.IsChecked = AppSettings.IsAutoStartEnabled();
+                SetForegroundWindow(hwnd);
+                _menu.IsOpen = true;
+            }
         }
-
-        menu.Items.AddRange(
-        [
-            openItem,
-
-            CreateSeparator(),
-
-            _autoStartItem,
-
-            CreateSeparator(),
-
-            exitItem
-        ]);
-
-        _trayIconImage =
-            new Icon(iconPath);
-
-        _icon = new NotifyIcon
-        {
-            Text = "Skadi",
-            Icon = _trayIconImage,
-            ContextMenuStrip = menu,
-            Visible = true
-        };
-
-        _icon.DoubleClick += (_, _) =>
-            ToggleUiRequested?.Invoke();
+        return IntPtr.Zero;
     }
 
-    // Тимчасово залишається, оскільки App.xaml.cs
-    // може викликати цей метод.
-    public void UpdateHotkeys(
-        string screenshot,
-        string record)
+    public void UpdateHotkeys(string screenshot, string record)
     {
-    }
-
-    private static ToolStripMenuItem CreateMenuItem(
-        string text,
-        Color? textColor = null)
-    {
-        return new ToolStripMenuItem
-        {
-            Text = text,
-
-            ForeColor =
-                textColor ?? PrimaryTextColor,
-
-            BackColor = BackgroundColor,
-
-            Padding = new Padding(
-                left: 10,
-                top: 5,
-                right: 24,
-                bottom: 5),
-
-            AutoSize = true
-        };
-    }
-
-    private static ToolStripSeparator CreateSeparator()
-    {
-        return new ToolStripSeparator
-        {
-            Margin = new Padding(
-                left: 10,
-                top: 3,
-                right: 10,
-                bottom: 3)
-        };
+        string tip = $"Skadi\nScreenshot: {screenshot}\nReplay: {record}";
+        _data.Tip = tip.Length > 127 ? tip[..127] : tip;
+        if (_added && !_disposed) Shell_NotifyIcon(1, ref _data);
     }
 
     public void Dispose()
     {
-        _icon.Visible = false;
-
-        _icon.ContextMenuStrip?.Dispose();
-        _icon.Dispose();
-        _trayIconImage.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+        _retryTimer.Stop();
+        _menu.IsOpen = false;
+        if (_added) Shell_NotifyIcon(2, ref _data);
+        _source.RemoveHook(WndProc);
+        _source.Dispose();
+        DestroyIcon(_data.Icon);
     }
 
-    private sealed class SkadiMenuRenderer :
-        ToolStripProfessionalRenderer
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NotifyIconData
     {
-        private static readonly Color Background =
-            Color.FromArgb(28, 28, 30);
-
-        private static readonly Color Hover =
-            Color.FromArgb(50, 50, 54);
-
-        private static readonly Color Border =
-            Color.FromArgb(58, 58, 62);
-
-        private static readonly Color Accent =
-            Color.FromArgb(0, 196, 160);
-
-        public SkadiMenuRenderer()
-            : base(new SkadiColorTable())
-        {
-            RoundedEdges = false;
-        }
-
-        protected override void OnRenderToolStripBackground(
-            ToolStripRenderEventArgs e)
-        {
-            using var brush =
-                new SolidBrush(Background);
-
-            e.Graphics.FillRectangle(
-                brush,
-                e.AffectedBounds);
-        }
-
-        protected override void OnRenderImageMargin(
-            ToolStripRenderEventArgs e)
-        {
-            // Image margin навмисно не малюється.
-        }
-
-        protected override void OnRenderMenuItemBackground(
-     ToolStripItemRenderEventArgs e)
-        {
-            Color color =
-                e.Item.Selected
-                    ? Hover
-                    : Background;
-
-            using var brush =
-                new SolidBrush(color);
-
-            e.Graphics.FillRectangle(
-                brush,
-                new Rectangle(
-                    Point.Empty,
-                    e.Item.Size));
-        }
-
-        protected override void OnRenderItemText(
-     ToolStripItemTextRenderEventArgs e)
-        {
-            if (e.Item is not ToolStripMenuItem)
-            {
-                base.OnRenderItemText(e);
-                return;
-            }
-
-            string[] parts =
-                (e.Text ?? string.Empty).Split('\t', 2);
-
-            const int leftPadding = 12;
-            const int rightPadding = 34;
-
-            var mainTextBounds =
-                new Rectangle(
-                    leftPadding,
-                    0,
-                    e.Item.Width -
-                    leftPadding -
-                    rightPadding,
-                    e.Item.Height);
-
-            TextRenderer.DrawText(
-                e.Graphics,
-                parts[0],
-                e.TextFont,
-                mainTextBounds,
-                e.TextColor,
-                TextFormatFlags.Left |
-                TextFormatFlags.VerticalCenter |
-                TextFormatFlags.SingleLine |
-                TextFormatFlags.NoPrefix);
-
-           
-        }
-
-        protected override void OnRenderSeparator(
-            ToolStripSeparatorRenderEventArgs e)
-        {
-            int y =
-                e.Item.Height / 2;
-
-            using var pen =
-                new Pen(Border);
-
-            e.Graphics.DrawLine(
-                pen,
-                10,
-                y,
-                e.Item.Width - 10,
-                y);
-        }
-
-        protected override void OnRenderToolStripBorder(
-        ToolStripRenderEventArgs e)
-        {
-            if (e.ToolStrip is not { } toolStrip)
-                return;
-
-            using var borderPen =
-                new Pen(Border);
-
-            e.Graphics.DrawRectangle(
-                borderPen,
-                0,
-                0,
-                toolStrip.Width - 1,
-                toolStrip.Height - 1);
-
-            foreach (ToolStripItem stripItem
-                     in toolStrip.Items)
-            {
-                if (stripItem is ToolStripMenuItem
-                    {
-                        Checked: true
-                    })
-                {
-                    DrawRightCheckMark(
-                     e.Graphics,
-                     (ToolStripMenuItem)stripItem);
-                }
-            }
-        }
-        private static void DrawRightCheckMark(
-     Graphics graphics,
-     ToolStripMenuItem item)
-        {
-            const int leftPadding = 12;
-            const int gapAfterText = 12;
-
-            string visibleText =
-                (item.Text ?? string.Empty).Split('\t', 2)[0];
-
-            Size textSize =
-                TextRenderer.MeasureText(
-                    visibleText,
-                    item.Font,
-                    new Size(
-                        int.MaxValue,
-                        int.MaxValue),
-                    TextFormatFlags.SingleLine |
-                    TextFormatFlags.NoPrefix |
-                    TextFormatFlags.NoPadding);
-
-            int checkSize =
-            Math.Max(
-                10,
-                item.Font.Height * 72 / 100);
-
-            int checkLeft =
-                item.Bounds.Left +
-                leftPadding +
-                textSize.Width +
-                gapAfterText;
-
-            int centerX =
-                checkLeft +
-                checkSize / 2;
-
-            int centerY =
-                item.Bounds.Top +
-                item.Bounds.Height / 2;
-
-            float penWidth =
-             Math.Max(
-                 1.8f,
-                 checkSize * 0.12f);
-
-            using var pen =
-                new Pen(
-                    Accent,
-                    penWidth)
-                {
-                    StartCap =
-                        System.Drawing.Drawing2D
-                            .LineCap.Round,
-
-                    EndCap =
-                        System.Drawing.Drawing2D
-                            .LineCap.Round,
-
-                    LineJoin =
-                        System.Drawing.Drawing2D
-                            .LineJoin.Round
-                };
-
-            graphics.SmoothingMode =
-                System.Drawing.Drawing2D
-                    .SmoothingMode.AntiAlias;
-
-            graphics.DrawLines(
-                pen,
-                [
-                    new PointF(
-                centerX - checkSize * 0.42f,
-                centerY),
-
-            new PointF(
-                centerX - checkSize * 0.10f,
-                centerY + checkSize * 0.30f),
-
-            new PointF(
-                centerX + checkSize * 0.48f,
-                centerY - checkSize * 0.40f)
-                ]);
-        }
+        public uint Size;
+        public IntPtr Window;
+        public uint Id, Flags, Callback;
+        public IntPtr Icon;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Tip;
+        public uint State, StateMask;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Info;
+        public uint TimeoutOrVersion;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string InfoTitle;
+        public uint InfoFlags;
+        public Guid Guid;
+        public IntPtr BalloonIcon;
     }
 
-    private sealed class SkadiColorTable :
-        ProfessionalColorTable
-    {
-        private static readonly Color Background =
-            Color.FromArgb(28, 28, 30);
-
-        private static readonly Color Hover =
-            Color.FromArgb(50, 50, 54);
-
-        private static readonly Color Border =
-            Color.FromArgb(58, 58, 62);
-
-        public override Color ToolStripDropDownBackground =>
-            Background;
-
-        public override Color ImageMarginGradientBegin =>
-            Background;
-
-        public override Color ImageMarginGradientMiddle =>
-            Background;
-
-        public override Color ImageMarginGradientEnd =>
-            Background;
-
-        public override Color MenuItemSelected =>
-            Hover;
-
-        public override Color MenuItemSelectedGradientBegin =>
-            Hover;
-
-        public override Color MenuItemSelectedGradientEnd =>
-            Hover;
-
-        public override Color MenuBorder =>
-            Border;
-
-        public override Color SeparatorDark =>
-            Border;
-
-        public override Color SeparatorLight =>
-            Border;
-    }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Shell_NotifyIcon(uint message, ref NotifyIconData data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadImage(IntPtr instance, string name, uint type, int width, int height, uint flags);
+    [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RegisterWindowMessage(string message);
 }

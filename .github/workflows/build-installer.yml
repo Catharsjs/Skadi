@@ -58,7 +58,11 @@ jobs:
             /p:PublishSingleFile=false `
             /m
 
-      - name: Locate publish output
+      - name: Run startup and settings regression checks
+        shell: pwsh
+        run: dotnet run --project tests/Skadi.Regression/Skadi.Regression.csproj --configuration Release -p:Platform=x64
+
+      - name: Locate release publish output
         id: publish
         shell: pwsh
         run: |
@@ -95,7 +99,7 @@ jobs:
             Write-Error "Required license files were not copied to publish directory."
           }
 
-          foreach ($forbiddenFile in @("ffmpeg.exe", "ffprobe.exe")) {
+          foreach ($forbiddenFile in @("ffmpeg.exe", "ffprobe.exe", "NAudio.WinForms.dll", "System.Windows.Forms.dll")) {
             if (Test-Path (Join-Path "${{ steps.publish.outputs.publish_dir }}" $forbiddenFile)) {
               Write-Error "$forbiddenFile must not be included in the Skadi release."
             }
@@ -151,7 +155,7 @@ jobs:
           overwrite_files: true
           files: dist/*.exe
           body: |
-            Skadi 2.0.4
+            Skadi 2.0.5
 
             Commit: ${{ github.sha }}
             Tag: ${{ github.ref_name }}

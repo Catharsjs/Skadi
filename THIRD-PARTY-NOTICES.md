@@ -18,7 +18,7 @@ The complete oneVPL MIT license text is distributed at `ThirdParty/oneVPL/LICENS
 | BlackSharp.Core | 1.0.12 | MPL-2.0 | [BlackSharp](https://github.com/Blacktempel/BlackSharp) |
 | DiskInfoToolkit | 2.0.3 | MPL-2.0 | [DiskInfoToolkit](https://github.com/Blacktempel/DiskInfoToolkit) |
 | RAMSPDToolkit-NDD | 1.5.0 | MPL-2.0 | [RAMSPDToolkit](https://github.com/Blacktempel/RAMSPDToolkit) |
-| NAudio and NAudio component packages | 2.3.0 | MIT | [NAudio](https://github.com/naudio/NAudio) |
+| NAudio.Core, NAudio.Wasapi, NAudio.WinMM | 2.3.0 | MIT | [NAudio](https://github.com/naudio/NAudio) |
 | SharpDX, SharpDX.Direct3D11, SharpDX.DXGI | 4.2.0 | MIT | [SharpDX](https://github.com/sharpdx/SharpDX) |
 | HidSharp | 2.6.4 | package license | [HidSharp](https://www.nuget.org/packages/HidSharp/2.6.4) |
 | Mono.Posix.NETStandard | 1.0.0 | package license | [Mono.Posix.NETStandard](https://www.nuget.org/packages/Mono.Posix.NETStandard/1.0.0) |

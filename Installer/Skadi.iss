@@ -1,5 +1,5 @@
 #define AppName      "Skadi"
-#define AppVersion   "2.0.4"
+#define AppVersion   "2.0.5"
 #define AppPublisher "Catharsjs"
 #define AppExe       "Skadi.exe"
 #ifndef SourceDir
@@ -43,6 +43,11 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: files; Name: "{app}\NAudio.WinForms.dll"
+Type: files; Name: "{app}\NAudio.Asio.dll"
+Type: files; Name: "{app}\NAudio.dll"
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"

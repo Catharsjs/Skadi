@@ -51,6 +51,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _suppressAudioDeviceChangeEvents;
     private int _captureSectionTransitionVersion;
     private bool _initializing = true;
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private CancellationTokenSource? _startupReplayCts;
+    private string _replayState = "Disabled";
+    public string ReplayState
+    {
+        get => _replayState;
+        private set
+        {
+            if (!SetProperty(ref _replayState, value)) return;
+            OnPropertyChanged(nameof(BufferStatus));
+            OnPropertyChanged(nameof(CanSaveReplay));
+            AppLogger.Info($"Replay state | Requested={_bufferEnabled} | Actual={value}");
+        }
+    }
+    public bool CanSaveReplay => BufferEnabled && ReplayState == "Active";
     private bool _bufferEnabled;
     private bool _isAdvanced;
     private string _captureMode;
@@ -239,29 +254,47 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     // Ініціалізація головної моделі та підсистем захоплення ...
     public async Task InitializeAsync()
     {
-        StartDisplayChangeMonitoring();
-        StartAudioDeviceMonitoring();
-        LoadAudioDevices();
-        StartAudioLevelMonitoring();
-        await RefreshTargetsAsync();
-
-        _previewPage = 0;
-        RefreshVisiblePreviews();
-        _initializing = false;
-        ApplyHotkeys();
-        ApplyHudMode();
         try
         {
+            StartDisplayChangeMonitoring();
+            StartAudioDeviceMonitoring();
+            await RefreshTargetsAsync();
+            _lifetimeCts.Token.ThrowIfCancellationRequested();
+
+            _previewPage = 0;
+            RefreshVisiblePreviews();
+            ApplyHotkeys();
+            ApplyHudMode();
             ApplyToSettings();
-            await _capture.ApplySettingsAsync(_settings, restartPipeline: true);
+            AppLogger.Info($"Startup capture initialization | ReplayBufferRequested={_bufferEnabled}");
+            _startupReplayCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+            CancellationToken startupToken = _startupReplayCts.Token;
+            await StartupReplayRecovery.RunAsync(async () =>
+            {
+                ReplayState = _bufferEnabled ? "Starting" : "Disabled";
+                LoadAudioDevices();
+                StartAudioLevelMonitoring();
+                ApplyToSettings();
+                await _capture.ApplySettingsAsync(_settings, restartPipeline: true);
+            }, () => _bufferEnabled, (attempt, ex) =>
+            {
+                ReplayState = "Retrying";
+                AppLogger.Error(nameof(MainViewModel), $"Replay startup attempt {attempt} failed: {ex}");
+            }, startupToken);
+            startupToken.ThrowIfCancellationRequested();
+            ReplayState = _bufferEnabled ? "Active" : "Disabled";
+            AppLogger.Info($"Startup capture initialization completed | ReplayBufferEnabled={_bufferEnabled} | Frames={_capture.CapturedFrames}");
             LogEvent(_bufferEnabled ? "Replay buffer started" : "Replay buffer disabled");
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             AppLogger.Error(nameof(MainViewModel), ex.ToString());
+            ReplayState = _bufferEnabled ? "Failed" : "Disabled";
             LogEvent("Capture initialization failed");
             _notifications.Show("Capture initialization failed");
         }
+        finally { _initializing = false; }
     }
     // ...Ініціалізація головної моделі та підсистем захоплення
 
@@ -278,7 +311,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             AppLogger.Info($"UI state | Action=BufferToggle changed | Buffer={value} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | CanEdit={CanEditSettings} | Frames={_capture.CapturedFrames}");
 
+            _startupReplayCts?.Cancel();
             OnPropertyChanged(nameof(BufferStatus));
+            OnPropertyChanged(nameof(CanSaveReplay));
             OnPropertyChanged(nameof(BufferToggleText));
             OnPropertyChanged(nameof(CanEditSettings));
             OnPropertyChanged(nameof(IsSettingsLocked));
@@ -297,7 +332,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _ = ApplyBufferStateImmediatelyAsync();
         }
     }
-    public string BufferStatus => BufferEnabled ? "Buffer Enabled" : "Buffer Disabled";
+    public string BufferStatus => BufferEnabled ? $"Buffer {ReplayState}" : "Buffer Disabled";
     public string BufferToggleText => BufferEnabled ? "Disable Buffer" : "Enable Buffer";
     public bool IsAdvanced { get => _isAdvanced; set { if (SetProperty(ref _isAdvanced, value)) LogEvent(value ? "Advanced settings" : "Basic settings"); } }
 
@@ -656,6 +691,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             ApplyToSettings();
             await _capture.ApplySettingsAsync(_settings, restartPipeline: bufferShouldRestart);
+            ReplayState = bufferShouldRestart ? "Active" : "Disabled";
             _settings.Save();
             AppLogger.Info(
                 $"Reload (Targets updated) | Applied | Target={_settings.CaptureTarget} | " +
@@ -671,6 +707,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             AppLogger.Error(nameof(MainViewModel), $"Target reload failed after display change: {ex}");
+            ReplayState = BufferEnabled ? "Failed" : "Disabled";
             TargetPreviewOpacity = 1.0;
             LogEvent("Reload failed", warning: true);
             _notifications.Show("Reload failed");
@@ -1334,6 +1371,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     // Збереження replay за командою користувача ...
     private async Task SaveRecordAsync()
     {
+        if (!CanSaveReplay)
+        {
+            _notifications.Show("Replay buffer is not ready");
+            return;
+        }
         AppLogger.Info($"UI state | Action=SaveReplay clicked | Buffer={BufferEnabled} | Recording={IsContinuousRecording} | CaptureRecording={_capture.IsContinuousRecording} | Mode={CaptureMode} | Frames={_capture.CapturedFrames}");
 
         try
@@ -1678,6 +1720,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
+            ReplayState = BufferEnabled ? "Starting" : "Disabled";
             ApplyToSettings();
             _settings.Save();
 
@@ -1702,7 +1745,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             LogEvent(
                 "Could not apply buffer state",
                 warning: true);
+            ReplayState = BufferEnabled ? "Failed" : "Disabled";
+            return;
         }
+        ReplayState = BufferEnabled ? "Active" : "Disabled";
     }
     // ...Негайне застосування стану replay buffer
 
@@ -1942,6 +1988,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     // Зупинка UI monitoring та звільнення ресурсів моделі ...
     public void Dispose()
     {
+        CancelStartup();
+        _startupReplayCts?.Dispose();
         if (_recordingTimer is not null)
         {
             _recordingTimer.Stop();
@@ -1968,5 +2016,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _systemVolumeAnimationCts?.Dispose();
         _microphoneVolumeAnimationCts?.Dispose();
     }
+    public void CancelStartup() => _lifetimeCts.Cancel();
     // ...Зупинка UI monitoring та звільнення ресурсів моделі
 }

@@ -67,7 +67,17 @@ public class AppSettings
             if (!File.Exists(_settingsPath))
                 return new AppSettings();
 
-            var json = File.ReadAllText(_settingsPath);
+            string json;
+            try
+            {
+                json = File.ReadAllText(_settingsPath);
+                using var validation = JsonDocument.Parse(json);
+            }
+            catch (JsonException) when (File.Exists(_settingsPath + ".bak"))
+            {
+                AppLogger.Info("Settings recovery | Loading last committed backup");
+                json = File.ReadAllText(_settingsPath + ".bak");
+            }
 
             var settings = JsonSerializer.Deserialize<AppSettings>(json)
                            ?? new AppSettings();
@@ -183,7 +193,7 @@ public class AppSettings
                     WriteIndented = true
                 });
 
-            File.WriteAllText(_settingsPath, json);
+            AtomicSettingsFile.Write(_settingsPath, json);
         }
         catch (Exception ex)
         {
